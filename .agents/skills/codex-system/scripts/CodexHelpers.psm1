@@ -50,7 +50,9 @@ function Get-CodexRepoRoot {
     # the repo's .gitignore'd logs/codex-responses/ instead of leaking to
     # wherever the caller happened to be cd'd into.
     param([Parameter(Mandatory=$true)][string]$ScriptRoot)
-    (Resolve-Path (Join-Path $ScriptRoot '..\..\..\..')).Path
+    # -LiteralPath: a repo under a directory with wildcard characters
+    # (e.g. C:\work\[client]\repo) must not be glob-interpreted.
+    (Resolve-Path -LiteralPath (Join-Path $ScriptRoot '..\..\..\..')).Path
 }
 
 function Invoke-CodexProcess {
@@ -80,6 +82,11 @@ function Invoke-CodexProcess {
     $effectiveStdin = if ($null -ne $StdinInput) { $StdinInput } else { '' }
     $savedEap = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
+    # $OutputEncoding must be set in THIS scope: assignments made in the
+    # calling function (Invoke-CodexExec etc.) are function-local and not
+    # visible here on Windows PowerShell 5.1, which would silently encode
+    # non-ASCII stdin (Japanese text) as '?' before it reaches codex.
+    $OutputEncoding = $script:Utf8NoBom
     try {
         $execOutput = $effectiveStdin | & $Codex @CodexArgs 2>&1
         $exitCode = $LASTEXITCODE
@@ -98,12 +105,12 @@ function Invoke-CodexProcess {
         exit 1
     }
 
-    if (-not ((Test-Path $OutputFile) -and (Get-Item $OutputFile).Length -gt 0)) {
+    if (-not ((Test-Path -LiteralPath $OutputFile) -and (Get-Item -LiteralPath $OutputFile).Length -gt 0)) {
         Write-Host "Codex exited successfully but produced no response. Run 'codex --version' and check 'codex login' status. Diagnostics: $CombinedFile" -ForegroundColor Red
         exit 1
     }
 
-    Get-Content $OutputFile -Encoding utf8 | ForEach-Object { Write-Host $_ }
+    Get-Content -LiteralPath $OutputFile -Encoding utf8 | ForEach-Object { Write-Host $_ }
     Write-Host ""
     Write-Host "Response saved to: $OutputFile" -ForegroundColor Gray
 

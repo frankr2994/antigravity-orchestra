@@ -7,6 +7,11 @@
 - 応答は日本語（`.agents/rules/language.md` 参照）
 - 設計・デバッグ・レビューのキーワードを検出したら `codex-system` スキルで Codex CLI に委譲する（`.agents/rules/delegation-triggers.md` 参照）
 - 役割境界を守る: Antigravity は実装・調査、Codex は分析・提案のみ（`.agents/rules/role-boundaries.md` 参照）
+- **委譲ルールは Antigravity（オーケストレーター）専用。** あなたが Codex としてこのファイルを読んでいる場合（`codex exec` で委譲されたセッション）は、再委譲せず、与えられた分析・レビュータスクに直接回答すること
+
+## Codex セッション向けの注意
+
+このリポジトリの `.codex/AGENTS.md` が Codex 向けの正式な指示。委譲された Codex セッションは `codex-system` スキルやスクリプトを実行してはならない（自己再帰になる）。
 
 ## ワークフロー（スラッシュコマンド）
 

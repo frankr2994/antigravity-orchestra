@@ -83,6 +83,19 @@ Describe 'ask_codex.ps1' {
         $r.ExitCode | Should -Be 1
     }
 
+    It 'preserves Japanese text through stdin under Windows PowerShell 5.1' -Skip:(-not (Get-Command powershell.exe -ErrorAction SilentlyContinue)) {
+        $logDir = Join-Path $TestDrive 'logs-ps51-ja'
+        $q = 'これは日本語のテスト質問です'
+        $argList = @('-NoProfile', '-NonInteractive', '-File', $script:ScriptPath,
+            '-Mode', 'analyze', '-Question', $q, '-CodexPath', $script:FixtureSuccess, '-LogDir', $logDir)
+        & powershell.exe @argList 2>&1 | Out-Null
+        $LASTEXITCODE | Should -Be 0
+        $file = Get-ChildItem $logDir -Filter 'analyze-*.md' | Select-Object -First 1
+        $content = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
+        $content | Should -Match ([regex]::Escape($q))
+        $content | Should -Not -Match ([regex]::Escape('??????'))
+    }
+
     It 'defaults LogDir and --cd to the repo root, not the caller''s working directory' {
         $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
         $defaultLogDir = Join-Path $repoRoot 'logs\codex-responses'

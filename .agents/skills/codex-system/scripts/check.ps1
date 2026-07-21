@@ -31,11 +31,32 @@ Write-Host "=== Antigravity Orchestra Doctor ===" -ForegroundColor Cyan
 Write-Host "Repo root: $repoRoot"
 Write-Host ""
 
-# 1. Codex CLI の存在
+# Native プローブ用ヘルパー。$ErrorActionPreference=Stop +
+# $PSNativeCommandUseErrorActionPreference 環境で非ゼロ exit が
+# 例外化して診断が途中終了しないよう、Continue で包んで実行する。
+function Invoke-Probe {
+    param([string]$Exe, [string[]]$ProbeArgs)
+    $savedEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = (& $Exe @ProbeArgs 2>&1 | Out-String).Trim()
+        [PSCustomObject]@{ ExitCode = $LASTEXITCODE; Output = $out }
+    } finally {
+        $ErrorActionPreference = $savedEap
+    }
+}
+
+# 1. Codex CLI の存在（--version が失敗する壊れたバイナリは FAIL）
 try {
     $codex = Resolve-CodexCli -Override $CodexPath
-    $version = (& $codex --version 2>&1 | Select-Object -First 1)
-    Write-Check 'OK' "Codex CLI: $codex ($version)"
+    $probe = Invoke-Probe -Exe $codex -ProbeArgs @('--version')
+    if ($probe.ExitCode -eq 0) {
+        Write-Check 'OK' "Codex CLI: $codex ($(($probe.Output -split "`n")[0]))"
+    } else {
+        Write-Check 'FAIL' "Codex CLI at $codex exists but '--version' failed (exit $($probe.ExitCode)): $($probe.Output)"
+        $failCount++
+        $codex = $null
+    }
 } catch {
     Write-Check 'FAIL' $_.Exception.Message
     $failCount++
@@ -44,11 +65,11 @@ try {
 
 # 2. Codex の認証状態（login status が非対応の CLI もあるため WARN 止まり）
 if ($codex) {
-    $loginOutput = (& $codex login status 2>&1 | Out-String).Trim()
-    if ($LASTEXITCODE -eq 0) {
-        Write-Check 'OK' "Codex auth: $loginOutput"
+    $auth = Invoke-Probe -Exe $codex -ProbeArgs @('login', 'status')
+    if ($auth.ExitCode -eq 0) {
+        Write-Check 'OK' "Codex auth: $($auth.Output)"
     } else {
-        Write-Check 'WARN' "Codex auth not confirmed (run 'codex login'): $loginOutput"
+        Write-Check 'WARN' "Codex auth not confirmed (run 'codex login'): $($auth.Output)"
         $warnCount++
     }
 }
@@ -56,8 +77,13 @@ if ($codex) {
 # 3. Antigravity CLI（agy）の存在（IDE のみの利用も許容するため WARN 止まり）
 $agy = Get-Command agy -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($agy) {
-    $agyVersion = (& $agy.Source --version 2>&1 | Select-Object -First 1)
-    Write-Check 'OK' "Antigravity CLI: $($agy.Source) (v$agyVersion)"
+    $agyProbe = Invoke-Probe -Exe $agy.Source -ProbeArgs @('--version')
+    if ($agyProbe.ExitCode -eq 0) {
+        Write-Check 'OK' "Antigravity CLI: $($agy.Source) (v$(($agyProbe.Output -split "`n")[0]))"
+    } else {
+        Write-Check 'WARN' "Antigravity CLI at $($agy.Source) exists but '--version' failed (exit $($agyProbe.ExitCode))"
+        $warnCount++
+    }
 } else {
     Write-Check 'WARN' "Antigravity CLI (agy) not found on PATH. Install from https://antigravity.google (or use the Antigravity IDE)."
     $warnCount++
