@@ -56,3 +56,7 @@ coverage.xml
 *.so
 *.dylib
 *.png
+
+# 作者の開発記録（ローカル専用 / Author dev records, local only)
+plans/
+docs/modernization-plan-*.md
