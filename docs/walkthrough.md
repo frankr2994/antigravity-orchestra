@@ -77,8 +77,11 @@ Synthesize research, requirements, and Codex feedback into an actionable checkli
 ### Phase 5: Documentation Update (Antigravity)
 Record architectural decisions in `docs/DESIGN.md` under `## 設計決定履歴`.
 
-### Phase 6: Implementation & Quality Assurance (Antigravity + Codex)
-Implement `examples/demo-todo/todo.py` and unit tests in `examples/demo-todo/test_todo.py`. Run tests and execute `review.ps1`.
+### Implementation (Antigravity, between Phase 5 and Phase 6)
+Implement `examples/demo-todo/todo.py` and unit tests in `examples/demo-todo/test_todo.py` according to the approved task list, then run the tests.
+
+### Phase 6: Quality Assurance (Delegated to Codex CLI)
+After implementation is complete, run `review.ps1` so Codex reviews the changes without implementation bias.
 
 ---
 
@@ -129,7 +132,8 @@ OK
 
 To copy this orchestration environment to your own repository:
 
-1. Copy `.agents/`, `.codex/`, `AGENTS.md`, and `docs/` (the `DESIGN.md` template) to your repository root.
+1. Copy `.agents/`, `.codex/`, and `AGENTS.md` to your repository root. Do **not** copy `docs/` wholesale — this repo's `docs/DESIGN.md` contains demo-todo-specific decisions that would seed your project with false constraints.
 2. Create the log directory the scripts write to: `mkdir logs\codex-responses` (the doctor treats it as required).
-3. Run `.\.agents\skills\codex-system\scripts\check.ps1` — it should report no FAIL.
-4. Start development using `/startproject` or `/plan` slash workflows in the interactive `agy` session.
+3. In the interactive `agy` session, run `/init` — it creates the missing `docs/DESIGN.md` skeleton and other files from templates.
+4. Run `.\.agents\skills\codex-system\scripts\check.ps1` — it should report no FAIL.
+5. Start development using `/startproject` or `/plan`.

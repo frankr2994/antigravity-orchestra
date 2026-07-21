@@ -77,8 +77,11 @@ Question: Review implementation plan for demo-todo CLI app
 ### Phase 5: ドキュメント更新（Antigravity）
 `docs/DESIGN.md` の `## 設計決定履歴` にアーキテクチャの決定事項を記録します。
 
-### Phase 6: 実装と品質保証（Antigravity + Codex）
-`examples/demo-todo/todo.py` およびテスト `examples/demo-todo/test_todo.py` を実装し、テスト実行後に `review.ps1` でレビューを通します。
+### 実装（Antigravity、Phase 5 と Phase 6 の間）
+承認済みタスクリストに従い `examples/demo-todo/todo.py` とテスト `examples/demo-todo/test_todo.py` を実装し、テストを実行します。
+
+### Phase 6: 品質保証（Codex CLI へ委譲）
+実装完了後に `review.ps1` を実行し、実装バイアスを排除した Codex レビューを通します。
 
 ---
 
@@ -129,7 +132,8 @@ OK
 
 本テンプレートの協調構成をご自身のプロジェクトに導入する手順：
 
-1. `.agents/`, `.codex/`, `AGENTS.md`, `docs/`（DESIGN.md 雛形）をプロジェクトルートにコピーします。
+1. `.agents/`, `.codex/`, `AGENTS.md` をプロジェクトルートにコピーします。`docs/` は**丸ごとコピーしないでください** — 本リポの `docs/DESIGN.md` には demo-todo 固有の設計決定が入っており、新プロジェクトに誤った制約を持ち込みます。
 2. スクリプトのログ出力先を作成します: `mkdir logs\codex-responses`（doctor が必須チェックします）。
-3. `.\.agents\skills\codex-system\scripts\check.ps1` を実行し、FAIL が無いことを確認します。
-4. 対話モードの `agy` セッションで `/startproject` または `/plan` ワークフローを開始します。
+3. 対話モードの `agy` セッションで `/init` を実行します — `docs/DESIGN.md` の雛形など不足ファイルがテンプレートから生成されます。
+4. `.\.agents\skills\codex-system\scripts\check.ps1` を実行し、FAIL が無いことを確認します。
+5. `/startproject` または `/plan` で開発を開始します。

@@ -58,5 +58,6 @@ coverage.xml
 *.png
 
 # 作者の開発記録（ローカル専用 / Author dev records, local only)
-plans/
-docs/modernization-plan-*.md
+# ルート直下のみ対象（テンプレート利用者の入れ子 plans/ を巻き込まない）
+/plans/
+/docs/modernization-plan-*.md
