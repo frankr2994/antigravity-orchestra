@@ -21,7 +21,7 @@ README は思想の説明に留まり、「動いている姿」がリポジト�
 
 **In scope**:
 - `docs/walkthrough.md` / `docs/walkthrough.ja.md`（create）
-- `README.md` / `README.en.md`（Step 4 の直後に walkthrough への 2 行リンク追記のみ。既存行の削除ゼロ）
+- `README.md`（英）/ `README.ja.md`（日）（Step 4 の直後に walkthrough への 2 行リンク追記のみ。既存行の削除ゼロ）
 
 **Out of scope**:
 - `.agents/` 配下・スクリプト・テスト
@@ -57,7 +57,7 @@ Plan 001 の実行時に生成された以下を集める:
 `walkthrough.ja.md` は翻訳（トランスクリプト抜粋は共通で可）。両 README の
 Step 4（動作確認）直後に「See the full cycle: docs/walkthrough.md」相当の 2 行を追記。
 
-**Verify**: `git diff README.md README.en.md` が追記のみ（既存行の削除ゼロ）。
+**Verify**: `git diff README.md README.ja.md` が追記のみ（既存行の削除ゼロ）。
 
 ## Done criteria
 

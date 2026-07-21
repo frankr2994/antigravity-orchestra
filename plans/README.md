@@ -1,5 +1,7 @@
 # Dogfooding Plans — Antigravity CLI Operator Handoff
 
+> **これはテンプレート作者のドッグフーディング開発記録です。** テンプレートを自分のプロジェクトにコピーした場合、この `plans/` ディレクトリは削除して構いません（テンプレートの動作には不要）。ハーネス検証の実例・雛形として残してあります。
+>
 > 作成: 2026-07-21（現代化改修コミット `1122091` 時点）
 > **Executor: Antigravity CLI（`agy`）— このハーネス自身のルールでドッグフーディングする。**
 
@@ -10,7 +12,7 @@
 ### 起動方法（ユーザー向けメモ）
 
 ```powershell
-cd C:\Users\sorab\Documents\Projects\apps\antigravity-orchestra
+cd <repo-root>
 agy
 ```
 
