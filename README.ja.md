@@ -197,8 +197,6 @@ my-project/
 │   ├── research/             # リサーチ結果
 │   └── libraries/            # ライブラリ制約
 │
-├── plans/                # 作者のドッグフーディング開発記録（コピー先では削除可）
-│
 └── logs/
     └── codex-responses/      # Codex 相談ログ
 ```

@@ -199,8 +199,6 @@ my-project/
 │   ├── research/             # Research results
 │   └── libraries/            # Library constraints
 │
-├── plans/                # Author's dogfooding dev records (safe to delete in your copy)
-│
 └── logs/
     └── codex-responses/      # Codex consultation logs
 ```
