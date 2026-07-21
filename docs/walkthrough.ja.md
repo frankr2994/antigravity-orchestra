@@ -1,6 +1,6 @@
-# ウォークスルー: `/startproject` フルサイクル実行ログ
+# ウォークスルー: `/startproject` フルサイクル — 実行サマリ + Codex 実トランスクリプト抜粋
 
-このドキュメントは、**Antigravity Orchestra** の `/startproject` ワークフローを Antigravity CLI (`agy`) と OpenAI Codex CLI (`codex`) の実際のやり取りログ（トランスクリプト抜粋）とともに順を追って解説するガイドです。
+このドキュメントは、**Antigravity Orchestra** の `/startproject` ワークフローの実際の 1 回の実行を順を追って解説するガイドです。Antigravity 側の各フェーズは散文サマリで、コードブロックは実採取した出力の抜粋（check.ps1 診断・Codex 設計レビュー・Codex 最終レビュー。環境固有パスはサニタイズ済み）です。
 
 ---
 
@@ -129,6 +129,7 @@ OK
 
 本テンプレートの協調構成をご自身のプロジェクトに導入する手順：
 
-1. `.agents/`, `.codex/`, `AGENTS.md` をプロジェクトルートにコピーします。
-2. `.\.agents\skills\codex-system\scripts\check.ps1` を実行して初期診断を行います。
-3. エージェントへの指示で `/startproject` または `/plan` ワークフローを開始します。
+1. `.agents/`, `.codex/`, `AGENTS.md`, `docs/`（DESIGN.md 雛形）をプロジェクトルートにコピーします。
+2. スクリプトのログ出力先を作成します: `mkdir logs\codex-responses`（doctor が必須チェックします）。
+3. `.\.agents\skills\codex-system\scripts\check.ps1` を実行し、FAIL が無いことを確認します。
+4. 対話モードの `agy` セッションで `/startproject` または `/plan` ワークフローを開始します。

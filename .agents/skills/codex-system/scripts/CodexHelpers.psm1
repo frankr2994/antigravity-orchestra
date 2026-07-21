@@ -37,7 +37,7 @@ function Resolve-CodexCli {
     # while still matching native binaries and npm's .cmd shim on Windows.
     $cmd = Get-Command codex -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $cmd) {
-        throw "Codex CLI not found on PATH. Install it (see README: native installer or 'npm install -g @openai/codex'), run 'codex login', then verify with 'codex --version'."
+        throw "Codex CLI not found on PATH. Install it with the official installer (irm https://chatgpt.com/codex/install.ps1 | iex — see README), run 'codex login', then verify with 'codex --version'."
     }
     return $cmd.Source
 }

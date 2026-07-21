@@ -1,6 +1,6 @@
-# Walkthrough: `/startproject` Full Cycle Execution Log
+# Walkthrough: `/startproject` Full Cycle — Execution Summary with Real Codex Transcripts
 
-This document provides a step-by-step walkthrough of running the `/startproject` workflow in **Antigravity Orchestra**, incorporating real transcripts from Antigravity CLI (`agy`) and OpenAI Codex CLI (`codex`).
+This document walks through one real run of the `/startproject` workflow in **Antigravity Orchestra**. The Antigravity-side phases are summarized in prose; the code blocks are excerpts from actually captured output (`check.ps1` doctor, Codex design review, Codex final review) with machine-specific paths sanitized.
 
 ---
 
@@ -129,6 +129,7 @@ OK
 
 To copy this orchestration environment to your own repository:
 
-1. Copy `.agents/`, `.codex/`, and `AGENTS.md` to your repository root.
-2. Run `.\.agents\skills\codex-system\scripts\check.ps1` to verify setup.
-3. Start development using `/startproject` or `/plan` slash workflows in your agent prompt.
+1. Copy `.agents/`, `.codex/`, `AGENTS.md`, and `docs/` (the `DESIGN.md` template) to your repository root.
+2. Create the log directory the scripts write to: `mkdir logs\codex-responses` (the doctor treats it as required).
+3. Run `.\.agents\skills\codex-system\scripts\check.ps1` — it should report no FAIL.
+4. Start development using `/startproject` or `/plan` slash workflows in the interactive `agy` session.

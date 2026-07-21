@@ -60,7 +60,7 @@ PowerShell で診断スクリプトを実行：
 .\.agents\skills\codex-system\scripts\check.ps1
 ```
 
-Codex CLI / 認証状態 / agy CLI / テンプレートレイアウト / .gitignore を OK / WARN / FAIL で検査する。FAIL があれば表示された修正案内に従う（例: Codex CLI 未導入なら `npm install -g @openai/codex` → `codex login`）。
+Codex CLI / 認証状態 / agy CLI / テンプレートレイアウト / .gitignore を OK / WARN / FAIL で検査する。FAIL があれば表示された修正案内に従う（例: Codex CLI 未導入なら公式インストーラー `powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"` → `codex login`）。
 
 パス設定は不要（スクリプトが PATH から自動解決する）。
 
