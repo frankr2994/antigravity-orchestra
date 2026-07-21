@@ -138,6 +138,10 @@ Antigravity will automatically:
 4. Create a task list
 5. Document decisions in `docs/DESIGN.md`
 
+> 💡 **See a real execution walkthrough**:
+> Check out [docs/walkthrough.md](docs/walkthrough.md) for actual transcript excerpts and Codex reviews.
+
+
 ---
 
 ## 📁 Directory Structure

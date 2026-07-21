@@ -38,7 +38,8 @@ agy
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
 | 001  | サンプル機能で /startproject フルサイクルを回す | P1 | M | — | DONE |
-| 002  | 実トランスクリプト付き walkthrough を書く | P2 | S | 001 | TODO |
+| 002  | 実トランスクリプト付き walkthrough を書く | P2 | S | 001 | DONE |
+
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (理由1行) | REJECTED (理由1行)
 
