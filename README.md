@@ -138,6 +138,10 @@ Antigravity が以下を自動的に実行すれば成功です：
 4. タスクリストを作成
 5. 設計決定を `docs/DESIGN.md` に記録
 
+> 💡 **実際の動作ログ（ウォークスルー）**:
+> 実際のやり取りログと Codex の評価結果については [docs/walkthrough.ja.md](docs/walkthrough.ja.md) を参照してください。
+
+
 ---
 
 ## 📁 ディレクトリ構成
