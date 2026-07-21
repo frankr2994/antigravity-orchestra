@@ -19,8 +19,10 @@ class TaskManager:
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return []
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Database file is corrupted: {self.file_path}") from e
+        except OSError as e:
+            raise RuntimeError(f"Could not read database file: {self.file_path}") from e
 
     def _save(self) -> None:
         self.file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +59,7 @@ class TaskManager:
                 return True
         return False  # Not found
 
-def main(args: Optional[List[str]] = None) -> int:
+def main(args: Optional[List[str]] = None, db_path: Optional[Path] = None) -> int:
     parser = argparse.ArgumentParser(description="Simple CLI TODO List Manager")
     subparsers = parser.add_subparsers(dest="command", help="Available subcommands")
 
@@ -74,7 +76,12 @@ def main(args: Optional[List[str]] = None) -> int:
 
     parsed_args = parser.parse_args(args)
 
-    manager = TaskManager()
+    db_file = db_path if db_path is not None else DEFAULT_DB_FILE
+    try:
+        manager = TaskManager(file_path=db_file)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     if parsed_args.command == "add":
         try:
