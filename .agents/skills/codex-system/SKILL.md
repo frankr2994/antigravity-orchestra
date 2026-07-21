@@ -38,7 +38,14 @@ description: Use this skill when design decisions, debugging, or code review is 
 ### レビュー
 
 ```powershell
-.\scripts\review.ps1
+.\scripts\review.ps1              # staged + unstaged + untracked の変更をレビュー
+.\scripts\review.ps1 -BaseRef main  # main ブランチとの差分をレビュー
+```
+
+### 環境診断
+
+```powershell
+.\scripts\check.ps1
 ```
 
 ## 言語プロトコル

@@ -24,28 +24,20 @@
 
 ## 環境構成
 
-### Windows + WSL2
+### Windows ネイティブ
 
 ```
 Windows (PowerShell)
     │
-    ├── Google Antigravity (エディタ)
+    ├── Antigravity CLI (agy) ← 標準インターフェース（IDE でも可）
     │
-    └── WSL2 (Ubuntu)
-            │
-            ├── Node.js (nvm で管理)
-            ├── Codex CLI
-            └── 開発ツール
+    └── Codex CLI (Windows ネイティブ、PATH 経由で解決)
 ```
 
 ### パス設定
 
-Codex CLI を呼び出すスクリプトでは、WSL 内のパスを使用：
-
-```powershell
-# Windows パス → WSL パス
-# C:\Users\xxx\project → /mnt/c/Users/xxx/project
-```
+Codex CLI は Windows ネイティブで動作するため、パス変換は不要。
+`codex --version` が通れば追加設定なしでスクリプトが動作する。
 
 ## 環境変数
 
@@ -83,6 +75,5 @@ pnpm add -D dev-package-name
 
 ## 注意事項
 
-- WSL2 と Windows でファイル権限が異なる場合がある
 - パス区切り文字に注意（`\` vs `/`）
 - 改行コードの違いに注意（CRLF vs LF）

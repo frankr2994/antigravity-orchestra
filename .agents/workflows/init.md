@@ -14,7 +14,7 @@ description: 新規プロジェクトにOrchestra環境をセットアップす�
 以下のディレクトリが存在するか確認：
 
 ```
-.agent/
+.agents/
 ├── workflows/
 ├── skills/
 │   ├── codex-system/scripts/
@@ -42,9 +42,9 @@ logs/
 
 以下のファイルが存在するか確認：
 
-- `.agent/workflows/*.md` (6ファイル)
-- `.agent/skills/*/SKILL.md` (5スキル)
-- `.agent/rules/*.md` (8ファイル)
+- `.agents/workflows/*.md` (6ファイル)
+- `.agents/skills/*/SKILL.md` (5スキル)
+- `.agents/rules/*.md` (8ファイル)
 - `.codex/AGENTS.md`
 - `docs/DESIGN.md`
 
@@ -52,20 +52,17 @@ logs/
 
 存在しないファイルをテンプレートから作成。
 
-## Step 5: パス設定の確認
+## Step 5: 環境診断（doctor）
 
-`scripts/ask_codex.ps1` 内のパスが正しく設定されているか確認。
+PowerShell で診断スクリプトを実行：
 
-ユーザーに以下を確認：
-
+```powershell
+.\.agents\skills\codex-system\scripts\check.ps1
 ```
-WSL で以下のコマンドを実行し、パスを確認してください：
 
-which node
-which codex
+Codex CLI / 認証状態 / agy CLI / テンプレートレイアウト / .gitignore を OK / WARN / FAIL で検査する。FAIL があれば表示された修正案内に従う（例: Codex CLI 未導入なら `npm install -g @openai/codex` → `codex login`）。
 
-表示されたパスを scripts/ask_codex.ps1 に設定してください。
-```
+パス設定は不要（スクリプトが PATH から自動解決する）。
 
 ## Step 6: 完了報告
 
@@ -75,6 +72,6 @@ which codex
 Orchestra環境のセットアップが完了しました。
 
 次のステップ：
-1. scripts/ask_codex.ps1 のパスを設定
+1. check.ps1 が FAIL を出した場合は修正して再実行
 2. /startproject で最初のプロジェクトを開始
 ```
