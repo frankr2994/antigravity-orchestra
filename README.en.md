@@ -64,7 +64,7 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 | Requirement | How to Check | Notes |
 |-------------|--------------|-------|
 | Antigravity CLI (`agy`) | `agy --version` in PowerShell | [Official Site](https://antigravity.google) (IDE also works) |
-| Codex CLI | `codex --version` in PowerShell | Official installer or `npm i -g @openai/codex` (requires Node.js) |
+| Codex CLI | `codex --version` in PowerShell | [Official installer](https://learn.chatgpt.com/docs/codex/cli) (below). npm route (`npm i -g @openai/codex`, requires Node.js) also works |
 | Codex auth | Sign in with `codex login` | A supported ChatGPT plan or API key |
 
 ---
@@ -97,7 +97,13 @@ codex --version   # should print a version string
 That's it — no path configuration needed. The scripts resolve `codex` from PATH automatically,
 and the model is inherited from `~/.codex/config.toml`.
 
-If it's not installed yet, run `npm i -g @openai/codex` and authenticate with `codex login`.
+If it's not installed yet, use the [official installer](https://learn.chatgpt.com/docs/codex/cli) and authenticate with `codex login`:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+(`npm i -g @openai/codex` also works if you have Node.js.)
 
 To diagnose the whole environment at once, run the doctor script:
 
@@ -426,7 +432,7 @@ Plus ($20/month) is sufficient. Consider Pro ($200/month) if you need higher usa
 | Issue | Solution |
 |-------|----------|
 | Codex skill not triggered | Explicitly say "Ask Codex about this" or use keywords (design, debug, review) |
-| Codex CLI not found error | Run `codex --version` in PowerShell. If missing, `npm i -g @openai/codex` |
+| Codex CLI not found error | Run `codex --version` in PowerShell. If missing, use the [official installer](https://learn.chatgpt.com/docs/codex/cli) |
 | Codex returns empty response | Check auth status with `codex login` |
 | Role boundary violated | Explicitly say "Delegate TDD to Codex" |
 

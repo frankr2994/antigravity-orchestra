@@ -64,7 +64,7 @@
 | 必要なもの | 確認方法 | 備考 |
 |-----------|----------|------|
 | Antigravity CLI (`agy`) | PowerShell で `agy --version` | [公式サイト](https://antigravity.google)（IDE でも可） |
-| Codex CLI | PowerShell で `codex --version` | 公式インストーラーまたは `npm i -g @openai/codex`（要 Node.js） |
+| Codex CLI | PowerShell で `codex --version` | [公式インストーラー](https://learn.chatgpt.com/docs/codex/cli)（下記）。npm 経路（`npm i -g @openai/codex`、要 Node.js）も可 |
 | Codex の認証 | `codex login` でサインイン | 対応する ChatGPT プランまたは API キー |
 
 ---
@@ -97,7 +97,13 @@ codex --version   # バージョンが表示されれば OK
 これだけです。スクリプトが PATH から `codex` を自動解決するため、パス設定は不要です。
 モデルも `~/.codex/config.toml` の設定を自動的に継承します。
 
-未インストールの場合は `npm i -g @openai/codex` でインストールし、`codex login` で認証してください。
+未インストールの場合は[公式インストーラー](https://learn.chatgpt.com/docs/codex/cli)でインストールし、`codex login` で認証してください：
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+```
+
+（Node.js 環境があれば `npm i -g @openai/codex` でも可）
 
 環境全体をまとめて診断するには doctor スクリプトが使えます：
 
@@ -426,7 +432,7 @@ Plus（$20/月）で十分使えます。Pro（$200/月）はより多くの使�
 | 問題 | 解決策 |
 |------|--------|
 | Codex スキルが起動しない | 明示的に「Codex に相談して」と依頼、またはキーワード（設計、デバッグ、レビュー）を使用 |
-| Codex CLI が見つからないエラー | PowerShell で `codex --version` を確認。未導入なら `npm i -g @openai/codex` |
+| Codex CLI が見つからないエラー | PowerShell で `codex --version` を確認。未導入なら[公式インストーラー](https://learn.chatgpt.com/docs/codex/cli)を実行 |
 | Codex の応答が空 | `codex login` で認証状態を確認 |
 | 役割境界が守られない | 明示的に「TDDはCodexに委譲して」と指示 |
 
