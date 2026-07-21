@@ -24,3 +24,7 @@ jobs:
           $cfg.Output.Verbosity = "Detailed"
           $r = Invoke-Pester -Configuration $cfg
           if ($r.FailedCount -gt 0) { exit 1 }
+
+      - name: Run example tests (Python)
+        shell: pwsh
+        run: python -m unittest discover -s examples/demo-todo -v
