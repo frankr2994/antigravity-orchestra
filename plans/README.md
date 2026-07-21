@@ -37,11 +37,13 @@ agy
 
 | Plan | Title | Priority | Effort | Depends on | Status |
 |------|-------|----------|--------|------------|--------|
-| 001  | サンプル機能で /startproject フルサイクルを回す | P1 | M | — | TODO |
+| 001  | サンプル機能で /startproject フルサイクルを回す | P1 | M | — | DONE |
 | 002  | 実トランスクリプト付き walkthrough を書く | P2 | S | 001 | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (理由1行) | REJECTED (理由1行)
 
 ## Findings log（ドッグフーディングで見つけた問題をここに追記）
 
-- （なし）
+- `ask_codex.ps1` / `review.ps1` の実行ログにおいて、画面表示される出力ファイルパス（PID・タイムスタンプ表記）が実際のファイル名と一部乖離する場合がある。ただし、Codex の標準出力およびレビュー内容自体は正常に捕捉される。
+- Codex CLI への問い合わせ処理（`ask_codex.ps1`）は完了まで約15〜30秒を要するため、非同期タスク待ち（`schedule` タイマー条件付与）を利用したフローが極めて安定する。
+
