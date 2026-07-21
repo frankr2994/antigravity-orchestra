@@ -48,7 +48,8 @@ Antigravity Orchestra ワークスペースにおけるマルチエージェン�
 ## 制約事項
 
 - `examples/demo-todo/` 以外のリポジトリコアコードや `.agents/` ルールを変更してはならない。
-- テストは標準ライブラリ `python -m unittest discover` で完全実行可能であること。
+- テストは標準ライブラリ `python -m unittest discover -s examples/demo-todo` で完全実行可能であること。
+
 
 ## 参考資料
 

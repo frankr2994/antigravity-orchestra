@@ -63,9 +63,14 @@ class TestCLI(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_cli_add_and_list(self):
-        # We can pass custom sys.argv args to main if needed, but here we test main logic
-        self.assertEqual(main(["add", "Test CLI"]), 0)
-        self.assertEqual(main(["list"]), 0)
+        self.assertEqual(main(["add", "Test CLI"], db_path=self.db_path), 0)
+        self.assertEqual(main(["list"], db_path=self.db_path), 0)
+
+    def test_cli_corrupted_json(self):
+        with open(self.db_path, "w", encoding="utf-8") as f:
+            f.write("{invalid json")
+        self.assertEqual(main(["list"], db_path=self.db_path), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
