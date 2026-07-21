@@ -12,10 +12,11 @@ Codex CLI は以下の役割を担当：
 
 ## 実行モード
 
-常に `--sandbox read-only` で実行：
+常に `--sandbox read-only` で実行。モデルは `~/.codex/config.toml` の設定を継承する
+（固定したい場合のみ `--model` を付ける）。プロンプトは stdin 経由で渡す：
 
 ```bash
-codex exec --model gpt-5.2-codex --sandbox read-only --full-auto "..."
+echo "..." | codex exec --sandbox read-only --skip-git-repo-check --color never -
 ```
 
 ## 入力フォーマット

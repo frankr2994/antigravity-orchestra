@@ -1,14 +1,14 @@
 # 🎼 Antigravity Orchestra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20WSL2-blue.svg)](#prerequisites)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#prerequisites)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Sora-bluesky/antigravity-orchestra/issues)
 
 **🌐 Language: [日本語](README.md) | English**
 
 ---
 
-**Antigravity Orchestra** is a multi-agent development template that orchestrates [Google Antigravity](https://antigravity.google) (Gemini 3 Pro) and [OpenAI Codex CLI](https://github.com/openai/codex) for AI-powered development workflows.
+**Antigravity Orchestra** is a multi-agent development template that orchestrates [Google Antigravity](https://antigravity.google) (Gemini) and [OpenAI Codex CLI](https://github.com/openai/codex) for AI-powered development workflows.
 
 Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-code-orchestra) by @mkj (Matsuo Institute).
 
@@ -23,7 +23,7 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 │                          ▼                                  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │    Google Antigravity (Orchestrator + Researcher)     │  │
-│  │    → Gemini 3 Pro / 1M token context                  │  │
+│  │    → Gemini / large context window                   │  │
 │  │    → User interaction, research, implementation       │  │
 │  │                                                       │  │
 │  │        ┌─────────────────────────────────────────┐    │  │
@@ -34,7 +34,7 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**Single interface - Antigravity only.** Users interact only with Antigravity, which delegates to Codex when needed.
+**Single interface - Antigravity only.** Users interact only with the Antigravity CLI (`agy`), which delegates to Codex when needed. The same configuration also works in the Antigravity IDE.
 
 ---
 
@@ -51,7 +51,7 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 | Role | Agent | Tasks |
 |------|-------|-------|
 | **Orchestrator** | Antigravity | User interaction, task management, workflow control |
-| **Researcher** | Antigravity | Library research, documentation search (1M token context) |
+| **Researcher** | Antigravity | Library research, documentation search (large context window) |
 | **Builder** | Antigravity | Code implementation based on Codex's design |
 | **Designer** | Codex CLI | Architecture design, implementation planning, trade-off analysis |
 | **Debugger** | Codex CLI | Root cause analysis, complex bug investigation |
@@ -63,11 +63,9 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 
 | Requirement | How to Check | Notes |
 |-------------|--------------|-------|
-| Google Antigravity | Can launch Antigravity | [Official Site](https://antigravity.google) |
-| WSL2 (Ubuntu) | `wsl --version` in PowerShell | [Install Guide](https://zenn.dev/sora_biz/articles/wsl2-windows-install-guide) |
-| Node.js (in WSL2) | `node --version` in WSL | [nodejs.org](https://nodejs.org) |
-| Codex CLI (in WSL2) | `codex --version` in WSL | `npm i -g @openai/codex` |
-| ChatGPT Plus/Pro | OpenAI subscription | $20/month~ (OAuth sign-in) |
+| Antigravity CLI (`agy`) | `agy --version` in PowerShell | [Official Site](https://antigravity.google) (IDE also works) |
+| Codex CLI | `codex --version` in PowerShell | Official installer or `npm i -g @openai/codex` (requires Node.js) |
+| Codex auth | Sign in with `codex login` | A supported ChatGPT plan or API key |
 
 ---
 
@@ -75,11 +73,11 @@ Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-co
 
 ### Step 1: Clone the Template
 
-Open WSL2 (Ubuntu) terminal:
+Run in PowerShell:
 
-```bash
+```powershell
 # Navigate to your projects folder
-cd /mnt/c/Users/YOUR_USERNAME/Documents/Projects
+cd C:\Users\YOUR_USERNAME\Documents\Projects
 
 # Clone the template
 git clone https://github.com/Sora-bluesky/antigravity-orchestra.git my-project
@@ -88,34 +86,45 @@ git clone https://github.com/Sora-bluesky/antigravity-orchestra.git my-project
 cd my-project
 ```
 
-### Step 2: Configure Paths
+### Step 2: Check Codex CLI
 
-Check your Node.js and Codex paths in WSL2:
-
-```bash
-which node    # e.g., /home/YOUR_USERNAME/.nvm/versions/node/v22.x.x/bin/node
-which codex   # e.g., /home/YOUR_USERNAME/.nvm/versions/node/v22.x.x/bin/codex
-```
-
-Edit `.agent/skills/codex-system/scripts/ask_codex.ps1` and update:
+Confirm Codex CLI works in PowerShell:
 
 ```powershell
-$NODE_PATH = "/home/YOUR_USERNAME/.nvm/versions/node/v22.x.x/bin/node"
-$CODEX_PATH = "/home/YOUR_USERNAME/.nvm/versions/node/v22.x.x/bin/codex"
+codex --version   # should print a version string
 ```
 
-Also update `review.ps1` with the same paths.
+That's it — no path configuration needed. The scripts resolve `codex` from PATH automatically,
+and the model is inherited from `~/.codex/config.toml`.
 
-### Step 3: Open in Antigravity
+If it's not installed yet, run `npm i -g @openai/codex` and authenticate with `codex login`.
 
-1. Launch **Antigravity** from Start menu or taskbar
-2. Click **File → Open Folder** (or `Ctrl+K, Ctrl+O`)
-3. Navigate to: `C:\Users\YOUR_USERNAME\Documents\Projects\my-project`
-4. Click **Select Folder**
+To diagnose the whole environment at once, run the doctor script:
+
+```powershell
+.\.agents\skills\codex-system\scripts\check.ps1
+```
+
+### Step 3: Open the Project with Antigravity CLI
+
+Launch `agy` in the project folder:
+
+```powershell
+cd C:\Users\YOUR_USERNAME\Documents\Projects\my-project
+agy
+```
+
+One-shot (headless) runs also work:
+
+```powershell
+agy -p "/plan login feature"
+```
+
+> **Prefer the IDE?** Opening this folder via **File → Open Folder** in the Antigravity IDE loads the same `.agents/` configuration.
 
 ### Step 4: Try It!
 
-In Antigravity's chat, type:
+In agy's chat, type:
 
 ```
 /startproject Hello World
@@ -135,7 +144,7 @@ Antigravity will automatically:
 
 ```
 my-project/
-├── .agent/
+├── .agents/
 │   ├── workflows/        # 6 workflows
 │   │   ├── startproject.md   # Main workflow (6 phases)
 │   │   ├── plan.md           # Implementation planning
@@ -148,8 +157,10 @@ my-project/
 │   │   ├── codex-system/     # Codex CLI integration
 │   │   │   ├── SKILL.md
 │   │   │   └── scripts/
-│   │   │       ├── ask_codex.ps1
-│   │   │       └── review.ps1
+│   │   │       ├── ask_codex.ps1     # Consultation (analyze/design/debug/review)
+│   │   │       ├── review.ps1        # Change review (codex exec review)
+│   │   │       ├── check.ps1         # Environment doctor
+│   │   │       └── CodexHelpers.psm1 # Shared helpers
 │   │   ├── design-tracker/
 │   │   ├── research/
 │   │   ├── update-design/
@@ -379,22 +390,21 @@ Yes, but you'll lose the design review and debugging capabilities. Antigravity w
 <details>
 <summary><strong>Q: Why is Codex called via PowerShell scripts?</strong></summary>
 
-Antigravity runs on Windows, but Codex CLI works best in WSL2 (Linux). The PowerShell scripts bridge this gap by calling WSL commands.
+The scripts centralize prompt assembly, log saving, and error handling in one place. They resolve `codex` from PATH automatically and save results to `logs/codex-responses/`.
 
 </details>
 
 <details>
 <summary><strong>Q: How do I update the paths if I reinstall Node.js?</strong></summary>
 
-1. Run `which node` and `which codex` in WSL2
-2. Update the paths in `ask_codex.ps1` and `review.ps1`
+Nothing to do. The scripts resolve `codex` from PATH on every run, so as long as `codex --version` works, reinstalling changes nothing.
 
 </details>
 
 <details>
 <summary><strong>Q: Can I customize the workflows?</strong></summary>
 
-Yes! Edit the files in `.agent/workflows/`. Each workflow is a Markdown file with frontmatter (name, description) and step-by-step instructions.
+Yes! Edit the files in `.agents/workflows/`. Each workflow is a Markdown file with frontmatter (name, description) and step-by-step instructions.
 
 </details>
 
@@ -412,15 +422,15 @@ Plus ($20/month) is sufficient. Consider Pro ($200/month) if you need higher usa
 | Issue | Solution |
 |-------|----------|
 | Codex skill not triggered | Explicitly say "Ask Codex about this" or use keywords (design, debug, review) |
-| Path not found error | Re-check `which node` and `which codex` in WSL2, update scripts |
-| WSL not starting | Run `wsl --status` in PowerShell |
+| Codex CLI not found error | Run `codex --version` in PowerShell. If missing, `npm i -g @openai/codex` |
+| Codex returns empty response | Check auth status with `codex login` |
 | Role boundary violated | Explicitly say "Delegate TDD to Codex" |
 
 ---
 
 ## ⚠️ Important Notes
 
-- **Google Antigravity is in public preview.** Features and behavior may change.
+- **Google Antigravity is under active development.** Features and behavior may change.
 - **Codex CLI requires a ChatGPT subscription.** Sign in via OAuth authentication.
 - Check the [official site](https://antigravity.google) for the latest information.
 
@@ -449,7 +459,6 @@ For bug reports or suggestions, please [open an issue](https://github.com/Sora-b
 ### Related Articles (Japanese)
 
 - [Antigravity Install Guide](https://zenn.dev/sora_biz/articles/antigravity-windows-install-guide)
-- [WSL2 Install Guide](https://zenn.dev/sora_biz/articles/wsl2-windows-install-guide)
 - [Detailed Usage Guide (Zenn)](https://zenn.dev/sora_biz/articles/antigravity-orchestra-guide)
 
 ---
@@ -466,4 +475,4 @@ This project is inspired by **Claude Code Orchestra** by [@mkj](https://zenn.dev
 
 ---
 
-📅 **Last Updated**: February 2, 2026
+📅 **Last Updated**: July 21, 2026

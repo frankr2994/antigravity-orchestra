@@ -1,14 +1,14 @@
 # 🎼 Antigravity Orchestra
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20WSL2-blue.svg)](#前提条件)
+[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#前提条件)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Sora-bluesky/antigravity-orchestra/issues)
 
 **🌐 Language: 日本語 | [English](README.en.md)**
 
 ---
 
-**Antigravity Orchestra** は、[Google Antigravity](https://antigravity.google)（Gemini 3 Pro）と [OpenAI Codex CLI](https://github.com/openai/codex) を協調させるマルチエージェント開発テンプレートです。
+**Antigravity Orchestra** は、[Google Antigravity](https://antigravity.google)（Gemini）と [OpenAI Codex CLI](https://github.com/openai/codex) を協調させるマルチエージェント開発テンプレートです。
 
 [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-code-orchestra)（@mkj / 松尾研究所）にインスパイアされています。
 
@@ -23,7 +23,7 @@
 │                         ▼                                  │
 │  ┌───────────────────────────────────────────────────────┐  │
 │  │    Google Antigravity (Orchestrator + Researcher)     │  │
-│  │    → Gemini 3 Pro / 1Mトークンコンテキスト            │  │
+│  │    → Gemini / 大容量コンテキスト                      │  │
 │  │    → ユーザー対話・リサーチ・実装を担当               │  │
 │  │                                                       │  │
 │  │        ┌─────────────────────────────────────────┐    │  │
@@ -34,7 +34,7 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-**インターフェースは Antigravity だけ。** ユーザーは Antigravity とだけ対話し、必要に応じて Antigravity が Codex に相談します。
+**インターフェースは Antigravity だけ。** ユーザーは Antigravity CLI（`agy`）とだけ対話し、必要に応じて Antigravity が Codex に相談します。同じ設定で Antigravity IDE でも動作します。
 
 ---
 
@@ -51,7 +51,7 @@
 | 役割 | 担当 | タスク |
 |------|------|--------|
 | **Orchestrator** | Antigravity | ユーザー対話、タスク管理、ワークフロー制御 |
-| **Researcher** | Antigravity | ライブラリ調査、ドキュメント検索（1Mトークン活用） |
+| **Researcher** | Antigravity | ライブラリ調査、ドキュメント検索（大容量コンテキスト活用） |
 | **Builder** | Antigravity | Codex の設計に基づくコード実装、ファイル編集 |
 | **Designer** | Codex CLI | アーキテクチャ設計、実装計画、トレードオフ分析 |
 | **Debugger** | Codex CLI | 根本原因分析、複雑なバグ調査 |
@@ -63,11 +63,9 @@
 
 | 必要なもの | 確認方法 | 備考 |
 |-----------|----------|------|
-| Google Antigravity | Antigravity が起動できる | [公式サイト](https://antigravity.google) |
-| WSL2 (Ubuntu) | PowerShell で `wsl --version` | [インストールガイド](https://zenn.dev/sora_biz/articles/wsl2-windows-install-guide) |
-| Node.js (WSL2内) | WSL で `node --version` | [nodejs.org](https://nodejs.org) |
-| Codex CLI (WSL2内) | WSL で `codex --version` | `npm i -g @openai/codex` |
-| ChatGPT Plus/Pro | OpenAI サブスクリプション | $20/月〜（OAuth認証） |
+| Antigravity CLI (`agy`) | PowerShell で `agy --version` | [公式サイト](https://antigravity.google)（IDE でも可） |
+| Codex CLI | PowerShell で `codex --version` | 公式インストーラーまたは `npm i -g @openai/codex`（要 Node.js） |
+| Codex の認証 | `codex login` でサインイン | 対応する ChatGPT プランまたは API キー |
 
 ---
 
@@ -75,11 +73,11 @@
 
 ### Step 1: テンプレートの取得
 
-WSL2（Ubuntu）ターミナルで実行：
+PowerShell で実行：
 
-```bash
+```powershell
 # プロジェクトフォルダに移動
-cd /mnt/c/Users/あなたのユーザー名/Documents/Projects
+cd C:\Users\あなたのユーザー名\Documents\Projects
 
 # テンプレートをクローン
 git clone https://github.com/Sora-bluesky/antigravity-orchestra.git my-project
@@ -88,35 +86,45 @@ git clone https://github.com/Sora-bluesky/antigravity-orchestra.git my-project
 cd my-project
 ```
 
-### Step 2: パスの設定
+### Step 2: Codex CLI の確認
 
-WSL2 で Node.js と Codex のパスを確認：
-
-```bash
-which node    # 例: /home/ユーザー名/.nvm/versions/node/v22.x.x/bin/node
-which codex   # 例: /home/ユーザー名/.nvm/versions/node/v22.x.x/bin/codex
-```
-
-`.agent/skills/codex-system/scripts/ask_codex.ps1` を編集し、パスを更新：
+PowerShell で Codex CLI が使えることを確認：
 
 ```powershell
-$NODE_PATH = "/home/ユーザー名/.nvm/versions/node/v22.x.x/bin/node"
-$CODEX_PATH = "/home/ユーザー名/.nvm/versions/node/v22.x.x/bin/codex"
+codex --version   # バージョンが表示されれば OK
 ```
 
-`review.ps1` も同様に更新してください。
+これだけです。スクリプトが PATH から `codex` を自動解決するため、パス設定は不要です。
+モデルも `~/.codex/config.toml` の設定を自動的に継承します。
 
-### Step 3: Antigravity でプロジェクトを開く
+未インストールの場合は `npm i -g @openai/codex` でインストールし、`codex login` で認証してください。
 
-1. **Antigravity を起動**（スタートメニューまたはタスクバーから）
-2. **File → Open Folder** をクリック（または `Ctrl+K, Ctrl+O`）
-3. 以下のフォルダに移動：
-   - `C:\Users\あなたのユーザー名\Documents\Projects\my-project`
-4. **「フォルダーの選択」** をクリック
+環境全体をまとめて診断するには doctor スクリプトが使えます：
+
+```powershell
+.\.agents\skills\codex-system\scripts\check.ps1
+```
+
+### Step 3: Antigravity CLI でプロジェクトを開く
+
+プロジェクトフォルダで `agy` を起動：
+
+```powershell
+cd C:\Users\あなたのユーザー名\Documents\Projects\my-project
+agy
+```
+
+ワンショット実行（ヘッドレス）も可能：
+
+```powershell
+agy -p "/plan ログイン機能"
+```
+
+> **IDE 派の場合**: Antigravity IDE で **File → Open Folder** からこのフォルダを開いても同じ `.agents/` 設定が読み込まれます。
 
 ### Step 4: 動作確認
 
-Antigravity のチャットで入力：
+agy のチャットで入力：
 
 ```
 /startproject Hello World
@@ -136,7 +144,7 @@ Antigravity が以下を自動的に実行すれば成功です：
 
 ```
 my-project/
-├── .agent/
+├── .agents/
 │   ├── workflows/        # 6 ワークフロー
 │   │   ├── startproject.md   # メインワークフロー（6フェーズ）
 │   │   ├── plan.md           # 実装計画
@@ -149,8 +157,10 @@ my-project/
 │   │   ├── codex-system/     # Codex CLI 連携
 │   │   │   ├── SKILL.md
 │   │   │   └── scripts/
-│   │   │       ├── ask_codex.ps1
-│   │   │       └── review.ps1
+│   │   │       ├── ask_codex.ps1     # 相談（analyze/design/debug/review）
+│   │   │       ├── review.ps1        # 変更レビュー（codex exec review）
+│   │   │       ├── check.ps1         # 環境診断（doctor）
+│   │   │       └── CodexHelpers.psm1 # 共有ヘルパー
 │   │   ├── design-tracker/
 │   │   ├── research/
 │   │   ├── update-design/
@@ -380,22 +390,21 @@ Codex がテストケースを設計し、Antigravity が実装します。
 <details>
 <summary><strong>Q: なぜ PowerShell スクリプト経由で Codex を呼ぶのですか？</strong></summary>
 
-Antigravity は Windows で動作しますが、Codex CLI は WSL2（Linux）で最適に動作します。PowerShell スクリプトがこのギャップを埋め、WSL コマンドを呼び出します。
+プロンプトの組み立て・ログ保存・エラー処理を一箇所に集約するためです。スクリプトは PATH 上の `codex` を自動解決し、結果を `logs/codex-responses/` に保存します。
 
 </details>
 
 <details>
 <summary><strong>Q: Node.js を再インストールしたらパスはどうなりますか？</strong></summary>
 
-1. WSL2 で `which node` と `which codex` を実行
-2. `ask_codex.ps1` と `review.ps1` のパスを更新
+何もする必要はありません。スクリプトは実行のたびに PATH から `codex` を解決するため、再インストールしても `codex --version` が通れば動きます。
 
 </details>
 
 <details>
 <summary><strong>Q: ワークフローをカスタマイズできますか？</strong></summary>
 
-はい！`.agent/workflows/` 内のファイルを編集してください。各ワークフローは frontmatter（name, description）とステップバイステップの手順を含む Markdown ファイルです。
+はい！`.agents/workflows/` 内のファイルを編集してください。各ワークフローは frontmatter（name, description）とステップバイステップの手順を含む Markdown ファイルです。
 
 </details>
 
@@ -413,15 +422,15 @@ Plus（$20/月）で十分使えます。Pro（$200/月）はより多くの使�
 | 問題 | 解決策 |
 |------|--------|
 | Codex スキルが起動しない | 明示的に「Codex に相談して」と依頼、またはキーワード（設計、デバッグ、レビュー）を使用 |
-| パスが見つからないエラー | WSL2 で `which node` と `which codex` を再確認し、スクリプトを更新 |
-| WSL が起動しない | PowerShell で `wsl --status` を実行 |
+| Codex CLI が見つからないエラー | PowerShell で `codex --version` を確認。未導入なら `npm i -g @openai/codex` |
+| Codex の応答が空 | `codex login` で認証状態を確認 |
 | 役割境界が守られない | 明示的に「TDDはCodexに委譲して」と指示 |
 
 ---
 
 ## ⚠️ 注意事項
 
-- **Google Antigravity はパブリックプレビュー版です。** 機能や動作が変更される可能性があります。
+- **Google Antigravity は活発に開発中のプロダクトです。** 機能や動作が変更される可能性があります。
 - **Codex CLI は ChatGPT サブスクリプションが必要です。** OAuth 認証でサインインします。
 - 最新情報は[公式サイト](https://antigravity.google)を確認してください。
 
@@ -450,7 +459,6 @@ Plus（$20/月）で十分使えます。Pro（$200/月）はより多くの使�
 ### 関連記事
 
 - [Antigravity インストールガイド](https://zenn.dev/sora_biz/articles/antigravity-windows-install-guide)
-- [WSL2 インストールガイド](https://zenn.dev/sora_biz/articles/wsl2-windows-install-guide)
 - [詳しい使い方（Zenn記事）](https://zenn.dev/sora_biz/articles/antigravity-orchestra-guide)
 
 ---
@@ -467,4 +475,4 @@ MIT License - 詳細は [LICENSE](LICENSE) を参照してください。
 
 ---
 
-📅 **最終更新**: 2026年2月2日
+📅 **最終更新**: 2026年7月21日
