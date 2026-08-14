@@ -1,6 +1,7 @@
 import si from 'systeminformation';
 import { runProcess, commandAvailable } from './process.js';
 import { lmStudioHealth } from './agents.js';
+import { readAntigravityUsage, readCodexUsage } from './observability.js';
 
 let cachedStats: { at: number; value: unknown } | null = null;
 
@@ -39,10 +40,10 @@ export async function getHealth() {
   return { backend: { available: true, version: '1.0.0' }, antigravity: agy, codex, git, lmStudio, nvidia: { available: nvidia } };
 }
 
-export function getUsage() {
+export async function getUsage() {
   return {
-    antigravity: { available: false, reason: 'The installed CLI does not expose stable machine-readable usage data.', checkedAt: new Date().toISOString() },
-    codex: { available: false, reason: 'The installed CLI does not expose stable machine-readable usage data.', checkedAt: new Date().toISOString() },
+    antigravity: await readAntigravityUsage(),
+    codex: await readCodexUsage(),
   };
 }
 

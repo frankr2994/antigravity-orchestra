@@ -1,14 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, buildCodexReviewArgs, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, friendlyCodexError, interpretAntigravityOutput, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, interpretAntigravityOutput, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { getGitStatus, git } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { evaluateRunHealth, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
+import { extractAntigravityQuotas } from '../dist-server/observability.js';
+import { codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
 
 test('model policy escalates deep sensitive work to Pro and Sol', () => {
   const selection = selectModels({ type: 'debug', mutating: true, complexity: 'deep', riskFlags: ['security'], codexRole: 'debug', title: 'Debug auth' });
@@ -48,12 +51,36 @@ test('Codex JSONL decoding exposes friendly progress but not raw commands', () =
   assert.equal(decodeCodexProgressLine('{"type":"thread.started"}'), null);
 });
 
-test('Codex review uses generic read-only exec so stdin instructions remain valid', () => {
-  const args = buildCodexReviewArgs({ root: 'F:\\Wiring', model: 'gpt-5.6-sol', effort: 'high', overrideArgs: ['-c', 'mcp_servers.rider.enabled=false'] });
-  assert.deepEqual(args.slice(0, 6), ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '-C', 'F:\\Wiring']);
-  assert.equal(args.includes('review'), false);
-  assert.equal(args.includes('--uncommitted'), false);
-  assert.deepEqual(args.slice(-2), ['--json', '-']);
+test('Codex app-server telemetry captures authoritative context pressure', () => {
+  const telemetry = normalizeCodexTokenUsage({ threadId: 'thread-123', turnId: 'turn-1', tokenUsage: { modelContextWindow: 10_000, total: { inputTokens: 2400, cachedInputTokens: 1800, cacheWriteInputTokens: 0, outputTokens: 320, reasoningOutputTokens: 90, totalTokens: 2720 }, last: {} } });
+  assert.equal(telemetry?.context.usedPercent, 27.2);
+  assert.equal(telemetry?.context.remainingPercent, 72.8);
+  assert.equal(telemetry?.usage.cachedInputTokens, 1800);
+  assert.equal(telemetry?.threadId, 'thread-123');
+});
+
+test('Antigravity status collector persists useful telemetry and drops identity fields', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orchestra-statusline-'));
+  try {
+    const input = { conversation_id: 'conversation-123', email: 'private@example.invalid', workspace: { project_dir: 'F:\\Wiring' }, model: { id: 'gemini-test' }, context_window: { used_percentage: 72, remaining_percentage: 28, context_window_size: 1000 }, quota: { weekly: { remaining_fraction: 0.4, reset_time: '2026-08-14T00:00:00Z' } }, agent_state: 'working' };
+    const result = spawnSync(process.execPath, [join(process.cwd(), 'scripts', 'antigravity-statusline.mjs')], { input: JSON.stringify(input), encoding: 'utf8', env: { ...process.env, ORCHESTRA_DATA_DIR: root } });
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /context 72%/);
+    const snapshot = readFileSync(join(root, 'antigravity-status.json'), 'utf8');
+    assert.match(snapshot, /conversation-123|remaining_fraction/);
+    assert.doesNotMatch(snapshot, /private@example\.invalid|email/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex app-server notifications expose friendly progress but not raw commands', () => {
+  const message = codexProgressMessage('item/started', { item: { type: 'commandExecution', command: 'Get-Content secret-file.txt' } });
+  assert.equal(message, 'Inspecting relevant project files.');
+  assert.doesNotMatch(message || '', /secret-file|Get-Content/);
+});
+
+test('Antigravity usage command parsing preserves authoritative quota buckets', () => {
+  const output = JSON.stringify({ command: { name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{ id: 'gemini-weekly', remaining_fraction: 0.86539, reset_time: '2026-08-19T13:28:52Z' }] }] } } });
+  assert.deepEqual(extractAntigravityQuotas(output), [{ id: 'gemini-weekly', usedPercent: 13.46, remainingPercent: 86.54, resetsAt: '2026-08-19T13:28:52Z', windowMinutes: null }]);
 });
 
 test('Codex errors retain the actionable parser line instead of the help footer', () => {
@@ -90,6 +117,11 @@ test('Antigravity 1.1 stream result extracts and streams the final response', ()
   const raw = JSON.stringify({ event: 'result', result: { conversation_id: 'conversation-123', status: 'SUCCESS', response: 'This repository is an Android XR application.' } });
   assert.equal(extractAntigravityText(raw), 'This repository is an Android XR application.');
   assert.deepEqual(decodeAntigravityProgressLine(raw), ['This repository is an Android XR application.']);
+});
+
+test('Antigravity stream result exposes authoritative turn token usage', () => {
+  const raw = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', usage: { input_tokens: 19601, output_tokens: 13, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 19614 } } });
+  assert.deepEqual(extractAntigravityUsage(raw), { input_tokens: 19601, output_tokens: 13, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 19614 });
 });
 
 test('read-only Antigravity output survives a late terminal error', () => {

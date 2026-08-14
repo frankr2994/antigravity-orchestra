@@ -237,3 +237,78 @@ On backend startup, interrupted mutating tasks with non-Orchestra Git changes ar
 - The dashboard visibly distinguishes active, waiting, possibly stalled, needs-attention, complete, and failed states.
 - Users can inspect recent sanitized activity, changed paths, review progress, and stop reasons from the main dashboard and optionally ask local Gemma for an explanation.
 - The Stop action remains user-controlled; the monitor never terminates a process automatically.
+## 2026-08-13: Supported agent observability and grounded local interpretation
+
+### Background
+
+The dashboard could report process liveness and Orchestra workflow events, but it could not explain the concrete reason for a repair cycle or make trustworthy context/quota-aware routing choices. Raw console output and guessed percentages are not sufficient.
+
+### Decision
+
+Orchestra will normalize provider telemetry behind one internal observability model:
+
+- Antigravity per-run tokens and lifecycle come from its non-interactive `stream-json` output. Context and quota may additionally come from a fresh, matching supported status-line JSON snapshot produced by an interactive CLI session.
+- Antigravity step detail comes from bounded, sanitized transcript JSONL reads correlated by conversation ID.
+- Codex turn usage comes from the existing supported `codex exec --json` stream.
+- Codex account quota and usage summaries come from a cached, read-only `codex app-server` JSON-RPC client.
+- Gemma receives only a bounded evidence packet made from deterministic monitor state, normalized task events, provider telemetry, and sanitized transcript summaries.
+- Context and quota policy may select a cheaper model or start a fresh Antigravity conversation, but it may not skip a required design/debug/review role.
+
+### Reasons
+
+- Supported machine-readable interfaces are more stable and safer than TLS interception.
+- Separating collection from interpretation prevents local-model guesses from becoming authoritative state.
+- Bounded and sanitized evidence gives Gemma enough detail to answer questions such as why a review cycle repeated without leaking credentials or persisting raw internal reasoning.
+- Conservative routing preserves role guarantees while reducing avoidable context and quota pressure.
+
+### Alternatives
+
+- TLS proxying was rejected because it is invasive, exposes credentials and prompts, requires certificate interception, and depends on unstable private endpoints.
+- Transcript-only monitoring was rejected because inspected Antigravity transcripts contain progress but no token or quota fields.
+- Replacing `agy` with the Antigravity Python SDK was deferred because it would change authentication, packaging, and session behavior rather than simply observing current CLI runs.
+- Using Gemma to infer numeric usage was rejected because provider metrics must remain deterministic.
+
+### Impact
+
+- Antigravity's global status-line command may call Orchestra's collector when the slot is unused; existing third-party commands are not overwritten. Because print mode does not invoke the hook, missing or stale context/quota remains explicitly unavailable.
+- Provider schemas are validated and unknown/missing fields remain explicitly unavailable.
+- The UI gains interactive run questions and real provider usage instead of a fixed explanation button.
+- Routing decisions record the telemetry reason that influenced model or conversation selection.
+
+## 2026-08-13: Persistent Codex transport and quota/context-aware execution
+
+### Background
+
+Short-lived `codex exec --json` processes exposed final turn totals but not the installed app-server's live thread context, model reroutes, structured failure codes, or shared account telemetry. Antigravity's print transport similarly exposes exact per-turn tokens but does not invoke the interactive status-line hook. Investigation of the installed Antigravity CLI confirmed that `/usage` is a supported machine-readable quota command in print mode.
+
+### Decision
+
+Orchestra owns one lazily started persistent `codex app-server` process for both execution and account telemetry. Every Codex design, debug, and review stage starts a fresh ephemeral thread, then starts a read-only turn with approvals disabled. Orchestra consumes item lifecycle, message, `thread/tokenUsage/updated`, `model/rerouted`, and `turn/completed` notifications. User cancellation sends `turn/interrupt`, and dashboard shutdown closes the managed process.
+
+Codex context percentage is calculated only from the app-server's reported `totalTokens` and `modelContextWindow`. At 80% utilization Orchestra records a context-pressure event, allows the current read-only turn to finish, and relies on the already-isolated fresh thread for the next Codex role or review cycle. A provider `contextWindowExceeded`, `sessionBudgetExceeded`, or `usageLimitExceeded` status remains a task failure with its explicit cause; Orchestra does not silently skip a required review.
+
+Antigravity quota is polled from `agy --output-format json --print /usage`, cached for five minutes, and combined with per-turn stream-json tokens. A recent matching interactive status-line snapshot may supply an exact context percentage, but Orchestra does not hardcode an assumed model context limit when that snapshot is absent. It instead rotates a print-mode conversation when the last measured input count reaches the conservative 200,000-token threshold. Small tasks may move to a cheaper model when a provider has 10% or less quota remaining; deep, risky, or mandatory agent roles are preserved.
+
+### Reasons
+
+- One supported protocol now supplies Codex execution, live context, reroutes, cancellation, and quota without correlating separate subprocess formats.
+- Fresh role-scoped threads prevent repair cycles from accumulating stale review context while preserving independent review.
+- Provider-reported limits remain authoritative; unavailable Antigravity context caps are displayed as unavailable rather than guessed.
+- Quota can reduce avoidable cost on small work without weakening design, debugging, or review requirements.
+- Explicit context and quota events give the local Gemma monitor concrete evidence for run explanations.
+
+### Alternatives
+
+- Continue spawning `codex exec --json`: rejected because it cannot provide the same live context and account lifecycle through one managed session.
+- Reuse one Codex thread across every repair cycle: rejected because review history would consume context and could anchor later reviews to obsolete findings.
+- Interrupt active turns automatically at a context threshold: rejected because this can discard a nearly complete review; fresh subsequent threads provide a safer boundary.
+- Hardcode Gemini context-window sizes: rejected because model aliases and provider limits may change, making a computed percentage look authoritative when it is not.
+- Skip a required remote agent when quota is low: rejected because quota optimization cannot remove correctness and safety roles.
+
+### Impact
+
+- The live monitor can show exact Codex context utilization and tokens during a turn, plus authoritative Codex and Antigravity quota remaining.
+- Codex stages use app-server instead of `codex exec`; read-only role boundaries and verdict contracts are unchanged.
+- Each Codex review cycle begins with a clean context window.
+- Antigravity quota refreshes independently of the unsupported print-mode status-line path.
+- Routing decisions and pressure warnings are persisted in the timeline and are available to Gemma's run-analysis evidence packet.

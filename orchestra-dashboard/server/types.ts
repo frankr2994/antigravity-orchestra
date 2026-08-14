@@ -96,4 +96,6 @@ export interface RunMonitor {
   changedFiles: string[];
   summary: string;
   stopReason: string | null;
+  providerTelemetry: Record<string, unknown>;
+  providerActivity: Array<Record<string, unknown>>;
 }

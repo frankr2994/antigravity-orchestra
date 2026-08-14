@@ -15,9 +15,10 @@ type Stats = { cpu: { load: number; speed: string | null; name: string }; memory
 type HealthItem = { available?: boolean; version?: string | null; modelAvailable?: boolean; error?: string };
 type Health = Record<string, HealthItem>;
 type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string };
-type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null };
+type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null }> };
+type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null; providerTelemetry: Record<string, ProviderUsage>; providerActivity: Array<Record<string, unknown>> };
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'agent.started', 'agent.output', 'agent.completed', 'verification.result', 'git.baseline-required', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'verification.result', 'git.baseline-required', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required']);
 
 function App() {
@@ -33,7 +34,7 @@ function App() {
   const [activity, setActivity] = useState<TaskEvent[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health>({});
-  const [usage, setUsage] = useState<Record<string, { available: boolean; reason?: string }>>({});
+  const [usage, setUsage] = useState<Record<string, ProviderUsage>>({});
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -41,6 +42,7 @@ function App() {
   const [scopeWarning, setScopeWarning] = useState('');
   const [monitor, setMonitor] = useState<RunMonitor | null>(null);
   const [monitorExplanation, setMonitorExplanation] = useState('');
+  const [monitorQuestion, setMonitorQuestion] = useState('');
   const [monitorBusy, setMonitorBusy] = useState(false);
   const streamRef = useRef<EventSource | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -246,6 +248,15 @@ function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setMonitorBusy(false); }
   }
+  async function askMonitor() {
+    if (!activeTask || monitorBusy || !monitorQuestion.trim()) return;
+    try {
+      setMonitorBusy(true);
+      const value = await api<{ answer: string }>(`/api/tasks/${activeTask.id}/monitor/ask`, { method: 'POST', body: JSON.stringify({ question: monitorQuestion.trim() }) });
+      setMonitorExplanation(value.answer);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setMonitorBusy(false); }
+  }
   async function forgetProject(id: string) { await api(`/api/projects/${id}`, { method: 'DELETE' }); if (project?.id === id) { setProject(null); setSession(null); setMessages([]); } await reload(); }
 
   const currentModels = useMemo(() => {
@@ -272,7 +283,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} onExplain={explainMonitor} onStop={cancelTask} />}
+        {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {view === 'tasks' && <Tasks tasks={tasks} projects={projects} onRetryPush={retryPush} onRecover={recoverTask} onRetryTask={retryTask} />}
         {view === 'settings' && settings && <SettingsView settings={settings} health={health} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
@@ -310,10 +321,10 @@ function App() {
   );
 }
 
-function Dashboard({ stats, health, usage, project, tasks, activeTask, monitor, events, explanation, explanationBusy, onExplain, onStop }: { stats: Stats | null; health: Health; usage: Record<string, { available: boolean; reason?: string }>; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; onExplain: () => void; onStop: () => void }) {
+function Dashboard({ stats, health, usage, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop }: { stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
-    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} onExplain={onExplain} onStop={onStop} />}
+    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onStop={onStop} />}
     <div className="metrics-grid">
       <Metric icon={<Cpu />} label="CPU" value={`${stats?.cpu.load ?? 0}%`} detail={stats?.cpu.speed || 'Unavailable'} percent={stats?.cpu.load ?? 0} color="blue" />
       <Metric icon={<MemoryStick />} label="Memory" value={`${stats?.memory.percent ?? 0}%`} detail={stats ? `${stats.memory.used} / ${stats.memory.total} GB` : 'Loading'} percent={stats?.memory.percent ?? 0} color="cyan" />
@@ -321,14 +332,14 @@ function Dashboard({ stats, health, usage, project, tasks, activeTask, monitor, 
     </div>
     <div className="two-column">
       <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}</div></Card>
-      <Card title="Provider usage" icon={<Zap />}><div className="usage-list">{['antigravity', 'codex'].map((name) => <div key={name}><strong>{name}</strong><span className="unavailable">Unavailable</span><small>{usage[name]?.reason || 'Waiting for a trustworthy provider source.'}</small></div>)}</div></Card>
+      <Card title="Provider usage" icon={<Zap />}><div className="usage-list">{['antigravity', 'codex'].map((name) => { const item = usage[name]; const context = item?.context?.usedPercent; const remaining = item?.quotas?.map((bucket) => bucket.remainingPercent).filter((value): value is number => value !== null).sort((a, b) => a - b)[0]; const signals = [remaining !== undefined ? `${remaining.toFixed(0)}% quota left` : null, context !== null && context !== undefined ? `${context.toFixed(0)}% context` : null].filter(Boolean); return <div key={name}><strong>{name}</strong><span className={item?.available ? '' : 'unavailable'}>{item?.available ? signals.join(' · ') || 'Connected' : 'Unavailable'}</span><small>{item?.available ? `${item.model || item.source || 'Verified provider source'}${item.stale ? ' · stale snapshot' : ''}` : item?.reason || 'Waiting for a trustworthy provider source.'}</small></div>; })}</div></Card>
     </div>
     <div className="summary-strip"><div><strong>{running}</strong><span>Active tasks</span></div><div><strong>{tasks.filter((task) => task.state === 'completed').length}</strong><span>Completed</span></div><div><strong>{tasks.filter((task) => task.state === 'completed_unpushed').length}</strong><span>Awaiting push</span></div></div>
   </section>;
 }
 
-function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, onExplain, onStop }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; onExplain: () => void; onStop: () => void }) {
-  const recent = events.filter((event) => ['task.state', 'task.repair-progress', 'agent.started', 'agent.output', 'agent.completed', 'verification.result', 'git.commit', 'git.push'].includes(event.type)).slice(-12).reverse();
+function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void }) {
+  const recent = events.filter((event) => ['task.state', 'task.repair-progress', 'routing.adjustment', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push'].includes(event.type)).slice(-20).reverse();
   const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed');
   const running = !terminalStates.has(task.state);
   return <article className={`live-monitor health-${monitor?.health || 'waiting'}`}>
@@ -339,13 +350,15 @@ function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, o
       <div><span>Last activity</span><strong>{formatDuration(monitor?.inactiveMs || 0)} ago</strong><small>{monitor?.processAlive ? 'process alive' : 'no live process'}</small></div>
       <div><span>Review progress</span><strong>{monitor?.reviewCycle ? `Cycle ${monitor.reviewCycle}` : 'Not started'}</strong><small>{monitor?.repairAttempt || 0} repairs completed</small></div>
       <div><span>Project changes</span><strong>{monitor?.changedFiles.length ?? 0} files</strong><small>{monitor?.changedFiles.slice(0, 3).join(', ') || 'No uncommitted files'}</small></div>
+      <div><span>Antigravity context</span><strong>{formatProviderContext(monitor?.providerTelemetry.antigravity)}</strong><small>{monitor?.providerTelemetry.antigravity?.context?.inputTokens?.toLocaleString() || 'No'} measured input tokens</small></div>
+      <div><span>Codex context</span><strong>{formatProviderContext(monitor?.providerTelemetry.codex)}</strong><small>{monitor?.providerTelemetry.codex?.threadId ? 'fresh stage thread' : 'waiting for a Codex turn'}</small></div>
     </div>
     <p className="monitor-summary">{monitor?.summary || 'Loading deterministic run health…'}</p>
     {latestKnownWork && <div className="latest-work"><strong>Latest known work</strong><span>{latestKnownWork.agent} · {new Date(latestKnownWork.createdAt).toLocaleTimeString()}</span><p>{eventText(latestKnownWork)}</p></div>}
     {monitor?.stopReason && <div className="monitor-stop"><CircleAlert size={16} /><div><strong>Why execution paused</strong><p>{monitor.stopReason}</p></div></div>}
     <div className="monitor-detail">
       <div className="monitor-timeline"><header><strong>Recent timeline</strong><small>Live monitor checks every 5 seconds</small></header>{monitor && <div className="monitor-heartbeat"><time>{new Date().toLocaleTimeString()}</time><span className="agent-dot system" /><b>monitor</b><p>{monitor.processAlive ? `${monitor.currentAgent} process is alive. ` : 'No process currently owns this task. '}{humanState(monitor.health)} · last agent event {formatDuration(monitor.inactiveMs)} ago · {monitor.changedFiles.length} changed files.</p></div>}{recent.length ? recent.map((event) => <div key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString()}</time><span className={`agent-dot ${event.agent}`} /><b>{event.agent}</b><p>{eventText(event)}</p></div>) : <small>Waiting for task events.</small>}</div>
-      <div className="gemma-monitor"><div><strong>Gemma interpretation</strong><button className="secondary compact" onClick={onExplain} disabled={explanationBusy}>{explanationBusy ? 'Reading…' : 'Ask Gemma'}</button></div><p>{explanation || 'Use the local model to translate this snapshot into a plain-language health explanation. Deterministic signals remain authoritative.'}</p></div>
+      <div className="gemma-monitor"><div><strong>Ask Gemma about this run</strong><button className="secondary compact" onClick={onExplain} disabled={explanationBusy}>{explanationBusy ? 'Reading…' : 'Explain status'}</button></div><p>{explanation || 'Gemma answers from the run timeline, review findings, provider telemetry, errors, and sanitized Antigravity activity. Deterministic signals remain authoritative.'}</p><div className="gemma-question"><textarea value={question} onChange={(event) => onQuestion(event.target.value)} placeholder="Why did this enter a second repair cycle?" rows={3} /><button className="primary compact" onClick={onAsk} disabled={explanationBusy || !question.trim()}><Send size={14} /> Ask</button></div></div>
     </div>
   </article>;
 }
@@ -391,6 +404,7 @@ function Field({ label, value }: { label: string; value: string }) { return <div
 function humanState(state: string) { return state.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function formatDate(value: string) { return new Date(value).toLocaleString(); }
 function formatDuration(value: number) { const seconds = Math.max(0, Math.round(value / 1000)); if (seconds < 60) return `${seconds}s`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ${seconds % 60}s`; return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
-function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
+function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · ${pressure.toFixed(1)}% context` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
+function formatProviderContext(item?: ProviderUsage) { const percent = item?.context?.usedPercent; if (percent !== null && percent !== undefined) return `${percent.toFixed(1)}%`; const tokens = item?.context?.inputTokens ?? item?.context?.totalTokens; return tokens ? `${tokens.toLocaleString()} tokens` : 'Not measured'; }
 
 export default App;

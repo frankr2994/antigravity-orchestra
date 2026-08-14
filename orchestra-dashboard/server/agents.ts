@@ -3,13 +3,12 @@ import { ProcessTimeoutError, runProcess } from './process.js';
 import type { ChatMessage, ModelSelection, TaskClassification } from './types.js';
 import type { RepositoryEvidence } from './evidence.js';
 import { delimiter } from 'node:path';
+import { codexAppServer } from './codex-app-server.js';
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
-const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
 
-export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; }
+export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; usage: Record<string, number> | null; }
 interface StreamDecoder { push: (chunk: string) => void; flush: () => void; sandboxFailed: () => boolean; }
-let cachedCodexOverrides: { expires: number; args: string[]; disabled: string[] } | null = null;
 type JsonSchema = { name: string; schema: Record<string, unknown> };
 
 const CLASSIFICATION_SCHEMA: JsonSchema = { name: 'task_classification', schema: { type: 'object', properties: { type: { type: 'string', enum: ['question', 'implementation', 'debug', 'design', 'review', 'test'] }, mutating: { type: 'boolean' }, complexity: { type: 'string', enum: ['small', 'normal', 'deep'] }, riskFlags: { type: 'array', items: { type: 'string' } }, codexRole: { type: 'string', enum: ['none', 'design', 'debug', 'review'] }, title: { type: 'string' } }, required: ['type', 'mutating', 'complexity', 'riskFlags', 'codexRole', 'title'], additionalProperties: false } };
@@ -37,6 +36,14 @@ export async function explainRunHealth(snapshot: Record<string, unknown>) {
   ], 300, 30_000, RUN_HEALTH_SCHEMA);
   const value = parseJson(raw) as Record<string, unknown>;
   return String(value.explanation || '').trim() || 'Gemma could not add an explanation to the deterministic monitor status.';
+}
+
+export async function answerRunQuestion(question: string, evidence: Record<string, unknown>) {
+  const raw = await callGemma([
+    { role: 'system', content: `You are Orchestra's local run analyst. Answer the user's question from the supplied deterministic evidence only. Explain concrete review findings, failed commands, repair progress, agent activity, context pressure, or quota pressure when present. Clearly distinguish observed facts from likely interpretation. If the evidence does not establish an answer, say exactly what is missing. Never claim access to hidden reasoning. Keep the answer concise but specific.` },
+    { role: 'user', content: `Question:\n${question}\n\nSanitized run evidence:\n${redactSecrets(JSON.stringify(evidence)).slice(-100_000)}` },
+  ], 1_200, 90_000);
+  return raw.trim();
 }
 
 async function callGemma(messages: Array<{ role: string; content: string }>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema): Promise<string> {
@@ -208,37 +215,19 @@ export function resolveAntigravityModel(selected: string, available: string[]) {
   return { model: fallback || selected, warning: fallback ? `${selected} is unavailable; using ${fallback}.` : 'Unable to verify Antigravity model availability.' };
 }
 
-export async function runCodexAnalysis(input: { root: string; prompt: string; role: string; model: string; effort: string; signal: AbortSignal; onOutput: (chunk: string) => void }): Promise<string> {
+export async function runCodexAnalysis(input: { root: string; prompt: string; role: string; model: string; effort: string; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<string> {
   const instruction = `## Task Type: ${input.role}\n\n## Question\n${input.prompt}\n\n## Instructions\nAnalyze the selected repository thoroughly. Do not edit files. Return concrete recommendations and identify blocking risks.`;
-  const overrides = await getCodexMcpOverrides();
-  if (overrides.disabled.length) input.onOutput(`Continuing without unreachable optional MCP: ${overrides.disabled.join(', ')}.`);
-  const args = ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '-C', input.root, '-m', input.model, '-c', `model_reasoning_effort="${input.effort}"`, ...overrides.args, '--json', '-'];
-  const decoder = createCodexStreamDecoder(input.onOutput);
-  const result = await runProcess(CODEX, args, { input: instruction, env: codexEnvironment(), timeoutMs: 15 * 60_000, signal: input.signal, onStdout: decoder.push, onStderr: decoder.push });
-  decoder.flush();
-  if (result.code !== 0) throw new Error(friendlyCodexError(result.stderr, result.code));
-  const text = extractCodexAgentText(result.stdout);
-  if (!text && decoder.sandboxFailed()) throw new Error('Codex could not inspect the project because the Windows read-only sandbox failed to start commands. Run `codex doctor --json` and verify the Windows sandbox before retrying.');
-  return text || 'Codex completed its analysis without a final text response.';
+  const result = await codexAppServer.runReadOnlyTurn({ ...input, prompt: instruction, onTelemetry: input.onUsage });
+  return result.text || 'Codex completed its analysis without a final text response.';
 }
 
-export async function runCodexReview(input: { root: string; model: string; effort: string; signal: AbortSignal; onOutput: (chunk: string) => void }): Promise<string> {
+export async function runCodexReview(input: { root: string; model: string; effort: string; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<string> {
   const prompt = 'Review all staged, unstaged, and untracked changes in the current repository. Inspect the Git diff and relevant surrounding code. Focus on correctness, security, regressions, tests, and scope. Start the final response with VERDICT: PASS or VERDICT: BLOCK. Do not edit files.';
-  const overrides = await getCodexMcpOverrides();
-  if (overrides.disabled.length) input.onOutput(`Continuing without unreachable optional MCP: ${overrides.disabled.join(', ')}.`);
-  const args = buildCodexReviewArgs({ root: input.root, model: input.model, effort: input.effort, overrideArgs: overrides.args });
-  const decoder = createCodexStreamDecoder(input.onOutput);
-  const result = await runProcess(CODEX, args, { input: prompt, env: codexEnvironment(), timeoutMs: 15 * 60_000, signal: input.signal, onStdout: decoder.push, onStderr: decoder.push });
-  decoder.flush();
-  if (result.code !== 0) throw new Error(friendlyCodexError(result.stderr, result.code));
-  return extractCodexAgentText(result.stdout) || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
+  const result = await codexAppServer.runReadOnlyTurn({ ...input, prompt, onTelemetry: input.onUsage });
+  return result.text || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
 }
 
-export function buildCodexReviewArgs(input: { root: string; model: string; effort: string; overrideArgs?: string[] }) {
-  return ['exec', '--sandbox', 'read-only', '--skip-git-repo-check', '-C', input.root, '-m', input.model, '-c', `model_reasoning_effort="${input.effort}"`, ...(input.overrideArgs || []), '--json', '-'];
-}
-
-export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; recovery?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void }): Promise<AgentRunResult> {
+export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; recovery?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<AgentRunResult> {
   const prompt = buildAntigravityPrompt(input);
   const args = buildAntigravityArgs({ ...input, prompt });
   const decoder = createAntigravityStreamDecoder(input.onOutput);
@@ -255,10 +244,22 @@ export async function runAntigravity(input: { root: string; prompt: string; mode
   decoder.flush();
   if (result.code !== 0) throw new Error(result.stderr || `Antigravity exited with ${result.code}`);
   const terminal = interpretAntigravityOutput(result.stdout, input.mutating);
+  const usage = extractAntigravityUsage(result.stdout);
+  input.onUsage?.({ conversationId: terminal.conversationId, usage });
   if (!input.mutating && !responseIdentifiesProject(terminal.text, input.root)) {
     throw new Error(`Antigravity's response did not identify the active project directory (${input.root}), so Orchestra rejected it to prevent cross-repository output. Start a new conversation and retry.`);
   }
-  return { text: terminal.text, conversationId: terminal.conversationId, raw: result.stdout, warning: terminal.warning };
+  return { text: terminal.text, conversationId: terminal.conversationId, raw: result.stdout, warning: terminal.warning, usage };
+}
+
+export function extractAntigravityUsage(output: string) {
+  let usage: Record<string, number> | null = null;
+  for (const line of output.split(/\r?\n/)) try {
+    const value = JSON.parse(line) as Record<string, any>;
+    const candidate = value.event === 'result' ? value.result?.usage : value.step_update?.usage;
+    if (candidate && typeof candidate === 'object') usage = Object.fromEntries(Object.entries(candidate).map(([key, item]) => [key, Number(item) || 0]));
+  } catch { /* Ignore incomplete diagnostics. */ }
+  return usage;
 }
 
 export function buildAntigravityPrompt(input: { root: string; prompt: string; mutating: boolean; context?: string; recovery?: boolean }) {
@@ -399,18 +400,6 @@ function fallbackClassification(prompt: string): TaskClassification {
   return { type, mutating, complexity: riskFlags.length || prompt.length > 1200 ? 'deep' : mutating ? 'normal' : 'small', riskFlags, codexRole, title: prompt.slice(0, 60) };
 }
 
-function extractCodexAgentText(output: string): string {
-  const texts: string[] = [];
-  for (const line of output.split(/\r?\n/)) {
-    try {
-      const value = JSON.parse(line) as Record<string, unknown>;
-      const item = value.item as Record<string, unknown> | undefined;
-      if (value.type === 'item.completed' && item?.type === 'agent_message' && typeof item.text === 'string') texts.push(item.text);
-    } catch { /* stream may contain non-JSON diagnostics */ }
-  }
-  return [...new Set(texts.filter((text) => text.trim().length > 1))].join('\n').trim();
-}
-
 export function extractAntigravityText(output: string): string {
   const texts: string[] = [];
   for (const line of output.split(/\r?\n/)) {
@@ -451,19 +440,6 @@ function extractAntigravityTerminalResult(output: string): { text: string; conve
     } catch { /* ignore */ }
   }
   return { text: [...new Set(texts.filter((text) => text.trim().length > 1))].join('\n').trim(), conversationId, status };
-}
-
-function createCodexStreamDecoder(onOutput: (text: string) => void): StreamDecoder {
-  let buffer = ''; let sandboxFailure = false; const notices = new Set<string>();
-  const emitOnce = (key: string, text: string) => { if (!notices.has(key)) { notices.add(key); onOutput(text); } };
-  const handle = (line: string) => {
-    const decoded = decodeCodexProgressLine(line);
-    if (!decoded) return;
-    if (decoded.sandboxFailure) sandboxFailure = true;
-    if (decoded.onceKey) emitOnce(decoded.onceKey, decoded.message);
-    else onOutput(decoded.message);
-  };
-  return lineDecoder(handle, () => sandboxFailure, (chunk) => { buffer += chunk; const lines = buffer.split(/\r?\n/); buffer = lines.pop() || ''; for (const line of lines) handle(line); }, () => { if (buffer) handle(buffer); buffer = ''; });
 }
 
 export function decodeCodexProgressLine(line: string): { message: string; onceKey?: string; sandboxFailure?: boolean } | null {
@@ -524,31 +500,6 @@ export function friendlyCodexError(stderr: string, code: number) {
   if (/rmcp::transport|Transport channel closed/i.test(stderr)) return 'Codex stopped because an optional MCP transport was unavailable.';
   const detail = lines.findLast((line) => !/^Usage:/i.test(line) && !/^For more information/i.test(line) && line.length < 500);
   return detail || `Codex exited with code ${code}.`;
-}
-
-async function getCodexMcpOverrides() {
-  if (cachedCodexOverrides && cachedCodexOverrides.expires > Date.now()) return cachedCodexOverrides;
-  const args: string[] = []; const disabled: string[] = [];
-  try {
-    const result = await runProcess(CODEX, ['mcp', 'list', '--json'], { timeoutMs: 10_000 });
-    const servers = JSON.parse(result.stdout) as Array<{ name?: string; enabled?: boolean; transport?: { type?: string; url?: string } }>;
-    for (const server of servers) {
-      if (!server.enabled || server.transport?.type !== 'streamable_http' || !server.transport.url || !/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//i.test(server.transport.url)) continue;
-      try { await fetch(server.transport.url, { method: 'HEAD', signal: AbortSignal.timeout(1200) }); }
-      catch {
-        const name = String(server.name || '');
-        if (/^[A-Za-z0-9_-]+$/.test(name)) { args.push('-c', `mcp_servers.${name}.enabled=false`); disabled.push(name); }
-      }
-    }
-  } catch { /* Codex can still run with its normal configuration */ }
-  cachedCodexOverrides = { expires: Date.now() + 60_000, args, disabled };
-  return cachedCodexOverrides;
-}
-
-function codexEnvironment(): NodeJS.ProcessEnv {
-  const pathKey = Object.keys(process.env).find((key) => key.toLowerCase() === 'path') || 'PATH';
-  const currentPath = process.env[pathKey] || '';
-  return { [pathKey]: sanitizeCodexPath(currentPath) };
 }
 
 export function sanitizeCodexPath(value: string) {

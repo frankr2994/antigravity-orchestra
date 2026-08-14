@@ -8,7 +8,9 @@ import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, on
 import { getGitStatus, pushCurrent } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
-import { explainRunHealth } from './agents.js';
+import { answerRunQuestion, explainRunHealth } from './agents.js';
+import { ensureAntigravityStatusCollector } from './observability.js';
+import { closeCodexAppServer } from './codex-app-server.js';
 
 const app = express();
 const store = new Store();
@@ -20,6 +22,8 @@ const interruptedTasks = [...new Set([
 for (const taskId of interruptedTasks) await restoreInterruptedTask(taskId);
 if (interruptedTasks.length) console.warn(`Reconciled ${interruptedTasks.length} interrupted task(s) after restart.`);
 const tasks = new TaskManager(store, config.maxGlobalTasks);
+const antigravityCollector = ensureAntigravityStatusCollector();
+if (!antigravityCollector.configured) console.warn(`Antigravity telemetry: ${antigravityCollector.reason}`);
 const allowedHosts = new Set([`127.0.0.1:${config.port}`, `localhost:${config.port}`, '127.0.0.1:5173', 'localhost:5173']);
 
 app.disable('x-powered-by');
@@ -47,7 +51,7 @@ app.get('/api/bootstrap', async (_req, res) => {
 });
 app.get('/api/health', async (_req, res) => res.json(await getHealth()));
 app.get('/api/stats', async (_req, res, next) => { try { res.json(await getStats()); } catch (error) { next(error); } });
-app.get('/api/usage', (_req, res) => res.json(getUsage()));
+app.get('/api/usage', async (_req, res, next) => { try { res.json(await getUsage()); } catch (error) { next(error); } });
 
 app.post('/api/projects/pick', async (_req, res, next) => {
   try { const path = await pickFolder(); res.json({ path }); } catch (error) { next(error); }
@@ -111,6 +115,17 @@ app.post('/api/tasks/:id/monitor/explain', async (req, res, next) => {
     res.json({ explanation });
   } catch (error) { next(error); }
 });
+app.post('/api/tasks/:id/monitor/ask', async (req, res, next) => {
+  try {
+    const task = requireTask(req.params.id);
+    const question = String(req.body?.question || '').trim();
+    if (!question || question.length > 4_000) throw new Error('A monitor question between 1 and 4,000 characters is required.');
+    const monitor = await tasks.getMonitor(task.id);
+    const events = store.listEvents(task.id).slice(-100).map((event) => ({ agent: event.agent, type: event.type, createdAt: event.createdAt, payload: event.payload }));
+    const answer = await answerRunQuestion(question, { task: { state: task.state, classification: task.classification, models: task.models, error: task.error }, monitor, events });
+    res.json({ answer });
+  } catch (error) { next(error); }
+});
 app.get('/api/tasks/:id/events', (req, res) => {
   requireTask(req.params.id);
   res.writeHead(200, { 'Content-Type': 'text/event-stream', Connection: 'keep-alive', 'Cache-Control': 'no-cache, no-transform' });
@@ -164,7 +179,7 @@ server.on('error', (error: NodeJS.ErrnoException) => {
   else console.error(error);
   process.exitCode = 1;
 });
-function shutdown() { server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(1), 5000).unref(); }
+function shutdown() { closeCodexAppServer(); server.close(() => { store.close(); process.exit(0); }); setTimeout(() => process.exit(1), 5000).unref(); }
 process.on('SIGINT', shutdown); process.on('SIGTERM', shutdown);
 
 function requireProject(id: string) { const value = store.getProject(id); if (!value) throw new Error('Project not found.'); return value; }

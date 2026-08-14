@@ -62,3 +62,13 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * **Gemma-First Routing (Evidence-Bounded):** Introduced a policy where Gemma acts as the first responder for deterministic, non-mutating questions using local evidence packets, escalating complex/sensitive work to Antigravity/Codex if necessary.
 * **Greenfield Project Initialization:** Defined rules for treating directories as greenfield only when blank or containing Orchestra bootstrap entries (`AGENTS.md`, `.agents`, etc.), ensuring
 
+
+## [2026-08-13 22:09:23] Handoff Update
+* **Enhanced Agent Observability:** Introduced new mechanisms to capture and report provider telemetry (Antigravity and Codex) directly into the task state, allowing for more concrete reasoning about repair cycles and routing decisions.
+* **Persistent Codex Transport and Quota Awareness:** Orchestra now owns a persistent `codex app-server` process that manages execution and account telemetry, providing live context utilization percentages and quota remaining information during turns.
+* **Improved Task Monitoring & Question Answering:** Added functionality to query the local Gemma model with specific run evidence (`answerRunQuestion`) based on sanitized task data, enabling users to ask questions about progress, failures, or context pressure.
+* **Refined Model Routing Logic:** Updated routing decisions to consider real-time Antigravity and Codex quota percentages (e.g., moving small tasks to cheaper models) when quotas are low, while preserving mandatory roles like design/debug/review.
+* **Enhanced User Interface for Monitoring:** The dashboard now displays detailed provider usage metrics, including context utilization percentage and remaining quota information for both Antigravity and Codex.
+* **Improved Event Logging & Context Tracking:** Task events now explicitly include provider telemetry, and the system tracks context pressure warnings to inform routing adjustments.
+* **Code Refactoring in Agents:** Significant refactoring occurred across `agents.ts` (Codex/Antigravity) to transition from spawning ephemeral processes for analysis to using a managed, persistent `codexAppServer` process for better
+

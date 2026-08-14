@@ -10,12 +10,14 @@ import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.j
 import { commitPaths, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
 import { verifyProject } from './verification.js';
+import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
 
 export class TaskManager {
   private readonly bus = new EventEmitter();
   private readonly queue: string[] = [];
   private readonly runningProjects = new Set<string>();
   private readonly controllers = new Map<string, AbortController>();
+  private readonly contextWarnings = new Set<string>();
   private antigravityModels: string[] = [];
 
   constructor(private readonly store: Store, private readonly maxGlobal = 2) {
@@ -149,6 +151,13 @@ export class TaskManager {
     const currentAgent = agentForState(task.state);
     const reviewCycle = Number((reviewEvent?.payload as Record<string, unknown> | undefined)?.cycle || 0);
     const repairAttempt = Number((repairEvent?.payload as Record<string, unknown> | undefined)?.attempt || 0);
+    const session = this.store.getSession(task.sessionId);
+    const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
+    const latestCodex = latestProviderTelemetry(events, 'codex');
+    const latestAntigravity = latestProviderTelemetry(events, 'antigravity');
+    const codexUsage = mergeProviderTelemetry(codexAccount, latestCodex);
+    const antigravityUsage = mergeProviderTelemetry(antigravityAccount, latestAntigravity);
+    const antigravityMatchesProject = !antigravityUsage.workspace || antigravityUsage.workspace.replaceAll('\\', '/').toLowerCase() === project.root.replaceAll('\\', '/').toLowerCase();
     return {
       taskId,
       state: task.state,
@@ -164,6 +173,8 @@ export class TaskManager {
       changedFiles,
       summary: monitorSummary({ state: task.state, health, currentAgent, inactiveMs, reviewCycle, repairAttempt, changedFiles: changedFiles.length }),
       stopReason: ['recovery_required', 'failed', 'cancelled'].includes(task.state) ? task.error : null,
+      providerTelemetry: { antigravity: antigravityMatchesProject ? antigravityUsage : { available: false, reason: 'The latest Antigravity snapshot belongs to another project.' }, codex: codexUsage },
+      providerActivity: readAntigravityTranscript(session?.antigravityConversationId || antigravityUsage.conversationId || null),
     };
   }
 
@@ -185,9 +196,22 @@ export class TaskManager {
       if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
       else this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
       let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: config.lmStudioModel };
+      const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
+      const routingReasons: string[] = [];
+      const antigravityRemaining = minimumRemaining(antigravityAccount);
+      const codexRemaining = minimumRemaining(codexAccount);
+      if (!recovery && classification.complexity === 'small' && antigravityRemaining !== null && antigravityRemaining <= 10 && models.antigravity === 'gemini-3.6-flash-high') {
+        models = { ...models, antigravity: 'gemini-3.6-flash-medium', antigravityEffort: 'medium' };
+        routingReasons.push(`Antigravity quota is ${antigravityRemaining.toFixed(1)}% remaining, so a small task was moved to Flash Medium.`);
+      }
+      if (!recovery && classification.complexity === 'small' && codexRemaining !== null && codexRemaining <= 10 && models.codex && models.codex !== 'gpt-5.6-luna') {
+        models = { ...models, codex: 'gpt-5.6-luna', codexEffort: 'medium' };
+        routingReasons.push(`Codex quota is ${codexRemaining.toFixed(1)}% remaining, so a small specialist task was moved to Luna.`);
+      }
       const resolved = resolveAntigravityModel(models.antigravity, this.antigravityModels);
       models = { ...models, antigravity: resolved.model };
       if (resolved.warning) this.emit(taskId, 'antigravity', 'warning', { message: resolved.warning });
+      if (routingReasons.length) this.emit(taskId, 'system', 'routing.adjustment', { message: routingReasons.join(' '), antigravityRemaining, codexRemaining });
       this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(models) });
 
       this.transition(taskId, 'preflight');
@@ -245,14 +269,19 @@ export class TaskManager {
       if (!recovery && classification.codexRole !== 'none' && models.codex && models.codexEffort) {
         this.transition(taskId, 'reviewing');
         this.emit(taskId, 'codex', 'agent.started', { role: classification.codexRole, model: models.codex, effort: models.codexEffort });
-        specialistContext = await runCodexAnalysis({ root: project.root, prompt: task.prompt, role: classification.codexRole, model: models.codex, effort: models.codexEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk) });
+        specialistContext = await runCodexAnalysis({ root: project.root, prompt: task.prompt, role: classification.codexRole, model: models.codex, effort: models.codexEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
         this.emit(taskId, 'codex', 'agent.completed', { role: classification.codexRole, summary: specialistContext.slice(-4000) });
       }
 
       this.transition(taskId, 'running');
       this.emit(taskId, 'antigravity', 'agent.started', { model: models.antigravity, effort: models.antigravityEffort });
       const implementationContext = [specialistContext, recoveryReason ? `The previous automatic run paused for this reason:\n${recoveryReason}` : ''].filter(Boolean).join('\n\n');
-      let agentResult = await runAntigravity({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId: session.antigravityConversationId, context: implementationContext, recovery, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk) });
+      const contextUsed = antigravityAccount.workspace && samePath(antigravityAccount.workspace, project.root) ? antigravityAccount.context?.usedPercent : null;
+      const priorInputTokens = latestAntigravityInputTokens(this.store, project.id, session.id, taskId);
+      const rotateConversation = contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 || priorInputTokens !== null && priorInputTokens >= 200_000;
+      const conversationId = rotateConversation ? null : session.antigravityConversationId;
+      if (!conversationId && session.antigravityConversationId && rotateConversation) this.emit(taskId, 'system', 'routing.adjustment', { message: contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 ? `Antigravity context is ${contextUsed.toFixed(1)}% used. Orchestra started a fresh provider conversation while preserving the local session summary.` : `The previous Antigravity turn used ${priorInputTokens?.toLocaleString()} input tokens. Orchestra started a fresh provider conversation while preserving the local session summary.` });
+      let agentResult = await runAntigravity({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId, context: implementationContext, recovery, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) });
       if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
       if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
       this.emit(taskId, 'antigravity', 'agent.completed', { summary: agentResult.text.slice(-5000) });
@@ -272,7 +301,7 @@ export class TaskManager {
           for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
             this.transition(taskId, 'reviewing');
             this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: reviewModel, effort: reviewEffort, cycle: cycle + 1 });
-            const review = await runCodexReview({ root: project.root, model: reviewModel, effort: reviewEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk) });
+            const review = await runCodexReview({ root: project.root, model: reviewModel, effort: reviewEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
             const blocked = !/VERDICT:\s*PASS/i.test(review) || /VERDICT:\s*BLOCK/i.test(review);
             this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, summary: review.slice(-5000) });
             if (!blocked) break;
@@ -282,7 +311,7 @@ export class TaskManager {
             if (cycle === maxRepairAttempts) throw new Error(`Automatic repair paused after ${maxRepairAttempts} repair attempts. The remaining findings require user direction or a different approach.\n${review.slice(-3000)}`);
             const beforeRepair = diffFingerprint(await getDiff(project.root));
             this.transition(taskId, 'running');
-            agentResult = await runAntigravity({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: agentResult.conversationId || session.antigravityConversationId, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk) });
+            agentResult = await runAntigravity({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: agentResult.conversationId || session.antigravityConversationId, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) });
             if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
             const afterRepair = diffFingerprint(await getDiff(project.root));
             previousRepairChanged = beforeRepair !== afterRepair;
@@ -409,6 +438,22 @@ export class TaskManager {
     if (cleaned) this.emit(taskId, agent, 'agent.output', { text: cleaned.slice(-4000) });
   }
 
+  private recordProviderTelemetry(taskId: string, agent: 'antigravity' | 'codex', value: unknown) {
+    this.emit(taskId, agent, 'provider.telemetry', value);
+    if (agent !== 'codex' || !value || typeof value !== 'object') return;
+    const telemetry = value as Record<string, any>;
+    const usedPercent = Number(telemetry.context?.usedPercent);
+    if (!Number.isFinite(usedPercent) || usedPercent < 80) return;
+    const key = `${taskId}:${String(telemetry.threadId || 'codex')}`;
+    if (this.contextWarnings.has(key)) return;
+    this.contextWarnings.add(key);
+    this.emit(taskId, 'system', 'routing.adjustment', {
+      message: `Codex context reached ${usedPercent.toFixed(1)}% during this stage. Orchestra will let the active read-only turn finish, and the next Codex role or review cycle will use a fresh ephemeral thread.`,
+      provider: 'codex',
+      usedPercent,
+    });
+  }
+
   private emit(taskId: string, agent: AgentName, type: string, payload: unknown) {
     const event = this.store.addEvent(taskId, agent, type, payload);
     this.bus.emit(`task:${taskId}`, event);
@@ -438,6 +483,38 @@ export function reviewFingerprint(review: string) {
 }
 
 function diffFingerprint(diff: string) { return createHash('sha256').update(diff).digest('hex'); }
+function minimumRemaining(value: { quotas?: Array<{ remainingPercent: number | null }> }) {
+  const numbers = (value.quotas || []).map((item) => item.remainingPercent).filter((item): item is number => item !== null && Number.isFinite(item));
+  return numbers.length ? Math.min(...numbers) : null;
+}
+function latestProviderTelemetry(events: TaskEvent[], agent: 'antigravity' | 'codex'): Record<string, any> | null {
+  const event = events.findLast((item) => item.agent === agent && item.type === 'provider.telemetry');
+  return event?.payload && typeof event.payload === 'object' ? event.payload as Record<string, any> : null;
+}
+function mergeProviderTelemetry(account: Record<string, any>, live: Record<string, any> | null) {
+  if (!live) return account;
+  const turnUsage = live.usage && typeof live.usage === 'object' ? live.usage as Record<string, number> : null;
+  return {
+    ...account,
+    available: account.available || Boolean(live.context || turnUsage),
+    context: live.context || account.context,
+    threadId: live.threadId,
+    turnId: live.turnId,
+    reroute: live.reroute,
+    tokenActivity: turnUsage ? { ...(account.tokenActivity || {}), ...turnUsage } : account.tokenActivity,
+  };
+}
+function samePath(left: string, right: string) { return left.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase() === right.replaceAll('\\', '/').replace(/\/$/, '').toLowerCase(); }
+function latestAntigravityInputTokens(store: Store, projectId: string, sessionId: string, excludeTaskId: string) {
+  for (const task of store.listTasks(projectId)) {
+    if (task.id === excludeTaskId || task.sessionId !== sessionId) continue;
+    const event = store.listEvents(task.id).findLast((item) => item.agent === 'antigravity' && item.type === 'provider.telemetry');
+    const payload = event?.payload as Record<string, any> | undefined;
+    const tokens = Number(payload?.usage?.input_tokens);
+    if (Number.isFinite(tokens)) return tokens;
+  }
+  return null;
+}
 function agentForState(state: TaskState): AgentName {
   if (state === 'reviewing') return 'codex';
   if (state === 'running' || state === 'recovering') return 'antigravity';
