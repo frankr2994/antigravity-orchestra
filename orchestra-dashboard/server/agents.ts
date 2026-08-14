@@ -1,6 +1,6 @@
 import { config } from './config.js';
 import { ProcessTimeoutError, runProcess } from './process.js';
-import type { ChatMessage, ModelSelection, TaskClassification } from './types.js';
+import type { ChatMessage, ModelSelection, TaskClassification, TaskRecord } from './types.js';
 import type { RepositoryEvidence } from './evidence.js';
 import { delimiter } from 'node:path';
 import { codexAppServer } from './codex-app-server.js';
@@ -406,11 +406,32 @@ export function normalizeClassification(classification: TaskClassification, prom
   if (isConnectGitRemoteIntent(prompt) || classification.localOperation === 'connect_git_remote') {
     return { ...classification, type: 'implementation', mutating: true, complexity: 'small', riskFlags: [], codexRole: 'none', localOperation: 'connect_git_remote' };
   }
+  if (hasExplicitMutationIntent(prompt)) {
+    return { ...classification, type: classification.type === 'question' ? 'implementation' : classification.type, mutating: true };
+  }
   const explicitCodexTrigger = /\b(design|architecture|architectural|debug|root cause|security|threat|review|audit|test design|tdd|trade[- ]?off)\b/i.test(prompt);
   if (classification.type === 'question' && !classification.mutating && !explicitCodexTrigger) {
     return { ...classification, complexity: classification.riskFlags.length ? classification.complexity : 'small', codexRole: 'none' };
   }
   return classification;
+}
+
+export function hasExplicitMutationIntent(prompt: string) {
+  if (/^Orchestra continuation: the user explicitly authorizes implementation and project file changes\./i.test(prompt)) return true;
+  if (/\b(?:read[- ]only|do not|don't|without)\s+(?:inspect(?:ion)?\s+and\s+)?(?:modify|edit|change|implement|create|write|commit|push)|\b(?:do not|don't)\s+start\s+(?:implementing|implementation)|\bjust\s+(?:asking|answer|explain|plan)\b/i.test(prompt)) return false;
+  const action = '(?:implement|create|build|add|change|edit|fix|remove|delete|update|commit|push)';
+  return new RegExp(`^\\s*(?:please\\s+)?${action}\\b`, 'i').test(prompt)
+    || new RegExp(`\\b(?:go ahead(?:\\s+and)?|please|can you|could you|i want you to|let(?:'|’)s|proceed to)\\b[\\s\\S]{0,120}\\b${action}\\b`, 'i').test(prompt)
+    || new RegExp(`\\b(?:implement|fix|update|add|remove|delete|commit|push)\\s+(?:this|that|it|the|these|those|now)\\b`, 'i').test(prompt)
+    || /\bplan(?:\s+out)?\s+and\s+implement\b/i.test(prompt);
+}
+
+export function buildContinuationPrompt(prompt: string, previous: Pick<TaskRecord, 'prompt' | 'result' | 'state'> | null) {
+  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, '').trim();
+  const continuation = /^(?:yes(?:,?\s+please)?|proceed|continue|go ahead|do it|start|begin|start implementation|begin implementation|implement it|yes,?\s+(?:proceed|continue|go ahead|do it|start|begin))$/.test(normalized);
+  if (!continuation || !previous || !['completed', 'completed_unpushed'].includes(previous.state)) return null;
+  const priorResult = previous.result?.trim().slice(-6_000);
+  return `Orchestra continuation: the user explicitly authorizes implementation and project file changes.\n\nContinue and complete the previously requested work without asking for another approval. Implement and verify the approved next step.\n\nPrevious request:\n${previous.prompt}${priorResult ? `\n\nPrevious task result and proposed next step:\n${priorResult}` : ''}\n\nCurrent user instruction:\n${prompt}`;
 }
 
 export function normalizeRiskFlags(value: unknown): string[] {

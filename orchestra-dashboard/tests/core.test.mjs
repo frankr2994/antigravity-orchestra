@@ -4,12 +4,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
-import { evaluateRunHealth, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
+import { evaluateRunHealth, implementationChangeState, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
 import { codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
 import { isGemmaRiderToolAllowed } from '../dist-server/mcp.js';
@@ -42,6 +42,31 @@ test('classification removes sentinel risk flags and prevents Codex over-routing
   assert.equal(normalized.codexRole, 'none');
   assert.equal(selection.antigravity, 'gemini-3.6-flash-medium');
   assert.equal(selection.codex, null);
+});
+
+test('explicit implementation language overrides a false non-mutating model classification', () => {
+  const prompt = 'I want a detailed wiring tool. Go ahead and plan out and implement this now.';
+  const normalized = normalizeClassification({ type: 'design', mutating: false, complexity: 'deep', riskFlags: [], codexRole: 'design', localOperation: 'none', title: 'Design tool' }, prompt);
+  assert.equal(hasExplicitMutationIntent(prompt), true);
+  assert.equal(normalized.mutating, true);
+  assert.equal(normalized.type, 'design');
+  assert.equal(normalized.codexRole, 'design');
+  assert.equal(hasExplicitMutationIntent('Plan the implementation, but do not modify files.'), false);
+});
+
+test('short approval continues the previous completed task with implementation authority', () => {
+  const expanded = buildContinuationPrompt('proceed', { state: 'completed', prompt: 'Plan a wiring editor', result: 'Next step: implement the product spike.' });
+  assert.match(expanded || '', /explicitly authorizes implementation/i);
+  assert.match(expanded || '', /Plan a wiring editor/);
+  assert.equal(hasExplicitMutationIntent(expanded || ''), true);
+  assert.equal(buildContinuationPrompt('What does this mean?', { state: 'completed', prompt: 'Explain repo', result: 'Done' }), null);
+});
+
+test('implementation completion distinguishes working changes, direct commits, and no progress', () => {
+  assert.equal(implementationChangeState('abc', { head: 'abc', files: [{ path: 'src/app.ts' }] }), 'working_tree');
+  assert.equal(implementationChangeState('abc', { head: 'def', files: [] }), 'committed');
+  assert.equal(implementationChangeState('abc', { head: 'abc', files: [{ path: '.orchestra/runtime.json' }] }), 'none');
+  assert.equal(implementationChangeState('abc', { head: 'abc', files: [] }), 'none');
 });
 
 test('remote connection intent stays local even when Gemma marks it security-sensitive', () => {

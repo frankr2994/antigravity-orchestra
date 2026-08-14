@@ -1,495 +1,229 @@
-# 🎼 Antigravity Orchestra
+# Antigravity Orchestra
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-Windows-blue.svg)](#prerequisites)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Sora-bluesky/antigravity-orchestra/issues)
+Antigravity Orchestra is a Windows-first, local command center for running a project-scoped software-development workflow across three AI agents:
 
-**🌐 Language: English | [日本語](README.ja.md)**
+- **Gemma in LM Studio** classifies requests, answers bounded repository questions, validates results, and explains active runs.
+- **Google Antigravity** researches and implements changes.
+- **OpenAI Codex** provides independent design, debugging, and code review.
 
----
+You select a project directory once and work from Orchestra's web dashboard. Each request is routed automatically, every agent is pinned to that directory, and file-changing tasks continue through implementation, review, repair, verification, commit, and push without requiring you to launch separate CLIs in the project folder.
 
-**Antigravity Orchestra** is a multi-agent development template that orchestrates [Google Antigravity](https://antigravity.google) (Gemini) and [OpenAI Codex CLI](https://github.com/openai/codex) for AI-powered development workflows.
+> **Status:** Active local development. The dashboard is functional and used for real projects, but provider CLIs and their structured output formats are still evolving.
 
-Inspired by [Claude Code Orchestra](https://github.com/DeL-TaiseiOzaki/claude-code-orchestra) by @mkj (Matsuo Institute).
+## Dashboard
 
----
+### Live task execution
 
-## ✨ What is This?
+![Orchestra live run monitor showing agent progress, project changes, context pressure, and project-scoped chat](docs/images/live-run-monitor.png)
 
+The run monitor shows the current phase, active agent, elapsed time, review cycle, changed files, recent timeline, provider context, and sanitized agent activity. You can ask Gemma questions about the active run without interrupting it.
+
+### System, quota, and MCP status
+
+![Orchestra system telemetry, provider quota, and Rider MCP status](docs/images/system-and-mcp-status.png)
+
+The dashboard tracks local system load, agent availability, provider quota, and JetBrains Rider MCP health. Rider is probed with a real MCP initialization and tool-list exchange rather than being considered healthy merely because a configuration file exists.
+
+## What Orchestra Does
+
+- Keeps every conversation and task attached to an explicit project directory.
+- Routes simple repository questions to the local Gemma model when evidence is sufficient.
+- Escalates design, debugging, testing, and review work to Codex.
+- Sends Codex analysis to Antigravity for implementation.
+- Runs independent Codex review after changes are made.
+- Automatically returns blocking findings to Antigravity for repair.
+- Runs bounded project verification before accepting a change set.
+- Creates a handoff entry, commits reviewed files, and pushes through Git.
+- Preserves partial task changes after failures or dashboard restarts.
+- Shows live task health, repair cycles, changed files, context pressure, and quota.
+- Detects Rider MCP availability separately for Antigravity, Codex, and Gemma.
+- Supports a least-privilege, read-only Rider tool bridge for Gemma.
+- Performs narrowly validated local operations, such as connecting a clean project to an empty GitHub remote, without wasting a three-agent cycle.
+
+## Automatic Workflow
+
+```text
+User request
+    |
+    v
+Gemma classification and routing
+    |
+    +-- safe, small repository question --> Gemma evidence answer
+    |
+    +-- bounded local operation ----------> Orchestra adapter
+    |
+    +-- design/debug/review --------------> Codex specialist
+                                                |
+                                                v
+                                      Antigravity implementation
+                                                |
+                                                v
+                                          Codex review
+                                                |
+                              +-----------------+-----------------+
+                              |                                   |
+                         blocking finding                       pass
+                              |                                   |
+                              v                                   v
+                     Antigravity repair                 verification + Git
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        User                                 │
-│                          │                                  │
-│                          ▼                                  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │    Google Antigravity (Orchestrator + Researcher)     │  │
-│  │    → Gemini / large context window                   │  │
-│  │    → User interaction, research, implementation       │  │
-│  │                                                       │  │
-│  │        ┌─────────────────────────────────────────┐    │  │
-│  │        │   Codex CLI (via Skills scripts/)       │    │  │
-│  │        │   → Design, Debug, Review               │    │  │
-│  │        └─────────────────────────────────────────┘    │  │
-│  └───────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-```
 
-**Single interface - Antigravity only.** Users interact only with the Antigravity CLI (`agy`), which delegates to Codex when needed. The same configuration also works in the Antigravity IDE.
+Explicit implementation language is normalized deterministically, so a model cannot accidentally turn “plan and implement” into a read-only task. Short approvals such as `proceed`, `continue`, and `do it` inherit the preceding completed task in the same conversation. A mutating task that produces no project changes is retried once and is never reported as successfully completed without evidence of implementation.
 
----
+## Agent Responsibilities
 
-## 🎯 Who is This For?
+| Agent | Primary responsibilities | Project authority |
+|---|---|---|
+| Gemma | Classification, bounded repository answers, postflight checks, summaries, run explanations | Read-only evidence and allowlisted Rider inspection tools |
+| Antigravity | Repository research, implementation, repairs, synchronous verification | File changes within the selected project |
+| Codex | Architecture, root-cause analysis, test design, independent review | Read-only analysis |
+| Orchestra | Task state, project isolation, recovery, verification, commits, pushes, telemetry | Validated local adapters and dashboard-owned Git finalization |
 
-- Using Antigravity but want better design and review quality
-- Finding it tedious to switch between multiple AIs
-- Want code checked from both Google and OpenAI perspectives
+Model selection is automatic. Deep or sensitive work uses stronger reasoning profiles; small work can use faster models, and quota pressure may move only non-critical work to a cheaper model. Required design and review roles are not skipped merely to save quota.
 
----
+## Context and Quota Awareness
 
-## 🎭 Role Distribution
+Codex runs through its app-server protocol, allowing Orchestra to record the current thread, turn, context-window use, token activity, cancellation, and quota. Each Codex role and review cycle starts with a fresh ephemeral thread.
 
-| Role | Agent | Tasks |
-|------|-------|-------|
-| **Orchestrator** | Antigravity | User interaction, task management, workflow control |
-| **Researcher** | Antigravity | Library research, documentation search (large context window) |
-| **Builder** | Antigravity | Code implementation based on Codex's design |
-| **Designer** | Codex CLI | Architecture design, implementation planning, trade-off analysis |
-| **Debugger** | Codex CLI | Root cause analysis, complex bug investigation |
-| **Auditor** | Codex CLI | Code review, quality checks, TDD design |
+Antigravity usage is collected from its supported usage output and stream telemetry. When an authoritative context percentage is unavailable, Orchestra says so rather than inventing one. Large prior turns can cause Orchestra to rotate the provider conversation while retaining compact local session memory.
 
----
+## Rider MCP
 
-## 📋 Prerequisites
+Orchestra currently provides:
 
-| Requirement | How to Check | Notes |
-|-------------|--------------|-------|
-| Git | `git --version` | [git-scm.com](https://git-scm.com) if missing |
-| PowerShell 5.1+ | `$PSVersionTable.PSVersion` | Ships with Windows; PowerShell 7 (`pwsh`) also works |
-| Script execution allowed | `Get-ExecutionPolicy` | If `Restricted`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` |
-| Antigravity CLI (`agy`) | `agy --version` in PowerShell | [Official Site](https://antigravity.google) (IDE also works) |
-| Codex CLI | `codex --version` in PowerShell | [Official installer](https://learn.chatgpt.com/docs/codex/cli) (below). npm route (`npm i -g @openai/codex`, requires Node.js) also works |
-| Codex auth | Sign in with `codex login` | A supported ChatGPT plan or API key |
+- Live server identity, version, endpoint, latency, and tool count.
+- Agent-specific configured, enabled, available, and access states.
+- Full native Rider MCP configuration for Antigravity.
+- Native Rider MCP configuration for Codex, while Codex remains instruction-bound to read-only work.
+- A loopback-only Gemma bridge exposing a bounded allowlist of read-only Rider tools.
 
-> **Note for non-Japanese users**: the agent instruction files in this template (`AGENTS.md`, `.agents/rules/`, `.agents/workflows/`, `.codex/AGENTS.md`) are currently written in Japanese. The agent responds and generates documents in **your** language (see `.agents/rules/language.md`), so the workflows work fine in English — but customizing the instruction files themselves currently requires reading Japanese (or letting the agent translate them for you).
+Capability-aware preference instructions and detailed per-tool timeline reporting are planned next. Today, Antigravity and Codex discover Rider through their native MCP configurations, while Gemma is explicitly given its allowed Rider tools during eligible repository-answer turns.
 
----
+## Git Safety and Recovery
 
-## 🚀 Quick Start
+File-changing tasks require a Git repository. Orchestra:
 
-### Step 1: Clone the Template
+1. Detects pre-existing changes and requires a separate reviewed baseline.
+2. Keeps `.orchestra/`, logs, caches, and generated state out of project commits.
+3. Prevents agents from owning final commits or pushes.
+4. Reviews the complete uncommitted change set with Codex.
+5. Runs detected project checks synchronously.
+6. Adds a `docs/HANDOFF.md` entry.
+7. Commits only the reviewed project paths and pushes the current branch.
 
-Run in PowerShell:
+If a provider fails after creating files, Orchestra preserves those changes and exposes a recovery action. Recovery continues the same task's implementation/review ownership instead of misclassifying its partial files as an unrelated baseline.
+
+## Requirements
+
+### Required
+
+- Windows 10 or 11
+- PowerShell 5.1 or newer
+- Node.js 22 or newer and npm
+- Git
+- Google Antigravity CLI (`agy`), authenticated
+- OpenAI Codex CLI, authenticated
+- LM Studio with its OpenAI-compatible server enabled
+- `gemma-4-e2b-it-qat` loaded by default, or `LM_STUDIO_MODEL` set to another tool-capable local model
+
+### Optional
+
+- JetBrains Rider with its MCP server enabled
+- NVIDIA GPU for local-model and system telemetry
+- A GitHub remote for automatic push finalization
+
+## Quick Start
 
 ```powershell
-# Navigate to your projects folder
-cd C:\Users\YOUR_USERNAME\Documents\Projects
-
-# Clone the template
-git clone https://github.com/Sora-bluesky/antigravity-orchestra.git my-project
-
-# Move into the project
-cd my-project
+git clone https://github.com/frankr2994/antigravity-orchestra.git
+Set-Location .\antigravity-orchestra
+.\Start-Orchestra.ps1
 ```
 
-### Step 2: Check Codex CLI
+The launcher installs dashboard dependencies when needed and starts both the local API and Vite dashboard. Open the URL printed by Vite, normally:
 
-Confirm Codex CLI works in PowerShell:
+```text
+http://127.0.0.1:5173
+```
+
+Then:
+
+1. Select **Browse project** and choose the repository you want the agents to use.
+2. Review onboarding status and any existing-change warning.
+3. Create or select a conversation.
+4. Enter the complete request once; Orchestra owns routing and continuation.
+5. Follow the live monitor, or ask Gemma about the run while it remains active.
+
+The backend listens only on loopback by default and uses a per-process dashboard token for state-changing API requests.
+
+## Configuration
+
+| Environment variable | Default | Purpose |
+|---|---|---|
+| `ORCHESTRA_PORT` | `3001` | Local API port |
+| `ORCHESTRA_DATA_DIR` | `%LOCALAPPDATA%\AntigravityOrchestra` | SQLite database and runtime state |
+| `ORCHESTRA_TEMPLATE_ROOT` | Repository root | Managed project-onboarding template |
+| `LM_STUDIO_BASE_URL` | `http://127.0.0.1:1234/v1` | LM Studio OpenAI-compatible API |
+| `LM_STUDIO_MODEL` | `gemma-4-e2b-it-qat` | Local routing and monitoring model |
+
+Runtime conversations and task events are stored in SQLite under the local application-data directory, not in the selected project.
+
+## Development
 
 ```powershell
-codex --version   # should print a version string
+Set-Location .\orchestra-dashboard
+npm install
+npm run dev
 ```
 
-That's it — no path configuration needed. The scripts resolve `codex` from PATH automatically,
-and the model is inherited from `~/.codex/config.toml`.
-
-If it's not installed yet, use the [official installer](https://learn.chatgpt.com/docs/codex/cli) and authenticate with `codex login`:
+Run the complete quality gate with:
 
 ```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://chatgpt.com/codex/install.ps1 | iex"
+npm run check
 ```
 
-(`npm i -g @openai/codex` also works if you have Node.js.)
+This runs linting, the TypeScript/server and Vite production builds, and the Node regression suite.
 
-To diagnose the whole environment at once, run the doctor script:
+## Repository Layout
 
-```powershell
-.\.agents\skills\codex-system\scripts\check.ps1
+```text
+orchestra/
+|-- Start-Orchestra.ps1          # supported dashboard launcher
+|-- orchestra-dashboard/
+|   |-- src/                     # React command center
+|   |-- server/                  # Express API, routing, agents, Git, MCP
+|   |-- scripts/                 # development and telemetry helpers
+|   `-- tests/                   # routing, recovery, protocol, and Git tests
+|-- .agents/                     # Antigravity rules, workflows, and skills
+|-- .codex/                      # Codex role boundary
+|-- docs/
+|   |-- DESIGN.md                # architecture decision history
+|   |-- HANDOFF.md               # incremental implementation handoff
+|   `-- images/                  # README screenshots
+`-- examples/                    # example project material
 ```
 
-### Step 3: Open the Project with Antigravity CLI
+## Current Limitations
 
-Launch `agy` in the project folder:
+- Windows is the supported host platform today.
+- The dashboard is designed for a trusted, single-user loopback environment.
+- Antigravity's context percentage is shown only when a trustworthy provider source is available.
+- Generic Codex command failures are currently sanitized into a fallback notice; richer safe error reporting is planned.
+- Rider health proves protocol availability, not that an agent used Rider during a particular turn.
+- MCP enable/disable management is not yet exposed in the UI.
+- Real-time multi-user collaboration is out of scope.
 
-```powershell
-cd C:\Users\YOUR_USERNAME\Documents\Projects\my-project
-agy
-```
+## Documentation
 
-> ⚠️ **Use the interactive TUI for orchestra features.** In headless mode (`agy -p "..."`) the workspace customizations (`.agents/` skills and `AGENTS.md`) are **not** injected (verified on agy 1.1.5), so `/startproject`-style workflows will not fire. Headless mode is fine for plain one-shot questions only.
+- [Architecture decisions](docs/DESIGN.md)
+- [Current handoff](docs/HANDOFF.md)
+- [Execution walkthrough](docs/walkthrough.md)
+- [Legacy Japanese guide](README.ja.md)
 
-> **Prefer the IDE?** Opening this folder via **File → Open Folder** in the Antigravity IDE loads the same `.agents/` configuration.
+## License
 
-### Step 4: Try It!
+[MIT](LICENSE)
 
-In agy's chat, type:
+## Acknowledgments
 
-```
-/startproject Hello World
-```
-
-These slash commands work because the root `AGENTS.md` maps them to `.agents/workflows/*.md` — if agy treats `/startproject` as plain text, check that `AGENTS.md` exists at the workspace root and that you launched `agy` inside the project folder.
-
-Antigravity will automatically:
-
-1. Analyze your project structure
-2. Ask about requirements
-3. Delegate design review to Codex
-4. Create a task list
-5. Document decisions in `docs/DESIGN.md`
-
-> 💡 **See a real execution walkthrough**:
-> Check out [docs/walkthrough.md](docs/walkthrough.md) for actual transcript excerpts and Codex reviews.
-
-
----
-
-## 📁 Directory Structure
-
-```
-my-project/
-├── AGENTS.md             # Entry-point rules agy reads first (slash-command map)
-├── .agents/
-│   ├── workflows/        # 6 workflows
-│   │   ├── startproject.md   # Main workflow (6 phases)
-│   │   ├── plan.md           # Implementation planning
-│   │   ├── tdd.md            # Test-driven development
-│   │   ├── simplify.md       # Refactoring
-│   │   ├── checkpoint.md     # Session persistence
-│   │   └── init.md           # Project initialization
-│   │
-│   ├── skills/           # 5 skills
-│   │   ├── codex-system/     # Codex CLI integration
-│   │   │   ├── SKILL.md
-│   │   │   └── scripts/
-│   │   │       ├── ask_codex.ps1     # Consultation (analyze/design/debug/review)
-│   │   │       ├── review.ps1        # Change review (codex exec review)
-│   │   │       ├── check.ps1         # Environment doctor
-│   │   │       └── CodexHelpers.psm1 # Shared helpers
-│   │   ├── design-tracker/
-│   │   ├── research/
-│   │   ├── update-design/
-│   │   └── update-lib-docs/
-│   │
-│   └── rules/            # 8 rules
-│       ├── delegation-triggers.md  # Auto-routing (Hooks alternative)
-│       ├── role-boundaries.md      # Role separation
-│       ├── language.md
-│       ├── codex-delegation.md
-│       ├── coding-principles.md
-│       ├── dev-environment.md
-│       ├── security.md
-│       └── testing.md
-│
-├── .codex/               # Codex CLI configuration
-│   └── AGENTS.md
-│
-├── docs/                 # Knowledge base
-│   ├── DESIGN.md             # Design decisions
-│   ├── walkthrough.md        # Real execution walkthrough (en/ja)
-│   ├── research/             # Research results
-│   └── libraries/            # Library constraints
-│
-└── logs/
-    └── codex-responses/      # Codex consultation logs
-```
-
----
-
-## 📖 Workflows in Detail
-
-### /startproject - Main Workflow (6 Phases)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Phase 1: Antigravity (Research)                                │
-│  → Repository analysis, library research                        │
-│  → Output: docs/research/{feature}.md                           │
-├─────────────────────────────────────────────────────────────────┤
-│  Phase 2: Antigravity (Requirements)                            │
-│  → Requirements gathering (goals, scope, constraints, criteria) │
-│  → Draft implementation plan                                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Phase 3: Codex CLI (Design Review)                             │
-│  → Reviews Phase 1 research + Phase 2 plan                      │
-│  → Risk analysis, implementation order suggestions              │
-├─────────────────────────────────────────────────────────────────┤
-│  Phase 4: Antigravity (Task Creation)                           │
-│  → Integrate all inputs                                         │
-│  → Create task list, get user confirmation                      │
-├─────────────────────────────────────────────────────────────────┤
-│  Phase 5: Antigravity (Documentation)                           │
-│  → Record design decisions in docs/DESIGN.md                    │
-├─────────────────────────────────────────────────────────────────┤
-│  Phase 6: Codex CLI (Quality Assurance)                         │
-│  → Post-implementation review by Codex                          │
-│  → Unbiased quality assurance                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-### /plan - Implementation Planning
-
-Create a detailed implementation plan with Codex's help.
-
-```
-/plan Add user authentication
-```
-
-### /tdd - Test-Driven Development
-
-Codex designs test cases, Antigravity implements Red-Green-Refactor cycle.
-
-```
-/tdd Login functionality
-```
-
-### /simplify - Refactoring
-
-Simplify and improve code readability.
-
-```
-/simplify src/auth/login.py
-```
-
-### /checkpoint - Session Persistence
-
-Save session state for later continuation.
-
-```
-/checkpoint          # Basic: history log
-/checkpoint --full   # Full: includes git history and file changes
-```
-
----
-
-## 🛠️ Skills in Detail
-
-### codex-system - Codex CLI Integration
-
-The core skill for delegating design, debugging, and review to Codex.
-
-**Trigger Keywords** (representative — the full list lives in [`.agents/skills/codex-system/SKILL.md`](.agents/skills/codex-system/SKILL.md), the single source of truth):
-
-| Category | Examples |
-|----------|----------|
-| Design | "design", "architecture", "trade-off" |
-| Debug | "why doesn't work", "error", "bug" |
-| Review | "review", "check" |
-
-**When NOT to use:**
-- Simple file editing
-- Research/investigation (Antigravity handles this)
-- User conversation
-
-### Other Skills
-
-| Skill | Purpose |
-|-------|---------|
-| design-tracker | Track and record design decisions to docs/DESIGN.md |
-| research | Library research and documentation |
-| update-design | Update DESIGN.md |
-| update-lib-docs | Document library constraints |
-
----
-
-## 📏 Rules in Detail
-
-### delegation-triggers.md (Most Important)
-
-Replaces Claude Code Orchestra's 6 Hooks with Rules-based routing.
-
-**Decision Flow:**
-
-```
-Receive user input
-    │
-    ▼
-[Check 1] Design decision needed?
-    → Yes: Suggest /plan or use codex-system skill
-    │
-    ▼
-[Check 2] TDD needed?
-    → Yes: Suggest /tdd (Antigravity doesn't design tests directly)
-    │
-    ▼
-[Check 3] Debugging needed?
-    → Yes: Use codex-system skill
-    │
-    ▼
-[Check 4] Implementation complete?
-    → Yes: Suggest review with codex-system skill
-    │
-    ▼
-Antigravity executes directly (research, file editing, etc.)
-```
-
-### role-boundaries.md (Role Separation)
-
-| Antigravity Does | Codex Does |
-|------------------|------------|
-| User interaction | Test design (TDD) |
-| Library research | Architecture design |
-| File editing | Trade-off analysis |
-| Code implementation | Root cause analysis |
-| | Code review |
-
-**Quick Rule: "Does this need a design decision?" → Delegate to Codex**
-
-### Other Rules
-
-| Rule | Content |
-|------|---------|
-| language.md | Think and ask Codex in English; respond and generate docs in the user's language |
-| codex-delegation.md | Detailed Codex delegation rules |
-| coding-principles.md | Simplicity, single responsibility, early return |
-| dev-environment.md | Development environment (uv, ruff, pytest, etc.) |
-| security.md | Secret management, input validation |
-| testing.md | TDD, AAA pattern, coverage goals |
-
----
-
-## 💬 Basic Usage Examples
-
-### Example 1: New Feature Development
-
-```
-/startproject User authentication
-```
-
-Antigravity automatically runs 6 phases.
-
-### Example 2: Design Consultation
-
-```
-How should I design this feature?
-```
-
-Antigravity detects "design" keyword and delegates to Codex.
-
-### Example 3: Debugging
-
-```
-I don't understand why this error occurs
-```
-
-Antigravity delegates root cause analysis to Codex.
-
-### Example 4: Test-Driven Development
-
-```
-/tdd Login functionality
-```
-
-Codex designs test cases, Antigravity implements.
-
----
-
-## ❓ FAQ
-
-<details>
-<summary><strong>Q: Can I use this without Codex CLI?</strong></summary>
-
-Yes, but you'll lose the design review and debugging capabilities. Antigravity will handle everything directly, which may reduce code quality for complex projects.
-
-</details>
-
-<details>
-<summary><strong>Q: Why is Codex called via PowerShell scripts?</strong></summary>
-
-The scripts centralize prompt assembly, log saving, and error handling in one place. They resolve `codex` from PATH automatically and save results to `logs/codex-responses/`.
-
-</details>
-
-<details>
-<summary><strong>Q: How do I update the paths if I reinstall Node.js?</strong></summary>
-
-Nothing to do. The scripts resolve `codex` from PATH on every run, so as long as `codex --version` works, reinstalling changes nothing.
-
-</details>
-
-<details>
-<summary><strong>Q: Can I customize the workflows?</strong></summary>
-
-Yes! Edit the files in `.agents/workflows/`. Each workflow is a Markdown file with frontmatter (name, description) and step-by-step instructions. Note: these files are currently written in Japanese — ask the agent to translate one before editing if needed.
-
-</details>
-
-<details>
-<summary><strong>Q: Do I need ChatGPT Plus or Pro?</strong></summary>
-
-Plus ($20/month) is sufficient. Consider Pro ($200/month) if you need higher usage limits. API-key authentication is also supported by Codex CLI.
-
-</details>
-
----
-
-## 🔧 Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| `running scripts is disabled on this system` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, then retry |
-| `/startproject` treated as plain text | Check `AGENTS.md` exists at the workspace root and `agy` was launched inside the project folder (interactive mode, not `-p`) |
-| Codex skill not triggered | Explicitly say "Ask Codex about this" or use keywords (design, debug, review) |
-| Codex CLI not found error | Run `codex --version` in PowerShell. If missing, use the [official installer](https://learn.chatgpt.com/docs/codex/cli) |
-| Codex returns empty response | Check auth status with `codex login` |
-| Role boundary violated | Explicitly say "Delegate TDD to Codex" |
-
----
-
-## ⚠️ Important Notes
-
-- **Google Antigravity is under active development.** Features and behavior may change.
-- **Codex CLI requires a ChatGPT subscription.** Sign in via OAuth authentication.
-- Check the [official site](https://antigravity.google) for the latest information.
-
----
-
-## 🤝 Feedback
-
-For bug reports or suggestions, please [open an issue](https://github.com/Sora-bluesky/antigravity-orchestra/issues).
-
----
-
-## 🔗 Related Links
-
-### References
-
-| Resource | Author | Content |
-|----------|--------|---------|
-| [Claude Code Orchestra](https://zenn.dev/mkj/articles/claude-code-orchestra_20260120) | @mkj (Matsuo Institute) | Multi-agent coordination concept |
-| [GitHub: claude-code-orchestra](https://github.com/DeL-TaiseiOzaki/claude-code-orchestra) | DeL-TaiseiOzaki | Implementation example |
-
-### Tools
-
-- [Google Antigravity](https://antigravity.google)
-- [OpenAI Codex CLI](https://github.com/openai/codex)
-
-### Related Articles (Japanese)
-
-- [Antigravity Install Guide](https://zenn.dev/sora_biz/articles/antigravity-windows-install-guide)
-- [Detailed Usage Guide (Zenn)](https://zenn.dev/sora_biz/articles/antigravity-orchestra-guide)
-
----
-
-## 📜 License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-## 🙏 Acknowledgments
-
-This project is inspired by **Claude Code Orchestra** by [@mkj](https://zenn.dev/mkj) (Matsuo Institute). The original architecture and concept of multi-agent coordination were adapted for Google Antigravity users.
-
----
-
-📅 **Last Updated**: July 21, 2026
+The original repository was inspired by Claude Code Orchestra and the Antigravity/Codex delegation pattern. This fork has evolved into a project-scoped tri-agent command center with local-model routing, automatic review and repair, observability, recovery, Git finalization, and MCP health monitoring.

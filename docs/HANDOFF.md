@@ -84,3 +84,12 @@ feat: Implement local Git logger skill for incremental change logging and commit
     *   It checks for existing origins and prevents overwriting them unless explicitly handled (rejecting force-push/replace).
     *   It performs an initial push (`git push --set-upstream`) after successfully adding the remote, ensuring the local branch is
 
+
+## [2026-08-13 23:29:57] Handoff Update
+*   **Renamed and Expanded README:** The project description was significantly updated to introduce "Antigravity Orchestra" as a Windows-first, local command center orchestrating three AI agents: Gemma (LM Studio), Google Antigravity (Gemini), and OpenAI Codex. It details the role distribution for each agent (Orchestrator, Researcher, Builder, Designer, Debugger, Auditor).
+*   **Enhanced Workflow Logic:** The core workflow now explicitly handles implementation intent using `hasExplicitMutationIntent` to determine if a prompt requires direct file changes (`mutating: true`), overriding model classification when necessary.
+*   **Continuation Prompting Implemented:** A new function, `buildContinuationPrompt`, was added to handle user approvals (e.g., "proceed", "continue") by constructing prompts that explicitly authorize implementation and continuation of the previous task without requiring a new approval step for short commands.
+*   **Task Management Improvements:** The `TaskManager` now includes logic to automatically retry implementation turns if they produce no project changes, using explicit write instructions. It also prevents Orchestra from committing directly if it detects uncommitted changes are present before final review.
+*   **Dashboard and Telemetry Updates:** New files were added for system telemetry (`docs/images/system-and-mcp-status.png`) and live run monitoring visualization (`docs/images/live-run-monitor.png`).
+*   **Code Refactoring in `orchestra-
+

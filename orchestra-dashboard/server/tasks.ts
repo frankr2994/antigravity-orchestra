@@ -304,6 +304,31 @@ export class TaskManager {
       if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
       this.emit(taskId, 'antigravity', 'agent.completed', { summary: agentResult.text.slice(-5000) });
 
+      if (classification.mutating) {
+        let progress = implementationChangeState(status.head, await getGitStatus(project.root));
+        if (progress === 'committed') throw new Error('Antigravity committed project changes directly. Orchestra stopped because it can no longer review and finalize the complete uncommitted change set safely.');
+        if (progress === 'none') {
+          this.emit(taskId, 'system', 'task.implementation-retry', { attempt: 1, message: 'The first implementation turn produced no project changes. Orchestra is retrying automatically with explicit write instructions.' });
+          agentResult = await runAntigravity({
+            root: project.root,
+            prompt: `The prior implementation turn produced no project file changes. Implement the original request now. Do not return another plan, request approval, or stop at analysis. Create or modify the necessary project files, run synchronous verification, and leave the complete changes uncommitted for Orchestra review.\n\nOriginal request:\n${task.prompt}`,
+            model: models.antigravity,
+            effort: 'high',
+            mutating: true,
+            conversationId: agentResult.conversationId || session.antigravityConversationId,
+            signal,
+            onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk),
+            onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage),
+          });
+          if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
+          if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
+          this.emit(taskId, 'antigravity', 'agent.completed', { retry: 1, summary: agentResult.text.slice(-5000) });
+          progress = implementationChangeState(status.head, await getGitStatus(project.root));
+          if (progress === 'committed') throw new Error('Antigravity committed project changes directly during the automatic retry. Orchestra stopped because it cannot safely review and finalize that hidden change set.');
+          if (progress === 'none') throw new Error('Implementation produced no project file changes after an automatic retry. Orchestra did not mark the request complete; inspect the agent output or retry with a more specific implementation request.');
+        }
+      }
+
       if (!classification.mutating && evidence) agentResult.text = await this.postflight(taskId, project.root, task.prompt, agentResult.text, evidence);
 
       if (classification.mutating) {
@@ -498,6 +523,12 @@ export function reviewFingerprint(review: string) {
     .filter((line) => /^([-*]|\d+\.)\s*(critical|high|medium|low|p[0-3]|\[p[0-3]\])/i.test(line))
     .map((line) => line.replace(/:\d+/g, ':#').replace(/\s+/g, ' '));
   return createHash('sha256').update(findings.join('\n') || review.replace(/\s+/g, ' ').toLowerCase()).digest('hex');
+}
+
+export function implementationChangeState(beforeHead: string | null, after: { head: string | null; files: Array<{ path: string }> }) {
+  if (after.files.some((file) => !isOrchestraInternalPath(file.path))) return 'working_tree' as const;
+  if (beforeHead && after.head && beforeHead !== after.head) return 'committed' as const;
+  return 'none' as const;
 }
 
 function diffFingerprint(diff: string) { return createHash('sha256').update(diff).digest('hex'); }

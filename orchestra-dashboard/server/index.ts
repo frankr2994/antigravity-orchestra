@@ -8,7 +8,7 @@ import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, on
 import { getGitStatus, pushCurrent } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
-import { answerRunQuestion, explainRunHealth } from './agents.js';
+import { answerRunQuestion, buildContinuationPrompt, explainRunHealth } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus } from './mcp.js';
@@ -94,8 +94,11 @@ app.post('/api/sessions/:id/tasks', (req, res, next) => {
     if (existingTaskId) throw new Error(`This project already has an active or queued task (${existingTaskId}). Open that task instead of creating a duplicate.`);
     const prompt = String(req.body?.prompt || '').trim();
     if (!prompt || prompt.length > 100_000) throw new Error('A prompt between 1 and 100,000 characters is required.');
-    const task = store.createTask(session.projectId, session.id, prompt);
+    const previousTask = store.listTasks(session.projectId).find((candidate) => candidate.sessionId === session.id) || null;
+    const continuationPrompt = buildContinuationPrompt(prompt, previousTask);
+    const task = store.createTask(session.projectId, session.id, continuationPrompt || prompt);
     store.addMessage({ sessionId: session.id, taskId: task.id, role: 'user', agent: 'system', content: prompt });
+    if (continuationPrompt && previousTask) store.addEvent(task.id, 'system', 'task.continuation', { previousTaskId: previousTask.id, message: 'Continuing the prior task with explicit implementation authorization.' });
     tasks.enqueue(task.id);
     res.status(202).json(task);
   } catch (error) { next(error); }

@@ -385,3 +385,32 @@ Antigravity and Codex retain the full Rider tool inventory supplied by their nat
 - Rider downtime or a changed endpoint appears within the cached health interval, before the next agent is routed.
 - Gemma has 14 bounded read-only Rider tools through Orchestra while Antigravity and Codex retain their native full access.
 - No existing MCP configuration is overwritten, and server enable/disable controls remain future work.
+
+## 2026-08-13: Deterministic implementation intent and continuation
+
+### Background
+
+A greenfield request that explicitly said to plan and implement was classified by Gemma as a non-mutating design task. Orchestra consequently injected a read-only instruction into the Antigravity handoff, accepted a plan-only response as complete, and treated the user's subsequent “proceed” as an unrelated small question.
+
+### Decision
+
+Explicit implementation language is normalized deterministically after model classification. The task may still use Codex for a read-only design stage, but it remains mutating so the resulting analysis flows directly into Antigravity implementation, Codex review, automatic repair, verification, and Git finalization.
+
+Bounded approval phrases such as “proceed,” “continue,” and “do it” inherit the immediately preceding completed task in the same conversation. Orchestra records the continuation link and expands the effective task prompt with explicit write authorization and bounded prior context. Longer prompts and non-terminal prior tasks remain independent.
+
+A mutating Antigravity turn may not complete successfully with no project changes. Orchestra performs one automatic implementation retry with direct instructions. A second no-change result becomes an explicit failure, while a provider-created commit is rejected because it bypasses Orchestra's uncommitted review boundary.
+
+### Reasons
+
+- Model classification is advisory and cannot override unmistakable user authorization.
+- Design plus implementation is one automated workflow, not two approval-gated tasks.
+- Short conversational approvals depend on prior context and should not be routed as standalone questions.
+- A plan-only response is not successful completion of an implementation request.
+- Keeping changes uncommitted preserves independent review and dashboard-owned Git finalization.
+
+### Impact
+
+- “Plan and implement” proceeds automatically from Codex design into Antigravity edits.
+- “Proceed” continues the prior completed proposal in the same conversation.
+- False no-op implementations are retried once and never reported as completed.
+- Explicit read-only and “do not modify” requests remain non-mutating.
