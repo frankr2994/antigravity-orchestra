@@ -1,0 +1,479 @@
+import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { config } from './config.js';
+import type { Store } from './db.js';
+import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
+import { answerRepositoryQuestion, classifyTask, listAntigravityModels, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, validateAgentResponse } from './agents.js';
+import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
+import { commitPaths, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
+import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
+import { verifyProject } from './verification.js';
+
+export class TaskManager {
+  private readonly bus = new EventEmitter();
+  private readonly queue: string[] = [];
+  private readonly runningProjects = new Set<string>();
+  private readonly controllers = new Map<string, AbortController>();
+  private antigravityModels: string[] = [];
+
+  constructor(private readonly store: Store, private readonly maxGlobal = 2) {
+    this.bus.setMaxListeners(100);
+    void this.refreshModels();
+  }
+
+  async refreshModels() { this.antigravityModels = await listAntigravityModels(); }
+
+  enqueue(taskId: string) {
+    if (!this.queue.includes(taskId) && !this.controllers.has(taskId)) this.queue.push(taskId);
+    this.drain();
+  }
+
+  subscribe(taskId: string, listener: (event: TaskEvent) => void) {
+    const name = `task:${taskId}`;
+    this.bus.on(name, listener);
+    return () => this.bus.off(name, listener);
+  }
+
+  cancel(taskId: string) {
+    const task = requireTask(this.store, taskId);
+    if (['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) return;
+    const index = this.queue.indexOf(taskId);
+    if (index >= 0) this.queue.splice(index, 1);
+    this.controllers.get(taskId)?.abort();
+    this.transition(taskId, 'cancelled');
+    this.emit(taskId, 'system', 'task.state', { state: 'cancelled' });
+  }
+
+  async recover(taskId: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    const disposition = recoveryDisposition(task.state, this.activeTaskId(task.projectId) === task.id);
+    if (disposition === 'already_active') return task;
+    if (disposition === 'reject') throw new Error('Only a failed task with preserved changes can be recovered.');
+    const project = requireProject(this.store, task.projectId);
+    const classification = parseTaskClassification(task.classification);
+    const status = await getGitStatus(project.root);
+    const recoverableFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
+    if (!classification?.mutating || !status.isGit || !recoverableFiles.length) throw new Error('This task has no recoverable uncommitted implementation changes.');
+    this.transition(taskId, 'recovering');
+    this.emit(taskId, 'system', 'task.recovery', { message: 'Resuming the failed task with its preserved uncommitted changes.' });
+    this.enqueue(taskId);
+    return requireTask(this.store, taskId);
+  }
+
+  async retry(taskId: string) {
+    const task = requireTask(this.store, taskId);
+    if (task.state !== 'failed') throw new Error('Only a failed task can be retried from a clean project state.');
+    if (this.activeTaskId(task.projectId)) throw new Error('Another task already owns this project. Open that task instead of creating a duplicate queue entry.');
+    const project = requireProject(this.store, task.projectId);
+    const classification = parseTaskClassification(task.classification);
+    const status = await getGitStatus(project.root);
+    const projectFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
+    if (classification?.mutating && projectFiles.length) throw new Error('This failed task has uncommitted changes. Use Resume so Orchestra preserves task ownership through review and finalization.');
+    this.store.updateTask(taskId, { state: 'queued', error: null });
+    this.emit(taskId, 'system', 'task.retry', { message: 'Retrying the failed task from the current clean project state.' });
+    this.emit(taskId, 'system', 'task.state', { state: 'queued' });
+    this.enqueue(taskId);
+  }
+
+  async resolveBaseline(taskId: string) {
+    const task = requireTask(this.store, taskId);
+    if (task.state !== 'baseline_required') throw new Error(`This task is ${task.state}, so its baseline cannot be resolved again.`);
+    if (this.controllers.has(taskId)) throw new Error('This task is already running. Open its original conversation to follow progress.');
+    const project = requireProject(this.store, task.projectId);
+    const status = await getGitStatus(project.root);
+    if (!status.isGit) throw new Error('This project is not a Git repository.');
+    const baselineFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
+    if (baselineFiles.length) {
+      const diff = await getDiff(project.root);
+      const summary = await summarizeChanges(diff, 'Review and preserve changes that existed before the dashboard task.');
+      appendHandoff(project.root, summary.summary, 'Baseline changes');
+      const updated = await getGitStatus(project.root);
+      const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
+      if (!paths.length) throw new Error('No project files remained after excluding Orchestra internal state from the baseline.');
+      const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore: preserve existing changes'), summary.summary);
+      const pushed = await pushCurrent(project.root);
+      this.store.createGitOperation(project.id, task.id, 'baseline', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
+      this.emit(task.id, 'git', 'git.commit', { kind: 'baseline', sha });
+      this.emit(task.id, 'git', 'git.push', pushed);
+    }
+    const latestProject = requireProject(this.store, project.id);
+    const onboarding = await onboardProject(this.store, { ...latestProject, onboardingStatus: 'pending' });
+    this.emit(task.id, 'system', 'project.onboarding', onboarding);
+    this.store.updateTask(task.id, { state: 'queued', error: null });
+    this.enqueue(task.id);
+  }
+
+  private drain() {
+    while (this.controllers.size < this.maxGlobal) {
+      const index = this.queue.findIndex((id) => {
+        const task = this.store.getTask(id);
+        return task && !this.runningProjects.has(task.projectId);
+      });
+      if (index < 0) break;
+      const [taskId] = this.queue.splice(index, 1);
+      const task = this.store.getTask(taskId);
+      if (!task || task.state !== 'queued' && task.state !== 'recovering') continue;
+      const controller = new AbortController();
+      this.controllers.set(taskId, controller);
+      this.runningProjects.add(task.projectId);
+      void this.execute(taskId, controller.signal).finally(() => {
+        this.controllers.delete(taskId);
+        this.runningProjects.delete(task.projectId);
+        this.drain();
+      });
+    }
+  }
+
+  activeTaskId(projectId: string) {
+    for (const [taskId] of this.controllers) if (this.store.getTask(taskId)?.projectId === projectId) return taskId;
+    return this.queue.map((taskId) => this.store.getTask(taskId)).find((task) => task?.projectId === projectId)?.id || null;
+  }
+
+  async getMonitor(taskId: string): Promise<RunMonitor> {
+    const task = requireTask(this.store, taskId);
+    const project = requireProject(this.store, task.projectId);
+    const events = this.store.listEvents(taskId);
+    const now = Date.now();
+    const lastEvent = events.at(-1);
+    const stateEvent = events.findLast((event) => event.type === 'task.state' && String((event.payload as Record<string, unknown>).state) === task.state);
+    const reviewEvent = events.findLast((event) => event.type === 'agent.started' && (event.payload as Record<string, unknown>).role === 'review');
+    const repairEvent = events.findLast((event) => event.type === 'task.repair-progress');
+    const processAlive = this.controllers.has(taskId);
+    const lastActivityAt = lastEvent?.createdAt || task.updatedAt;
+    const inactiveMs = Math.max(0, now - Date.parse(lastActivityAt));
+    let changedFiles: string[] = [];
+    try { changedFiles = (await getGitStatus(project.root)).files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path)); } catch { /* Monitoring must not alter task execution. */ }
+    const health = evaluateRunHealth(task.state, processAlive, inactiveMs);
+    const currentAgent = agentForState(task.state);
+    const reviewCycle = Number((reviewEvent?.payload as Record<string, unknown> | undefined)?.cycle || 0);
+    const repairAttempt = Number((repairEvent?.payload as Record<string, unknown> | undefined)?.attempt || 0);
+    return {
+      taskId,
+      state: task.state,
+      health,
+      currentAgent,
+      phaseStartedAt: stateEvent?.createdAt || task.updatedAt,
+      lastActivityAt,
+      elapsedMs: Math.max(0, now - Date.parse(task.createdAt)),
+      inactiveMs,
+      processAlive,
+      reviewCycle,
+      repairAttempt,
+      changedFiles,
+      summary: monitorSummary({ state: task.state, health, currentAgent, inactiveMs, reviewCycle, repairAttempt, changedFiles: changedFiles.length }),
+      stopReason: ['recovery_required', 'failed', 'cancelled'].includes(task.state) ? task.error : null,
+    };
+  }
+
+  private async execute(taskId: string, signal: AbortSignal) {
+    let task = requireTask(this.store, taskId);
+    const recovery = task.state === 'recovering';
+    const recoveryReason = recovery ? task.error : null;
+    const project = requireProject(this.store, task.projectId);
+    const session = this.store.getSession(task.sessionId);
+    if (!session) return this.fail(taskId, 'Conversation not found.');
+    try {
+      if (recoveryReason) this.store.updateTask(taskId, { error: null });
+      this.transition(taskId, 'routing');
+      const originalClassification = recovery ? parseTaskClassification(task.classification) : null;
+      const classified = originalClassification
+        ? { classification: originalClassification, source: 'recovery' as const, warning: undefined }
+        : await classifyTask(task.prompt);
+      const classification = classified.classification;
+      if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
+      else this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
+      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: config.lmStudioModel };
+      const resolved = resolveAntigravityModel(models.antigravity, this.antigravityModels);
+      models = { ...models, antigravity: resolved.model };
+      if (resolved.warning) this.emit(taskId, 'antigravity', 'warning', { message: resolved.warning });
+      this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(models) });
+
+      this.transition(taskId, 'preflight');
+      if (project.onboardingStatus === 'scope_warning') throw new Error('The selected directory contains nested Git repositories. Select the specific repository you want the agents to work in.');
+      let status = await getGitStatus(project.root);
+      const projectChanges = status.files.filter((file) => !isOrchestraInternalPath(file.path));
+      if (classification.mutating && status.isGit && projectChanges.length && !recovery) {
+        this.transition(taskId, 'baseline_required');
+        this.emit(taskId, 'git', 'git.baseline-required', { files: projectChanges, message: 'Existing changes must be reviewed and committed separately before this task can modify the project.' });
+        return;
+      }
+      if (classification.mutating && status.isGit && projectChanges.length && recovery) {
+        this.emit(taskId, 'system', 'task.recovery', { message: 'Continuing from changes owned by this failed task; they will not be committed as a separate baseline.' });
+      }
+      if (!['ready', 'ready_unpushed', 'ready_non_git'].includes(project.onboardingStatus)) {
+        const onboarding = await onboardProject(this.store, project);
+        this.emit(taskId, 'system', 'project.onboarding', onboarding);
+        status = await getGitStatus(project.root);
+      }
+      if (classification.mutating && !status.isGit) {
+        const initialized = await initializeGreenfieldRepository(this.store, project);
+        this.emit(taskId, 'system', 'project.onboarding', initialized);
+        status = await getGitStatus(project.root);
+        if (!status.isGit) {
+          throw new Error('File-changing tasks require a Git repository so Orchestra can review, verify, and preserve changes. This non-Git directory contains project files, so Orchestra will not initialize it automatically. Initialize Git in the selected directory, create a clean baseline commit, and retry.');
+        }
+      }
+
+      const evidence = !classification.mutating ? collectRepositoryEvidence(project.root, task.prompt, status) : null;
+      const sessionContext = await this.prepareSessionContext(taskId, session);
+      if (evidence && shouldAttemptGemmaAnswer(classification, task.prompt)) {
+        this.transition(taskId, 'running');
+        this.emit(taskId, 'gemma', 'agent.started', { phase: 'repository-answer', model: config.lmStudioModel, evidenceFiles: evidence.includedFiles.length, estimatedTokens: evidence.estimatedTokens });
+        try {
+          const local = await answerRepositoryQuestion({ root: project.root, prompt: task.prompt, evidence, sessionContext });
+          if (local.canAnswer) {
+            models = { ...models, primary: 'gemma' };
+            this.store.updateTask(taskId, { models: JSON.stringify(models) });
+            this.emit(taskId, 'gemma', 'agent.completed', { phase: 'repository-answer', confidence: local.confidence, evidenceFiles: local.evidenceFiles, limitations: local.limitations, attempts: local.attempts });
+            this.complete(taskId, local.answer, 'gemma');
+            return;
+          }
+          this.emit(taskId, 'gemma', 'warning', {
+            message: `Local answer was not accepted (${local.rejectionReasons.join('; ')}); escalating to the configured agent workflow.`,
+            confidence: local.confidence,
+            rejectionReasons: local.rejectionReasons,
+            attempts: local.attempts,
+          });
+        } catch (error) {
+          this.emit(taskId, 'gemma', 'warning', { message: `Local repository answering was unavailable; escalating safely. ${error instanceof Error ? error.message : String(error)}` });
+        }
+      }
+
+      let specialistContext = '';
+      if (!recovery && classification.codexRole !== 'none' && models.codex && models.codexEffort) {
+        this.transition(taskId, 'reviewing');
+        this.emit(taskId, 'codex', 'agent.started', { role: classification.codexRole, model: models.codex, effort: models.codexEffort });
+        specialistContext = await runCodexAnalysis({ root: project.root, prompt: task.prompt, role: classification.codexRole, model: models.codex, effort: models.codexEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk) });
+        this.emit(taskId, 'codex', 'agent.completed', { role: classification.codexRole, summary: specialistContext.slice(-4000) });
+      }
+
+      this.transition(taskId, 'running');
+      this.emit(taskId, 'antigravity', 'agent.started', { model: models.antigravity, effort: models.antigravityEffort });
+      const implementationContext = [specialistContext, recoveryReason ? `The previous automatic run paused for this reason:\n${recoveryReason}` : ''].filter(Boolean).join('\n\n');
+      let agentResult = await runAntigravity({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId: session.antigravityConversationId, context: implementationContext, recovery, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk) });
+      if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
+      if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
+      this.emit(taskId, 'antigravity', 'agent.completed', { summary: agentResult.text.slice(-5000) });
+
+      if (!classification.mutating && evidence) agentResult.text = await this.postflight(taskId, project.root, task.prompt, agentResult.text, evidence);
+
+      if (classification.mutating) {
+        const afterAgent = await getGitStatus(project.root);
+        if (!afterAgent.isGit) throw new Error('The project stopped being a Git repository during implementation. Orchestra will not accept or finalize unreviewable changes.');
+        const agentChanges = afterAgent.files.filter((file) => !isOrchestraInternalPath(file.path));
+        if (agentChanges.length) {
+          const reviewModel = models.codex || 'gpt-5.6-terra';
+          const reviewEffort = models.codexEffort || 'high';
+          let previousFindings = '';
+          let previousRepairChanged = true;
+          const maxRepairAttempts = 6;
+          for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
+            this.transition(taskId, 'reviewing');
+            this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: reviewModel, effort: reviewEffort, cycle: cycle + 1 });
+            const review = await runCodexReview({ root: project.root, model: reviewModel, effort: reviewEffort, signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk) });
+            const blocked = !/VERDICT:\s*PASS/i.test(review) || /VERDICT:\s*BLOCK/i.test(review);
+            this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, summary: review.slice(-5000) });
+            if (!blocked) break;
+            const findings = reviewFingerprint(review);
+            const repeatedWithoutProgress = Boolean(previousFindings && findings === previousFindings && !previousRepairChanged);
+            if (repeatedWithoutProgress) throw new Error(`Automatic repair paused because Codex repeated the same blocking findings and the previous repair made no project changes.\n${review.slice(-3000)}`);
+            if (cycle === maxRepairAttempts) throw new Error(`Automatic repair paused after ${maxRepairAttempts} repair attempts. The remaining findings require user direction or a different approach.\n${review.slice(-3000)}`);
+            const beforeRepair = diffFingerprint(await getDiff(project.root));
+            this.transition(taskId, 'running');
+            agentResult = await runAntigravity({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: agentResult.conversationId || session.antigravityConversationId, signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk) });
+            if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
+            const afterRepair = diffFingerprint(await getDiff(project.root));
+            previousRepairChanged = beforeRepair !== afterRepair;
+            previousFindings = findings;
+            this.emit(taskId, 'system', 'task.repair-progress', { attempt: cycle + 1, maxAttempts: maxRepairAttempts, changed: previousRepairChanged });
+          }
+
+          this.transition(taskId, 'verifying');
+          const verification = await verifyProject(project.root, signal);
+          this.emit(taskId, 'verification', 'verification.result', { results: verification });
+          const failed = verification.find((item) => item.code !== 0);
+          if (failed) throw new Error(`Verification failed: ${failed.command}\n${failed.output.slice(-3000)}`);
+
+          await this.finalizeGit(taskId, project, task.prompt, classification, models);
+        }
+      }
+
+      this.complete(taskId, agentResult.text, 'antigravity');
+    } catch (error) {
+      if (signal.aborted) return this.cancel(taskId);
+      await this.failOrRequireRecovery(taskId, project, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  private async prepareSessionContext(taskId: string, session: Session) {
+    const messages = this.store.listMessages(session.id);
+    const unsummarized = session.summaryUpdatedAt ? messages.filter((message) => message.createdAt > session.summaryUpdatedAt!) : messages;
+    const newCharacters = unsummarized.reduce((total, message) => total + message.content.length, 0);
+    let summary = session.summary;
+    if (newCharacters >= 8_000 || (!summary && messages.length >= 8)) {
+      this.emit(taskId, 'gemma', 'agent.started', { phase: 'session-memory', messages: unsummarized.length });
+      try {
+        summary = await summarizeConversation(summary, unsummarized);
+        this.store.setSessionSummary(session.id, summary);
+        this.emit(taskId, 'gemma', 'agent.completed', { phase: 'session-memory', characters: summary.length });
+      } catch (error) {
+        this.emit(taskId, 'gemma', 'warning', { message: `Session memory refresh was skipped. ${error instanceof Error ? error.message : String(error)}` });
+      }
+    }
+    const recent = messages.slice(-6).map((message) => `${message.role}: ${message.content}`).join('\n\n');
+    return `${summary ? `Persistent memory:\n${summary}\n\n` : ''}Recent messages:\n${recent}`.slice(-30_000);
+  }
+
+  private async postflight(taskId: string, root: string, prompt: string, response: string, evidence: RepositoryEvidence) {
+    this.emit(taskId, 'gemma', 'agent.started', { phase: 'postflight-validation', model: config.lmStudioModel });
+    let validation;
+    try {
+      validation = await validateAgentResponse({ root, prompt, response, evidence });
+    } catch (error) {
+      this.emit(taskId, 'gemma', 'warning', { message: `Local postflight validation was unavailable. ${error instanceof Error ? error.message : String(error)}` });
+      return response;
+    }
+    this.emit(taskId, 'gemma', 'agent.completed', { phase: 'postflight-validation', ...validation });
+    if (validation.status === 'block' && validation.confidence >= 0.9) {
+      throw new Error(`Gemma blocked the remote response because it conflicts with repository evidence: ${validation.issues.join(' ')}`);
+    }
+    if (validation.status !== 'pass' && validation.issues.length) {
+      return `${response}\n\n---\n\n### Local validation notes\n${validation.issues.map((issue) => `- ${issue}`).join('\n')}`;
+    }
+    return response;
+  }
+
+  private complete(taskId: string, result: string, agent: 'gemma' | 'antigravity') {
+    const task = requireTask(this.store, taskId);
+    const state: TaskState = task.pushStatus === 'unpushed' ? 'completed_unpushed' : 'completed';
+    this.store.updateTask(taskId, { state, result });
+    this.store.addMessage({ sessionId: task.sessionId, taskId, role: 'assistant', agent, content: result || 'Task completed.' });
+    this.emit(taskId, 'system', 'task.state', { state, result });
+  }
+
+  private async finalizeGit(taskId: string, project: Project, request: string, _classification: TaskClassification, _models: ModelSelection) {
+    const current = await getGitStatus(project.root);
+    const projectFiles = current.files.filter((file) => !isOrchestraInternalPath(file.path));
+    if (!current.isGit || !projectFiles.length) return;
+    this.transition(taskId, 'summarizing');
+    const diff = await getDiff(project.root);
+    const summary = await summarizeChanges(diff, request);
+    appendHandoff(project.root, summary.summary, safeCommitTitle(summary.title));
+    this.emit(taskId, 'gemma', 'agent.completed', { phase: 'handoff', ...summary });
+    this.transition(taskId, 'committing');
+    const updated = await getGitStatus(project.root);
+    const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
+    if (!paths.length) return;
+    const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title), summary.summary);
+    this.store.updateTask(taskId, { commitSha: sha });
+    this.emit(taskId, 'git', 'git.commit', { kind: 'task', sha, title: summary.title });
+    this.transition(taskId, 'pushing');
+    const pushed = await pushCurrent(project.root);
+    this.store.updateTask(taskId, { pushStatus: pushed.pushed ? 'pushed' : 'unpushed' });
+    this.store.createGitOperation(project.id, taskId, 'task', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
+    this.emit(taskId, 'git', 'git.push', pushed);
+  }
+
+  private transition(taskId: string, state: TaskState) {
+    this.store.updateTask(taskId, { state });
+    this.emit(taskId, 'system', 'task.state', { state });
+  }
+
+  private fail(taskId: string, message: string) {
+    this.store.updateTask(taskId, { state: 'failed', error: message });
+    this.emit(taskId, 'system', 'task.error', { message });
+    this.emit(taskId, 'system', 'task.state', { state: 'failed' });
+  }
+
+  private async failOrRequireRecovery(taskId: string, project: Project, message: string) {
+    const task = requireTask(this.store, taskId);
+    const classification = parseTaskClassification(task.classification);
+    let status = null;
+    try { status = await getGitStatus(project.root); } catch { /* Preserve the original task error. */ }
+    const recoverableFiles = status?.files.filter((file) => !isOrchestraInternalPath(file.path)) || [];
+    if (classification?.mutating && status?.isGit && recoverableFiles.length) {
+      const recoveryMessage = `${message} Uncommitted changes from this task were preserved and must be resumed or handled explicitly; Orchestra will not treat them as a pre-existing baseline.`;
+      this.store.updateTask(taskId, { state: 'recovery_required', error: recoveryMessage });
+      this.emit(taskId, 'system', 'task.error', { message: recoveryMessage });
+      this.emit(taskId, 'system', 'task.recovery-required', { message: 'Partial task changes are preserved in the working tree.', files: recoverableFiles });
+      this.emit(taskId, 'system', 'task.state', { state: 'recovery_required' });
+      return;
+    }
+    this.fail(taskId, message);
+  }
+
+  private stream(taskId: string, agent: AgentName, chunk: string) {
+    const cleaned = chunk.trim();
+    if (cleaned) this.emit(taskId, agent, 'agent.output', { text: cleaned.slice(-4000) });
+  }
+
+  private emit(taskId: string, agent: AgentName, type: string, payload: unknown) {
+    const event = this.store.addEvent(taskId, agent, type, payload);
+    this.bus.emit(`task:${taskId}`, event);
+  }
+}
+
+export function recoveryDisposition(state: TaskState, taskAlreadyOwnsProject: boolean): 'start' | 'already_active' | 'reject' {
+  if (state === 'failed' || state === 'recovery_required') return 'start';
+  if (taskAlreadyOwnsProject) return 'already_active';
+  return 'reject';
+}
+
+export function evaluateRunHealth(state: TaskState, processAlive: boolean, inactiveMs: number): RunMonitor['health'] {
+  if (state === 'completed' || state === 'completed_unpushed') return 'complete';
+  if (state === 'recovery_required' || state === 'baseline_required') return 'needs_attention';
+  if (state === 'failed' || state === 'cancelled') return 'failed';
+  if (!processAlive || inactiveMs >= 5 * 60_000) return 'possibly_stalled';
+  if (inactiveMs >= 90_000) return 'waiting';
+  return 'active';
+}
+
+export function reviewFingerprint(review: string) {
+  const findings = review.split(/\r?\n/).map((line) => line.trim().toLowerCase())
+    .filter((line) => /^([-*]|\d+\.)\s*(critical|high|medium|low|p[0-3]|\[p[0-3]\])/i.test(line))
+    .map((line) => line.replace(/:\d+/g, ':#').replace(/\s+/g, ' '));
+  return createHash('sha256').update(findings.join('\n') || review.replace(/\s+/g, ' ').toLowerCase()).digest('hex');
+}
+
+function diffFingerprint(diff: string) { return createHash('sha256').update(diff).digest('hex'); }
+function agentForState(state: TaskState): AgentName {
+  if (state === 'reviewing') return 'codex';
+  if (state === 'running' || state === 'recovering') return 'antigravity';
+  if (state === 'verifying') return 'verification';
+  if (state === 'summarizing') return 'gemma';
+  if (state === 'committing' || state === 'pushing') return 'git';
+  return 'system';
+}
+function monitorSummary(input: { state: TaskState; health: RunMonitor['health']; currentAgent: AgentName; inactiveMs: number; reviewCycle: number; repairAttempt: number; changedFiles: number }) {
+  const activity = input.inactiveMs < 60_000 ? `${Math.round(input.inactiveMs / 1000)} seconds` : `${Math.round(input.inactiveMs / 60_000)} minutes`;
+  const cycle = input.reviewCycle ? ` Review cycle ${input.reviewCycle}.` : '';
+  const repair = input.repairAttempt ? ` ${input.repairAttempt} automatic repair attempt${input.repairAttempt === 1 ? '' : 's'} completed.` : '';
+  return `${input.currentAgent} is in ${input.state.replaceAll('_', ' ')}. Last activity was ${activity} ago. Health: ${input.health.replaceAll('_', ' ')}.${cycle}${repair} ${input.changedFiles} uncommitted project file${input.changedFiles === 1 ? '' : 's'} detected.`;
+}
+
+export function appendHandoff(root: string, summary: string, title: string) {
+  const path = join(root, 'docs', 'HANDOFF.md');
+  mkdirSync(dirname(path), { recursive: true });
+  const existing = existsSync(path) ? readFileSync(path, 'utf8').trimEnd() : '# Project Handoff';
+  const entry = `\n\n## [${new Date().toISOString()}] ${title}\n\n${summary.trim()}\n`;
+  writeFileSync(path, `${existing}${entry}`, 'utf8');
+}
+
+function requireTask(store: Store, id: string): TaskRecord {
+  const task = store.getTask(id);
+  if (!task) throw new Error('Task not found.');
+  return task;
+}
+
+function requireProject(store: Store, id: string): Project {
+  const project = store.getProject(id);
+  if (!project) throw new Error('Project not found.');
+  return project;
+}
+
+function parseTaskClassification(value: string | null): TaskClassification | null {
+  if (!value) return null;
+  try { return JSON.parse(value) as TaskClassification; } catch { return null; }
+}
