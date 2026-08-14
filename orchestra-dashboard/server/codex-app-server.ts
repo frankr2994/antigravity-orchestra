@@ -40,9 +40,11 @@ export function normalizeCodexTokenUsage(params: JsonRecord): CodexContextSnapsh
   const tokenUsage = params.tokenUsage;
   if (!tokenUsage || typeof tokenUsage !== 'object') return null;
   const total = tokenUsage.total && typeof tokenUsage.total === 'object' ? tokenUsage.total : {};
+  const last = tokenUsage.last && typeof tokenUsage.last === 'object' ? tokenUsage.last : {};
   const windowTokens = finite(tokenUsage.modelContextWindow);
+  const contextTokens = finite(last.totalTokens);
   const totalTokens = finite(total.totalTokens);
-  const usedPercent = windowTokens && totalTokens !== null ? Math.min(100, Math.round(totalTokens / windowTokens * 10_000) / 100) : null;
+  const usedPercent = windowTokens && contextTokens !== null ? Math.min(100, Math.round(contextTokens / windowTokens * 10_000) / 100) : null;
   return {
     threadId: String(params.threadId || ''),
     turnId: String(params.turnId || ''),
@@ -50,9 +52,9 @@ export function normalizeCodexTokenUsage(params: JsonRecord): CodexContextSnapsh
       usedPercent,
       remainingPercent: usedPercent === null ? null : Math.max(0, Math.round((100 - usedPercent) * 100) / 100),
       windowTokens,
-      inputTokens: finite(total.inputTokens),
-      outputTokens: finite(total.outputTokens),
-      totalTokens,
+      inputTokens: finite(last.inputTokens),
+      outputTokens: finite(last.outputTokens),
+      totalTokens: contextTokens,
     },
     usage: {
       inputTokens: finite(total.inputTokens) || 0,

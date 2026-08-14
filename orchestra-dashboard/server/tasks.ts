@@ -7,7 +7,7 @@ import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
 import { answerRepositoryQuestion, classifyTask, listAntigravityModels, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, validateAgentResponse } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
-import { commitPaths, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
+import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
 import { verifyProject } from './verification.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
@@ -195,6 +195,24 @@ export class TaskManager {
       const classification = classified.classification;
       if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
       else this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
+      if (!recovery && classification.localOperation === 'connect_git_remote') {
+        const localModels: ModelSelection = { ...selectModels(classification), primary: 'gemma', gemma: config.lmStudioModel, codex: null, codexEffort: null };
+        this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(localModels) });
+        this.transition(taskId, 'preflight');
+        if (project.onboardingStatus === 'scope_warning') throw new Error('The selected directory contains nested Git repositories. Select the specific repository you want to connect.');
+        const remoteUrl = findRecentGitHubUrl(this.store, session.id, task.prompt);
+        if (!remoteUrl) throw new Error('Gemma identified a Git remote connection request, but no valid HTTPS GitHub repository URL was found in the recent conversation.');
+        this.transition(taskId, 'running');
+        this.emit(taskId, 'gemma', 'agent.started', { phase: 'local-operation', operation: 'connect_git_remote', model: config.lmStudioModel });
+        const connected = await connectGitHubRemote(project.root, remoteUrl);
+        this.store.updateTask(taskId, { commitSha: connected.head, pushStatus: 'pushed' });
+        this.store.createGitOperation(project.id, taskId, 'connect_remote', connected.head, connected.branch, 'pushed', null);
+        this.emit(taskId, 'git', 'git.remote', connected);
+        this.emit(taskId, 'git', 'git.push', { pushed: true, remote: connected.remote, branch: connected.branch });
+        this.emit(taskId, 'gemma', 'agent.completed', { phase: 'local-operation', operation: 'connect_git_remote' });
+        this.complete(taskId, `Connected this project to ${connected.remote} as \`origin\` and pushed \`${connected.branch}\` at commit \`${connected.head}\`.`, 'gemma');
+        return;
+      }
       let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: config.lmStudioModel };
       const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
       const routingReasons: string[] = [];
@@ -512,6 +530,16 @@ function latestAntigravityInputTokens(store: Store, projectId: string, sessionId
     const payload = event?.payload as Record<string, any> | undefined;
     const tokens = Number(payload?.usage?.input_tokens);
     if (Number.isFinite(tokens)) return tokens;
+  }
+  return null;
+}
+function findRecentGitHubUrl(store: Store, sessionId: string, prompt: string) {
+  const direct = extractGitHubRemoteUrl(prompt);
+  if (direct) return direct;
+  const messages = store.listMessages(sessionId);
+  for (let index = messages.length - 1; index >= Math.max(0, messages.length - 30); index -= 1) {
+    const found = extractGitHubRemoteUrl(messages[index].content);
+    if (found) return found;
   }
   return null;
 }

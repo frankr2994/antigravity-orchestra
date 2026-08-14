@@ -72,3 +72,15 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * **Improved Event Logging & Context Tracking:** Task events now explicitly include provider telemetry, and the system tracks context pressure warnings to inform routing adjustments.
 * **Code Refactoring in Agents:** Significant refactoring occurred across `agents.ts` (Codex/Antigravity) to transition from spawning ephemeral processes for analysis to using a managed, persistent `codexAppServer` process for better
 
+
+## [2026-08-13 23:02:43] Handoff Update
+*   **Task Classification Refinement:** Updated `CLASSIFICATION_SCHEMA` to include a new field `localOperation` with values `'none'` or `'connect_git_remote'`, specifically recognizing `connect_git_remote` as a small, mutating operation requiring no Codex role.
+*   **Gemma Tooling Integration (Rider MCP):** Implemented a mechanism for Gemma to use read-only Rider inspection tools via an Orchestra bridge, allowing it to inspect the project model without gaining arbitrary shell or file mutation authority.
+    *   Added `getMcpStatus` and related functions in `mcp.ts` to manage and probe Rider MCP endpoints (Antigravity/Codex).
+    *   Gemma is granted access only to a bounded set of read-only tools (`READ_ONLY_RIDER_TOOLS`).
+    *   The bridge enforces strict limits on tool calls (max 6 calls per round) and excludes mutation/execution tools.
+*   **Git Remote Connection Logic:** Enhanced `connectGitHubRemote` in `git.ts` to handle remote connection more robustly:
+    *   It now validates the URL strictly against a plain HTTPS GitHub format.
+    *   It checks for existing origins and prevents overwriting them unless explicitly handled (rejecting force-push/replace).
+    *   It performs an initial push (`git push --set-upstream`) after successfully adding the remote, ensuring the local branch is
+

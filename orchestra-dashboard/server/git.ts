@@ -74,9 +74,55 @@ export async function pushCurrent(cwd: string) {
   return result.code === 0 ? { pushed: true, error: null } : { pushed: false, error: (result.stderr || result.stdout).trim() };
 }
 
+export function extractGitHubRemoteUrl(text: string): string | null {
+  const candidates = text.match(/https:\/\/github\.com\/[^\s<>()\]"']+/gi) || [];
+  for (const candidate of candidates) {
+    try { return validateGitHubRemoteUrl(candidate.replace(/[.,;:!?]+$/, '')); }
+    catch { /* Try the next URL in the bounded conversation context. */ }
+  }
+  return null;
+}
+
+export function validateGitHubRemoteUrl(value: string) {
+  const url = new URL(value.trim());
+  const segments = url.pathname.split('/').filter(Boolean);
+  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.username || url.password || url.search || url.hash || segments.length !== 2) {
+    throw new Error('The local remote connector accepts only a plain HTTPS GitHub repository URL such as https://github.com/owner/repository.');
+  }
+  const owner = segments[0];
+  const repository = segments[1].replace(/\.git$/i, '');
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repository) || !repository) throw new Error('The GitHub repository URL contains an unsupported owner or repository name.');
+  return `https://github.com/${owner}/${repository}`;
+}
+
+export async function connectGitHubRemote(cwd: string, requestedUrl: string) {
+  const remoteUrl = validateGitHubRemoteUrl(requestedUrl);
+  const status = await getGitStatus(cwd);
+  if (!status.isGit || !status.root) throw new Error('The selected project is not a Git repository. Initialize it before connecting a remote.');
+  if (!status.head || !status.branch) throw new Error('The selected project needs a committed branch before it can be pushed to a remote.');
+
+  const existing = await git(['remote', 'get-url', 'origin'], status.root).catch(() => null);
+  const existingUrl = existing?.code === 0 ? existing.stdout.trim() : null;
+  if (existingUrl && comparableRemote(existingUrl) !== comparableRemote(remoteUrl)) {
+    throw new Error(`This project already has a different origin (${existingUrl}). Orchestra will not overwrite it automatically.`);
+  }
+  if (!existingUrl) {
+    const advertised = await git(['ls-remote', '--heads', '--tags', remoteUrl], status.root, 30_000);
+    if (advertised.code !== 0) throw new Error(advertised.stderr.trim() || 'GitHub rejected the remote lookup. Verify the URL and authentication.');
+    if (advertised.stdout.trim()) throw new Error('The requested GitHub repository already contains branches or tags. Clone or import it instead of attaching an unrelated local history.');
+    const added = await git(['remote', 'add', 'origin', remoteUrl], status.root);
+    if (added.code !== 0) throw new Error(added.stderr.trim() || 'Git could not add the origin remote.');
+  }
+  const pushed = await git(['push', '--set-upstream', 'origin', status.branch], status.root, 120_000);
+  if (pushed.code !== 0) throw new Error(`Origin is configured, but the initial push failed: ${(pushed.stderr || pushed.stdout).trim()}`);
+  return { remote: remoteUrl, branch: status.branch, head: status.head, alreadyConfigured: Boolean(existingUrl), pushed: true };
+}
+
 export function safeCommitTitle(value: string, fallback = 'Update project') {
   const first = value.split(/\r?\n/).find((line) => line.trim())?.replace(/^[-*#\s]+/, '').trim() || fallback;
   return first.replace(/[\r\n]+/g, ' ').slice(0, 72);
 }
 
 export function projectName(root: string) { return basename(root); }
+
+function comparableRemote(value: string) { return value.trim().replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase(); }

@@ -16,9 +16,11 @@ type HealthItem = { available?: boolean; version?: string | null; modelAvailable
 type Health = Record<string, HealthItem>;
 type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string };
 type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null }> };
+type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
+type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
 type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null; providerTelemetry: Record<string, ProviderUsage>; providerActivity: Array<Record<string, unknown>> };
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'verification.result', 'git.baseline-required', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required']);
 
 function App() {
@@ -35,6 +37,7 @@ function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health>({});
   const [usage, setUsage] = useState<Record<string, ProviderUsage>>({});
+  const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -101,8 +104,8 @@ function App() {
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage')])
-      .then(([nextStats, nextHealth, nextUsage]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); })
+    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status')])
+      .then(([nextStats, nextHealth, nextUsage, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); setMcp(nextMcp); })
       .catch((reason) => setError(reason.message));
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
@@ -157,13 +160,19 @@ function App() {
     if (!project) return;
     try {
       const created = await api<Session>(`/api/projects/${project.id}/sessions`, { method: 'POST', body: JSON.stringify({ title: 'New conversation' }) });
-      setSessions((current) => [created, ...current]); setSession(created); setMessages([]); setActivity([]); setActiveTask(null);
+      setSessions((current) => [created, ...current]); setSession(created); setMessages([]); setActivity([]); await restoreProjectTask(project.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
 
   async function selectSession(next: Session) {
     await api(`/api/sessions/${next.id}/activate`, { method: 'POST', body: '{}' });
-    setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); setActiveTask(null);
+    setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); await restoreProjectTask(next.projectId);
+  }
+
+  async function restoreProjectTask(projectId: string) {
+    const running = await api<Task | null>(`/api/projects/${projectId}/active-task`);
+    setActiveTask(running);
+    if (running) watchTask(running.id);
   }
 
   async function send() {
@@ -208,7 +217,13 @@ function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
 
-  async function cancelTask() { if (activeTask) await api(`/api/tasks/${activeTask.id}/cancel`, { method: 'POST', body: '{}' }); }
+  async function cancelTask(task = activeTask) {
+    if (!task) return;
+    await api(`/api/tasks/${task.id}/cancel`, { method: 'POST', body: '{}' });
+    const cancelled = { ...task, state: 'cancelled' };
+    setActiveTask((current) => current?.id === task.id ? cancelled : current);
+    setTasks((current) => current.map((item) => item.id === task.id ? cancelled : item));
+  }
   async function recoverTask(task: Task) {
     if (recoveryRequestsRef.current.has(task.id)) return;
     recoveryRequestsRef.current.add(task.id);
@@ -283,9 +298,9 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} />}
+        {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
-        {view === 'tasks' && <Tasks tasks={tasks} projects={projects} onRetryPush={retryPush} onRecover={recoverTask} onRetryTask={retryTask} />}
+        {view === 'tasks' && <Tasks tasks={tasks} projects={projects} onRetryPush={retryPush} onRecover={recoverTask} onRetryTask={retryTask} onStop={cancelTask} />}
         {view === 'settings' && settings && <SettingsView settings={settings} health={health} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
       </main>
 
@@ -309,7 +324,7 @@ function App() {
           {activeTask?.state === 'recovery_required' && <div className="baseline-card"><CircleAlert /><strong>Partial task changes preserved</strong><p>Resume this same task so Antigravity can finish and Codex can review the complete change set. These files will not be committed as a separate baseline.</p><button className="primary" onClick={() => recoverTask(activeTask)}>Resume and review</button></div>}
         </div>
         <div className="composer">
-          {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <button className="stop-button" onClick={cancelTask}><Square size={12} fill="currentColor" /> Stop task</button>}
+          {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <button className="stop-button" onClick={() => void cancelTask()}><Square size={12} fill="currentColor" /> Stop task</button>}
           <div className="composer-box">
             <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={scopeWarning ? 'Select a specific repository before starting a task…' : project ? `Ask Orchestra to work in ${project.name}…` : 'Select a project first…'} disabled={!session || Boolean(scopeWarning)} rows={3} />
             <button className="send-button" onClick={send} disabled={!session || Boolean(scopeWarning) || !input.trim() || Boolean(activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required'))}><Send size={17} /></button>
@@ -321,7 +336,7 @@ function App() {
   );
 }
 
-function Dashboard({ stats, health, usage, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop }: { stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void }) {
+function Dashboard({ stats, health, usage, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop }: { stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
     {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onStop={onStop} />}
@@ -334,6 +349,10 @@ function Dashboard({ stats, health, usage, project, tasks, activeTask, monitor, 
       <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}</div></Card>
       <Card title="Provider usage" icon={<Zap />}><div className="usage-list">{['antigravity', 'codex'].map((name) => { const item = usage[name]; const context = item?.context?.usedPercent; const remaining = item?.quotas?.map((bucket) => bucket.remainingPercent).filter((value): value is number => value !== null).sort((a, b) => a - b)[0]; const signals = [remaining !== undefined ? `${remaining.toFixed(0)}% quota left` : null, context !== null && context !== undefined ? `${context.toFixed(0)}% context` : null].filter(Boolean); return <div key={name}><strong>{name}</strong><span className={item?.available ? '' : 'unavailable'}>{item?.available ? signals.join(' · ') || 'Connected' : 'Unavailable'}</span><small>{item?.available ? `${item.model || item.source || 'Verified provider source'}${item.stale ? ' · stale snapshot' : ''}` : item?.reason || 'Waiting for a trustworthy provider source.'}</small></div>; })}</div></Card>
     </div>
+    <div className="mcp-panel"><Card title="Rider MCP" icon={<Terminal />}>
+      <div className="mcp-server"><StatusDot ok={mcp?.server.operational === true} /><div><strong>{mcp?.server.name || 'Checking Rider MCP…'}</strong><small>{mcp?.server.operational ? `${mcp.server.toolCount} tools · v${mcp.server.version || 'unknown'} · ${mcp.server.latencyMs ?? '?'} ms` : mcp?.server.reason || 'Waiting for the first protocol check.'}</small><code>{mcp?.server.endpoint || 'No endpoint discovered'}</code></div></div>
+      <div className="mcp-agent-grid">{(['antigravity', 'codex', 'gemma'] as const).map((agent) => { const status = mcp?.agents[agent]; return <div key={agent}><StatusDot ok={status?.available === true} /><strong>{agent}</strong><span>{status?.available ? `${status.access} access` : 'unavailable'}</span><small>{status?.available ? agent === 'gemma' ? 'Orchestra read-only tool bridge ready' : 'Configured and endpoint operational' : status?.reason || 'Checking configuration…'}</small></div>; })}</div>
+    </Card></div>
     <div className="summary-strip"><div><strong>{running}</strong><span>Active tasks</span></div><div><strong>{tasks.filter((task) => task.state === 'completed').length}</strong><span>Completed</span></div><div><strong>{tasks.filter((task) => task.state === 'completed_unpushed').length}</strong><span>Awaiting push</span></div></div>
   </section>;
 }
@@ -370,9 +389,9 @@ function Projects({ projects, activeId, busy, onBrowse, onActivate, onForget }: 
   </section>;
 }
 
-function Tasks({ tasks, projects, onRetryPush, onRecover, onRetryTask }: { tasks: Task[]; projects: Project[]; onRetryPush: (task: Task) => void; onRecover: (task: Task) => void; onRetryTask: (task: Task) => void }) {
+function Tasks({ tasks, projects, onRetryPush, onRecover, onRetryTask, onStop }: { tasks: Task[]; projects: Project[]; onRetryPush: (task: Task) => void; onRecover: (task: Task) => void; onRetryTask: (task: Task) => void; onStop: (task: Task) => void }) {
   return <section><PageHeader eyebrow="Persisted execution history" title="Tasks" subtitle="Agent routing, verification, commit, and push results survive dashboard restarts." />
-    <div className="table-card"><table><thead><tr><th>Task</th><th>Project</th><th>Status</th><th>Commit</th><th>Created</th><th /></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong>{task.error && <small className="failure-text">{task.error}</small>}</td><td>{projects.find((item) => item.id === task.projectId)?.name || 'Unknown'}</td><td><StateBadge state={task.state} /></td><td>{task.commitSha ? task.commitSha.slice(0, 8) : '—'}</td><td>{formatDate(task.createdAt)}</td><td>{task.pushStatus === 'unpushed' ? <button className="secondary compact" onClick={() => onRetryPush(task)}><UploadCloud size={14} /> Retry push</button> : task.state === 'recovery_required' ? <button className="secondary compact" onClick={() => onRecover(task)}><RefreshCw size={14} /> Resume</button> : task.state === 'failed' ? <button className="secondary compact" onClick={() => onRetryTask(task)}><RefreshCw size={14} /> Retry</button> : null}</td></tr>)}</tbody></table></div>
+    <div className="table-card"><table><thead><tr><th>Task</th><th>Project</th><th>Status</th><th>Commit</th><th>Created</th><th /></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong>{task.error && <small className="failure-text">{task.error}</small>}</td><td>{projects.find((item) => item.id === task.projectId)?.name || 'Unknown'}</td><td><StateBadge state={task.state} /></td><td>{task.commitSha ? task.commitSha.slice(0, 8) : '—'}</td><td>{formatDate(task.createdAt)}</td><td>{!terminalStates.has(task.state) ? <button className="stop-button" onClick={() => onStop(task)}><Square size={12} fill="currentColor" /> Stop</button> : task.pushStatus === 'unpushed' ? <button className="secondary compact" onClick={() => onRetryPush(task)}><UploadCloud size={14} /> Retry push</button> : task.state === 'recovery_required' ? <button className="secondary compact" onClick={() => onRecover(task)}><RefreshCw size={14} /> Resume</button> : task.state === 'failed' ? <button className="secondary compact" onClick={() => onRetryTask(task)}><RefreshCw size={14} /> Retry</button> : null}</td></tr>)}</tbody></table></div>
   </section>;
 }
 
@@ -404,7 +423,7 @@ function Field({ label, value }: { label: string; value: string }) { return <div
 function humanState(state: string) { return state.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function formatDate(value: string) { return new Date(value).toLocaleString(); }
 function formatDuration(value: number) { const seconds = Math.max(0, Math.round(value / 1000)); if (seconds < 60) return `${seconds}s`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ${seconds % 60}s`; return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
-function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · ${pressure.toFixed(1)}% context` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
+function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
 function formatProviderContext(item?: ProviderUsage) { const percent = item?.context?.usedPercent; if (percent !== null && percent !== undefined) return `${percent.toFixed(1)}%`; const tokens = item?.context?.inputTokens ?? item?.context?.totalTokens; return tokens ? `${tokens.toLocaleString()} tokens` : 'Not measured'; }
 
 export default App;

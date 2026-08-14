@@ -60,6 +60,7 @@ export interface TaskClassification {
   complexity: 'small' | 'normal' | 'deep';
   riskFlags: string[];
   codexRole: 'none' | 'design' | 'debug' | 'review';
+  localOperation?: 'none' | 'connect_git_remote';
   title: string;
 }
 

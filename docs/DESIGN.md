@@ -312,3 +312,76 @@ Antigravity quota is polled from `agy --output-format json --print /usage`, cach
 - Each Codex review cycle begins with a clean context window.
 - Antigravity quota refreshes independently of the unsupported print-mode status-line path.
 - Routing decisions and pressure warnings are persisted in the timeline and are available to Gemma's run-analysis evidence packet.
+
+## 2026-08-13: Constrained local operations bypass remote agent workflows
+
+### Background
+
+A request to connect a clean local project to an empty GitHub repository was classified by Gemma as a security-sensitive mutation. The generic risk policy escalated the task to Gemini Pro High and Codex Sol High, performed a design pass, and prepared to run the ordinary implementation/review loop. The requested operation required only validated Git remote configuration and an initial push. Switching chats could additionally clear the frontend's `activeTask` reference while the backend retained the project-wide task lock, hiding every Stop control.
+
+### Decision
+
+Task classification includes a constrained `localOperation` intent. `connect_git_remote` is recognized by Gemma and independently normalized from explicit remote-link language, forced to small complexity with no Codex role, and executed by Orchestra's trusted Git adapter before quota polling, baseline handling, or remote-agent routing.
+
+The adapter accepts only a plain HTTPS `github.com/owner/repository` URL obtained from the current prompt or bounded recent conversation. It requires an existing committed local branch, refuses to replace a different `origin`, checks that a newly attached remote has no branches or tags, adds `origin`, and performs `git push --set-upstream`. Existing matching origins are idempotent and may retry the push. Gemma remains the user-facing classifier and reporter; it does not receive unrestricted shell access.
+
+Project task ownership is displayed independently of the selected conversation. Creating or selecting a chat re-queries the backend's project-wide active task, and Task History provides a fallback Stop action. Codex context pressure uses the app-server's latest model-call token footprint (`tokenUsage.last`) while cumulative billing/activity remains sourced from `tokenUsage.total`.
+
+### Reasons
+
+- Deterministic, narrow operations do not benefit from design, implementation, and review agents.
+- A validated backend adapter is safer than granting a local model arbitrary command execution.
+- Independent normalization prevents a false model risk flag from causing extreme model escalation.
+- Empty-remote and existing-origin checks avoid overwriting configuration or combining unrelated histories.
+- Backend task ownership must remain controllable even when the user navigates between conversations.
+- Context occupancy and cumulative token consumption are different measurements and must not share a numerator.
+
+### Alternatives
+
+- Let Gemma run arbitrary shell commands: rejected because it broadens local-model authority beyond the recognized operation.
+- Continue using the generic mutating workflow with cheaper models: rejected because even a cheap three-agent cycle is unnecessary overhead.
+- Automatically replace an existing origin or force-push a populated remote: rejected because both can alter repository ownership or history unexpectedly.
+- Keep Stop scoped to the selected chat: rejected because execution is locked at project scope, not chat scope.
+
+### Impact
+
+- Plain requests to link an empty GitHub remote complete through Gemma plus the local Git adapter, without Antigravity or Codex.
+- The task timeline records the remote connection and initial push as deterministic Git events.
+- Non-empty remotes, conflicting origins, missing URLs, and uncommitted initial branches fail with explicit guidance.
+- Active tasks remain visible and stoppable after chat navigation.
+- Codex context percentages now describe the latest request footprint; cumulative tokens remain visible as usage rather than context.
+
+## 2026-08-13: Shared MCP health with a least-privilege Gemma bridge
+
+### Background
+
+Rider MCP was configured independently for Antigravity and Codex, but Orchestra had no way to distinguish a saved configuration from a running, protocol-compatible server. Previous tasks could therefore discover an unreachable Rider endpoint only after an agent had started. Gemma used LM Studio's chat-completions endpoint without a tool loop and could not use MCP even when the loaded model supported structured tool calls.
+
+### Decision
+
+Orchestra maintains a normalized Rider MCP status model with separate server and agent states. It reads the supported Codex MCP listing and Antigravity's global `mcp_config.json`, then performs an MCP `initialize` and `tools/list` exchange against each configured endpoint. The dashboard reports server identity, version, tool count, latency, endpoint, and per-agent configured/enabled/available state. Results are cached for 15 seconds; Gemma tool-capability probes are cached for five minutes.
+
+Antigravity and Codex retain the full Rider tool inventory supplied by their native MCP clients. Gemma receives an Orchestra-managed bridge only when the endpoint is loopback, Rider passes the protocol probe, and the loaded LM Studio model emits structured tool calls. The bridge exposes an explicit allowlist of read-only Rider inspection tools, limits a model response to six tool calls and five rounds, bounds every tool result, and excludes file mutation, terminal execution, builds, run configurations, SQL execution, and other side-effecting tools. Repository-question answering may use this bridge when it materially improves its evidence.
+
+### Reasons
+
+- Configuration presence does not prove that Rider is running or that MCP negotiation succeeds.
+- A real protocol exchange detects stale ports, incompatible transports, and zero-tool servers before an expensive agent turn.
+- Agent-specific status explains whether a failure is configuration, enablement, transport, or model capability.
+- Gemma benefits from Rider's project model without receiving arbitrary IDE or shell authority.
+- A loopback-only, allowlisted bridge is compatible with the current single-user local dashboard trust boundary.
+
+### Alternatives
+
+- Check only for `rider64.exe`: rejected because the IDE process can run while its MCP server is disabled or unreachable.
+- Treat a configured URL as healthy: rejected because stale dynamic ports were already observed in agent runs.
+- Give Gemma all 42 Rider tools: rejected because several tools mutate files, execute commands, run builds, or query databases.
+- Spawn a model turn to test every agent on every refresh: rejected because it would waste provider quota and add latency; native configuration plus a direct protocol exchange is deterministic.
+- Implement the future toggle manager now: deferred until Orchestra has a generalized inventory and safe configuration-write workflow for multiple transports and agents.
+
+### Impact
+
+- The dashboard visibly confirms Rider MCP health for Antigravity, Codex, and Gemma.
+- Rider downtime or a changed endpoint appears within the cached health interval, before the next agent is routed.
+- Gemma has 14 bounded read-only Rider tools through Orchestra while Antigravity and Codex retain their native full access.
+- No existing MCP configuration is overwritten, and server enable/disable controls remain future work.

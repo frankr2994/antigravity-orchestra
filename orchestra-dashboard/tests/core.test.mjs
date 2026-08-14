@@ -4,14 +4,15 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, interpretAntigravityOutput, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
-import { getGitStatus, git } from '../dist-server/git.js';
+import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { evaluateRunHealth, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
 import { codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
+import { isGemmaRiderToolAllowed } from '../dist-server/mcp.js';
 
 test('model policy escalates deep sensitive work to Pro and Sol', () => {
   const selection = selectModels({ type: 'debug', mutating: true, complexity: 'deep', riskFlags: ['security'], codexRole: 'debug', title: 'Debug auth' });
@@ -43,6 +44,29 @@ test('classification removes sentinel risk flags and prevents Codex over-routing
   assert.equal(selection.codex, null);
 });
 
+test('remote connection intent stays local even when Gemma marks it security-sensitive', () => {
+  const prompt = 'Tie this project to my remote https://github.com/example/sample';
+  const normalized = normalizeClassification({ type: 'implementation', mutating: true, complexity: 'deep', riskFlags: ['security'], codexRole: 'design', localOperation: 'none', title: 'Connect remote' }, prompt);
+  assert.equal(isConnectGitRemoteIntent(prompt), true);
+  assert.deepEqual({ operation: normalized.localOperation, complexity: normalized.complexity, risks: normalized.riskFlags, role: normalized.codexRole }, { operation: 'connect_git_remote', complexity: 'small', risks: [], role: 'none' });
+  assert.equal(isConnectGitRemoteIntent('Add a parser feature to this repository'), false);
+});
+
+test('GitHub remote extraction accepts plain repository URLs and rejects unsafe shapes', () => {
+  assert.equal(extractGitHubRemoteUrl('Use https://github.com/frankr2994/Car-Schematic-Builder.'), 'https://github.com/frankr2994/Car-Schematic-Builder');
+  assert.equal(validateGitHubRemoteUrl('https://github.com/example/project.git'), 'https://github.com/example/project');
+  assert.throws(() => validateGitHubRemoteUrl('https://user:secret@github.com/example/project'), /plain HTTPS GitHub/);
+  assert.throws(() => validateGitHubRemoteUrl('https://example.com/example/project'), /plain HTTPS GitHub/);
+});
+
+test('Gemma Rider bridge exposes inspection tools but blocks mutations and execution', () => {
+  assert.equal(isGemmaRiderToolAllowed('rider_get_solution_projects'), true);
+  assert.equal(isGemmaRiderToolAllowed('rider_read_file'), true);
+  assert.equal(isGemmaRiderToolAllowed('rider_apply_patch'), false);
+  assert.equal(isGemmaRiderToolAllowed('rider_execute_terminal_command'), false);
+  assert.equal(isGemmaRiderToolAllowed('rider_build_solution'), false);
+});
+
 test('Codex JSONL decoding exposes friendly progress but not raw commands', () => {
   const raw = JSON.stringify({ type: 'item.started', item: { id: '1', type: 'command_execution', command: 'Get-Content secret-file.txt' } });
   const decoded = decodeCodexProgressLine(raw);
@@ -52,10 +76,11 @@ test('Codex JSONL decoding exposes friendly progress but not raw commands', () =
 });
 
 test('Codex app-server telemetry captures authoritative context pressure', () => {
-  const telemetry = normalizeCodexTokenUsage({ threadId: 'thread-123', turnId: 'turn-1', tokenUsage: { modelContextWindow: 10_000, total: { inputTokens: 2400, cachedInputTokens: 1800, cacheWriteInputTokens: 0, outputTokens: 320, reasoningOutputTokens: 90, totalTokens: 2720 }, last: {} } });
+  const telemetry = normalizeCodexTokenUsage({ threadId: 'thread-123', turnId: 'turn-1', tokenUsage: { modelContextWindow: 10_000, total: { inputTokens: 24_000, cachedInputTokens: 18_000, cacheWriteInputTokens: 0, outputTokens: 3200, reasoningOutputTokens: 900, totalTokens: 27_200 }, last: { inputTokens: 2400, cachedInputTokens: 1800, cacheWriteInputTokens: 0, outputTokens: 320, reasoningOutputTokens: 90, totalTokens: 2720 } } });
   assert.equal(telemetry?.context.usedPercent, 27.2);
   assert.equal(telemetry?.context.remainingPercent, 72.8);
-  assert.equal(telemetry?.usage.cachedInputTokens, 1800);
+  assert.equal(telemetry?.context.inputTokens, 2400);
+  assert.equal(telemetry?.usage.cachedInputTokens, 18_000);
   assert.equal(telemetry?.threadId, 'thread-123');
 });
 

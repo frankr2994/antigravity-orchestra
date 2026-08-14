@@ -4,6 +4,7 @@ import type { ChatMessage, ModelSelection, TaskClassification } from './types.js
 import type { RepositoryEvidence } from './evidence.js';
 import { delimiter } from 'node:path';
 import { codexAppServer } from './codex-app-server.js';
+import { callGemmaRiderTool, getGemmaRiderTools } from './mcp.js';
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
 
@@ -11,7 +12,7 @@ export interface AgentRunResult { text: string; conversationId: string | null; r
 interface StreamDecoder { push: (chunk: string) => void; flush: () => void; sandboxFailed: () => boolean; }
 type JsonSchema = { name: string; schema: Record<string, unknown> };
 
-const CLASSIFICATION_SCHEMA: JsonSchema = { name: 'task_classification', schema: { type: 'object', properties: { type: { type: 'string', enum: ['question', 'implementation', 'debug', 'design', 'review', 'test'] }, mutating: { type: 'boolean' }, complexity: { type: 'string', enum: ['small', 'normal', 'deep'] }, riskFlags: { type: 'array', items: { type: 'string' } }, codexRole: { type: 'string', enum: ['none', 'design', 'debug', 'review'] }, title: { type: 'string' } }, required: ['type', 'mutating', 'complexity', 'riskFlags', 'codexRole', 'title'], additionalProperties: false } };
+const CLASSIFICATION_SCHEMA: JsonSchema = { name: 'task_classification', schema: { type: 'object', properties: { type: { type: 'string', enum: ['question', 'implementation', 'debug', 'design', 'review', 'test'] }, mutating: { type: 'boolean' }, complexity: { type: 'string', enum: ['small', 'normal', 'deep'] }, riskFlags: { type: 'array', items: { type: 'string' } }, codexRole: { type: 'string', enum: ['none', 'design', 'debug', 'review'] }, localOperation: { type: 'string', enum: ['none', 'connect_git_remote'] }, title: { type: 'string' } }, required: ['type', 'mutating', 'complexity', 'riskFlags', 'codexRole', 'localOperation', 'title'], additionalProperties: false } };
 const REPOSITORY_ANSWER_SCHEMA: JsonSchema = { name: 'repository_answer', schema: { type: 'object', properties: { canAnswer: { type: 'boolean' }, confidence: { type: 'number', minimum: 0, maximum: 1 }, answer: { type: 'string' }, evidenceFiles: { type: 'array', items: { type: 'string' } }, limitations: { type: 'array', items: { type: 'string' } } }, required: ['canAnswer', 'confidence', 'answer', 'evidenceFiles', 'limitations'], additionalProperties: false } };
 const POSTFLIGHT_SCHEMA: JsonSchema = { name: 'repository_postflight', schema: { type: 'object', properties: { status: { type: 'string', enum: ['pass', 'warn', 'block'] }, confidence: { type: 'number', minimum: 0, maximum: 1 }, issues: { type: 'array', items: { type: 'string' } } }, required: ['status', 'confidence', 'issues'], additionalProperties: false } };
 const CHANGE_SUMMARY_SCHEMA: JsonSchema = { name: 'change_summary', schema: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' } }, required: ['title', 'summary'], additionalProperties: false } };
@@ -46,18 +47,41 @@ export async function answerRunQuestion(question: string, evidence: Record<strin
   return raw.trim();
 }
 
-async function callGemma(messages: Array<{ role: string; content: string }>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema): Promise<string> {
-  const response = await fetch(`${config.lmStudioBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: config.lmStudioModel, messages, temperature: 0.2, max_tokens: maxTokens, ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { name: jsonSchema.name, strict: true, schema: jsonSchema.schema } } } : {}) }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!response.ok) throw new Error(`LM Studio returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-  const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  const content = body.choices?.[0]?.message?.content?.trim();
-  if (!content) throw new Error('LM Studio returned an empty response');
-  return content;
+async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false): Promise<string> {
+  const conversation = [...messages];
+  const tools = riderTools ? await getGemmaRiderTools() : [];
+  let toolCallsUsed = 0;
+  for (let round = 0; round < 5; round += 1) {
+    const response = await fetch(`${config.lmStudioBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: config.lmStudioModel, messages: conversation, temperature: 0.2, max_tokens: maxTokens, ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { name: jsonSchema.name, strict: true, schema: jsonSchema.schema } } } : {}), ...(tools.length ? { tools, tool_choice: 'auto' } : {}) }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) throw new Error(`LM Studio returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
+    const message = body.choices?.[0]?.message;
+    const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    if (calls.length) {
+      conversation.push({ role: 'assistant', content: message?.content || null, tool_calls: calls });
+      for (const call of calls) {
+        toolCallsUsed += 1;
+        if (toolCallsUsed > 6) throw new Error('Gemma exceeded the bounded Rider MCP tool-call limit.');
+        const name = String(call.function?.name || '');
+        let args: Record<string, unknown> = {};
+        try { args = JSON.parse(String(call.function?.arguments || '{}')) as Record<string, unknown>; } catch { /* The tool receives an empty object and returns a useful schema error. */ }
+        let content: string;
+        try { content = await callGemmaRiderTool(name, args); }
+        catch (error) { content = JSON.stringify({ error: error instanceof Error ? error.message : String(error) }); }
+        conversation.push({ role: 'tool', tool_call_id: String(call.id || `rider-${toolCallsUsed}`), name, content });
+      }
+      continue;
+    }
+    const content = message?.content?.trim();
+    if (!content) throw new Error('LM Studio returned an empty response');
+    return content;
+  }
+  throw new Error('Gemma did not finish after the bounded Rider MCP tool loop.');
 }
 
 export interface GemmaRepositoryAnswer {
@@ -111,7 +135,7 @@ Rules:
 - Inside JSON strings, write Windows paths with forward slashes (for example F:/project) so backslashes cannot create invalid JSON escapes.
 - Finish every section and sentence; never submit a truncated draft.`;
   const user = `${input.sessionContext ? `Session context:\n${input.sessionContext}\n\n` : ''}Question:\n${input.prompt}\n\n${input.evidence.text}`;
-  let raw = await callGemma([{ role: 'system', content: system }, { role: 'user', content: user }], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA);
+  let raw = await callGemma([{ role: 'system', content: `${system}\nA bounded read-only JetBrains Rider MCP toolset may be available. Use it only when it materially improves repository inspection; never claim a tool result you did not receive.` }, { role: 'user', content: user }], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA, true);
   let result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 1);
   if (!result.canAnswer && result.confidence >= 0.86) {
     raw = await callGemma([
@@ -119,7 +143,7 @@ Rules:
       { role: 'user', content: user },
       { role: 'assistant', content: raw },
       { role: 'user', content: `The draft was rejected for these deterministic reasons: ${result.rejectionReasons.join('; ')}. Return a corrected, complete JSON answer. Use only content-included repository files as evidence and do not end mid-sentence.` },
-    ], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA);
+    ], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA, true);
     result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 2);
   }
   return result;
@@ -180,7 +204,7 @@ export async function summarizeConversation(previous: string | null, messages: C
 }
 
 export async function classifyTask(prompt: string): Promise<{ classification: TaskClassification; source: 'gemma' | 'fallback'; warning?: string }> {
-  const system = `Classify a software-agent request. Return JSON only with keys: type (question|implementation|debug|design|review|test), mutating (boolean), complexity (small|normal|deep), riskFlags (string array), codexRole (none|design|debug|review), title (max 60 characters). Treat requests to create, edit, fix, implement, commit, or delete as mutating. Architecture, security, root-cause debugging, test design, and review require Codex.`;
+  const system = `Classify a software-agent request. Return JSON only with keys: type (question|implementation|debug|design|review|test), mutating (boolean), complexity (small|normal|deep), riskFlags (string array), codexRole (none|design|debug|review), localOperation (none|connect_git_remote), title (max 60 characters). Use connect_git_remote only when the user wants to tie, link, connect, add, set, or configure a Git remote/origin for the selected project. That operation is small, mutating, has no risk flags, and needs no Codex role. Treat requests to create, edit, fix, implement, commit, or delete as mutating. Architecture, security, root-cause debugging, test design, and review require Codex.`;
   try {
     const text = await callGemma([{ role: 'system', content: system }, { role: 'user', content: prompt }], 700, 60_000, CLASSIFICATION_SCHEMA);
     return { classification: normalizeClassification(validateClassification(parseJson(text), prompt), prompt), source: 'gemma' };
@@ -374,10 +398,14 @@ function validateClassification(value: unknown, prompt: string): TaskClassificat
   const roles = ['none', 'design', 'debug', 'review'];
   if (!types.includes(String(input.type)) || typeof input.mutating !== 'boolean' || !complexities.includes(String(input.complexity)) || !roles.includes(String(input.codexRole))) throw new Error('Gemma classification did not match the required schema');
   const riskFlags = normalizeRiskFlags(input.riskFlags);
-  return { type: input.type!, mutating: input.mutating, complexity: input.complexity!, riskFlags, codexRole: input.codexRole!, title: String(input.title || prompt).slice(0, 60) };
+  const localOperation = input.localOperation === 'connect_git_remote' ? 'connect_git_remote' : 'none';
+  return { type: input.type!, mutating: input.mutating, complexity: input.complexity!, riskFlags, codexRole: input.codexRole!, localOperation, title: String(input.title || prompt).slice(0, 60) };
 }
 
 export function normalizeClassification(classification: TaskClassification, prompt: string): TaskClassification {
+  if (isConnectGitRemoteIntent(prompt) || classification.localOperation === 'connect_git_remote') {
+    return { ...classification, type: 'implementation', mutating: true, complexity: 'small', riskFlags: [], codexRole: 'none', localOperation: 'connect_git_remote' };
+  }
   const explicitCodexTrigger = /\b(design|architecture|architectural|debug|root cause|security|threat|review|audit|test design|tdd|trade[- ]?off)\b/i.test(prompt);
   if (classification.type === 'question' && !classification.mutating && !explicitCodexTrigger) {
     return { ...classification, complexity: classification.riskFlags.length ? classification.complexity : 'small', codexRole: 'none' };
@@ -397,7 +425,14 @@ function fallbackClassification(prompt: string): TaskClassification {
   const type = /\b(debug|bug|error|not working|why)\b/.test(lower) ? 'debug' : /\b(design|architecture|plan|approach)\b/.test(lower) ? 'design' : /\b(review|audit|check)\b/.test(lower) ? 'review' : /\btest|tdd\b/.test(lower) ? 'test' : mutating ? 'implementation' : 'question';
   const codexRole = type === 'debug' ? 'debug' : type === 'design' || type === 'test' ? 'design' : type === 'review' ? 'review' : 'none';
   const riskFlags = /\b(security|auth|credential|delete|migration|production)\b/.test(lower) ? ['sensitive-change'] : [];
-  return { type, mutating, complexity: riskFlags.length || prompt.length > 1200 ? 'deep' : mutating ? 'normal' : 'small', riskFlags, codexRole, title: prompt.slice(0, 60) };
+  const localOperation = isConnectGitRemoteIntent(prompt) ? 'connect_git_remote' : 'none';
+  return normalizeClassification({ type, mutating, complexity: riskFlags.length || prompt.length > 1200 ? 'deep' : mutating ? 'normal' : 'small', riskFlags, codexRole, localOperation, title: prompt.slice(0, 60) }, prompt);
+}
+
+export function isConnectGitRemoteIntent(prompt: string) {
+  return /\b(?:tie|link|connect|add|set|configure)\b[\s\S]{0,80}\b(?:remote|origin)\b/i.test(prompt)
+    || /\b(?:remote|origin)\b[\s\S]{0,80}\b(?:tie|link|connect|add|set|configure)\b/i.test(prompt)
+    || /\b(?:tie|link|connect)\b[\s\S]{0,50}\brepo(?:sitory)?\b/i.test(prompt);
 }
 
 export function extractAntigravityText(output: string): string {

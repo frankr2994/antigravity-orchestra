@@ -11,6 +11,7 @@ import { runProcess } from './process.js';
 import { answerRunQuestion, explainRunHealth } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
+import { getMcpStatus } from './mcp.js';
 
 const app = express();
 const store = new Store();
@@ -52,6 +53,7 @@ app.get('/api/bootstrap', async (_req, res) => {
 app.get('/api/health', async (_req, res) => res.json(await getHealth()));
 app.get('/api/stats', async (_req, res, next) => { try { res.json(await getStats()); } catch (error) { next(error); } });
 app.get('/api/usage', async (_req, res, next) => { try { res.json(await getUsage()); } catch (error) { next(error); } });
+app.get('/api/mcp/status', async (_req, res, next) => { try { res.json(await getMcpStatus()); } catch (error) { next(error); } });
 
 app.post('/api/projects/pick', async (_req, res, next) => {
   try { const path = await pickFolder(); res.json({ path }); } catch (error) { next(error); }
