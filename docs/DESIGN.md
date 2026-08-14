@@ -414,3 +414,69 @@ A mutating Antigravity turn may not complete successfully with no project change
 - “Proceed” continues the prior completed proposal in the same conversation.
 - False no-op implementations are retried once and never reported as completed.
 - Explicit read-only and “do not modify” requests remain non-mutating.
+
+## 2026-08-13: Capability-aware MCP use and adaptive diff-first review
+
+### Background
+
+Long implementation runs spent substantial time in repeated broad Codex inspections and reviews, while the dashboard often showed only a generic command-failure notice. Rider MCP health was visible, but healthy capability was not included in task instructions and actual tool activity was not reported. The local Gemma model had enough context to cheaply narrow review attention but did not participate in review preparation.
+
+### Decision
+
+Orchestra probes Rider MCP at task start and records an agent-specific capability event. A healthy connection adds role-bounded guidance: Antigravity prefers Rider for solution-aware implementation and navigation, Codex prefers read-only semantic inspection, and Gemma may use only its allowlisted read-only bridge. MCP remains optional and agents retain ordinary Git and shell tools.
+
+Before each implementation review, Gemma produces advisory structured triage from the original request, changed-file list, and a redacted bounded diff. Orchestra creates a diff-first review packet containing the request, changed files, triage focus, Antigravity's report, the prior review when applicable, and the bounded diff. Codex inspects only targeted surrounding code and avoids duplicating broad build or test runs that Orchestra performs during final deterministic verification.
+
+Ordinary implementation reviews run on Terra High. Review escalates to Sol High for an explicitly sensitive request, high-risk Gemma triage, at least 60 changed files, or a third/repeated repair review. Initial architecture and other existing specialist routing remain independent of this review policy.
+
+Codex and Antigravity event decoders recognize Rider tool activity and publish sanitized start, completion, and failure messages. Failed Codex commands include the exit code and first useful credential-redacted detail when the provider supplies one, with a generic fallback for unknown event shapes.
+
+### Reasons
+
+- Diff-first evidence reduces repeated repository discovery and makes review time proportional to the change set.
+- Gemma can cheaply prioritize evidence without becoming a proxy tool executor for Codex or weakening independent review.
+- Terra is sufficient for ordinary bounded reviews; Sol remains available when risk or repeated failure justifies its cost and latency.
+- Capability-aware guidance makes a healthy Rider server useful without routing unsuitable work through MCP.
+- Actionable sanitized failures let the user distinguish a harmless fallback from a real stall.
+
+### Impact
+
+- The recent timeline identifies Rider availability and observed per-agent Rider activity.
+- Most implementation review cycles should complete faster and with less duplicated tool work.
+- Review packets and error details are length-bounded and secret-redacted.
+- Orchestra's final verification remains authoritative after Codex returns a passing verdict.
+- MCP health and activity are distinct: a healthy probe proves availability, while timeline events indicate observed use.
+
+## 2026-08-14: Incomplete provider turns continue through independent review
+
+### Background
+
+During a Wiring recovery run, Antigravity ignored the foreground-only instruction, invoked an implementation subagent, and returned a final message saying it was pausing until that subagent completed. The CLI emitted terminal status `ERROR` after changing 13 files. Orchestra threw on the terminal status before examining the working tree, placed the task in `recovery_required`, and never started Codex review. The preserved diff sat idle overnight even though it was suitable for independent inspection.
+
+### Decision
+
+A mutating Antigravity result containing final text and a non-success terminal status is represented as an incomplete agent result, not immediate task failure. The text is retained only as untrusted implementation context and is never accepted as proof of completion.
+
+Orchestra then applies its deterministic working-tree boundary:
+
+- If no project files changed, it starts the existing automatic implementation retry in a fresh provider conversation.
+- If uncommitted project changes exist, it continues directly into Gemma triage and independent Codex review.
+- Blocking Codex findings still return to Antigravity for synchronous repair, followed by another fresh review.
+- Only a passing Codex verdict plus deterministic project verification permits Git finalization.
+- Nonzero process exits without a usable terminal result, missing diffs, direct provider commits, repeated repairs without progress, and exhausted repair limits retain the existing recovery-required safety boundary.
+
+Antigravity implementation and repair prompts now explicitly prohibit `invoke_subagent`, `manage_task` delegation, pausing for another agent, and background execution. If Antigravity nevertheless ends incomplete, the recent timeline emits `task.provider-recovery` events explaining that Orchestra is continuing automatically.
+
+### Reasons
+
+- Provider completion status and project-change validity are separate facts.
+- A terminal provider error should not discard or strand a diff that Codex and deterministic checks can validate independently.
+- Independent review is a stronger completion gate than trusting a provider's self-reported final message.
+- A bounded automatic path prevents harmless provider lifecycle errors from becoming overnight manual stops while preserving safety for genuine ambiguity or repeated lack of progress.
+
+### Impact
+
+- The specific “delegated work, paused, status ERROR” failure now advances into review instead of `recovery_required` when a diff exists.
+- Users can see the automatic provider-recovery decision in the live timeline.
+- Successful runs that crossed this fallback return an Orchestra-generated completion summary rather than Antigravity's stale pause message.
+- Manual recovery remains available for failures that cannot safely make bounded automatic progress.

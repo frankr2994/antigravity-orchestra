@@ -79,7 +79,7 @@ Explicit implementation language is normalized deterministically, so a model can
 | Codex | Architecture, root-cause analysis, test design, independent review | Read-only analysis |
 | Orchestra | Task state, project isolation, recovery, verification, commits, pushes, telemetry | Validated local adapters and dashboard-owned Git finalization |
 
-Model selection is automatic. Deep or sensitive work uses stronger reasoning profiles; small work can use faster models, and quota pressure may move only non-critical work to a cheaper model. Required design and review roles are not skipped merely to save quota.
+Model selection is automatic. Deep or sensitive design work can use stronger reasoning profiles; small work can use faster models, and quota pressure may move only non-critical work to a cheaper model. Ordinary implementation reviews use Terra High with a bounded diff-first packet. Orchestra escalates review to Sol High for sensitive requests, high-risk Gemma triage, very large change sets, or repeated repair cycles. Required design and review roles are not skipped merely to save quota.
 
 ## Context and Quota Awareness
 
@@ -97,7 +97,7 @@ Orchestra currently provides:
 - Native Rider MCP configuration for Codex, while Codex remains instruction-bound to read-only work.
 - A loopback-only Gemma bridge exposing a bounded allowlist of read-only Rider tools.
 
-Capability-aware preference instructions and detailed per-tool timeline reporting are planned next. Today, Antigravity and Codex discover Rider through their native MCP configurations, while Gemma is explicitly given its allowed Rider tools during eligible repository-answer turns.
+At task start, Orchestra probes Rider once and gives each agent capability-aware instructions only when that agent's connection is healthy. Antigravity is encouraged to use Rider for solution-aware implementation work, Codex for read-only semantic inspection, and Gemma for its bounded repository-inspection tools. Actual Rider calls and outcomes appear in the recent timeline without exposing tool arguments. Agents still use Git and shell tools when those are the better fit; Rider is preferred where useful, not forced for every operation.
 
 ## Git Safety and Recovery
 
@@ -111,7 +111,7 @@ File-changing tasks require a Git repository. Orchestra:
 6. Adds a `docs/HANDOFF.md` entry.
 7. Commits only the reviewed project paths and pushes the current branch.
 
-If a provider fails after creating files, Orchestra preserves those changes and exposes a recovery action. Recovery continues the same task's implementation/review ownership instead of misclassifying its partial files as an unrelated baseline.
+If Antigravity returns a terminal error after producing a response during a file-changing turn, Orchestra does not accept that response as completion. It inspects the working tree: no-change turns receive a fresh foreground retry, while preserved changes continue automatically into independent Codex review, repair, verification, commit, and push. Transport failures, dashboard restarts, exhausted repairs, or other cases where safe automatic progress is no longer possible preserve the changes and expose a recovery action. Recovery keeps the same task's ownership instead of misclassifying partial files as an unrelated baseline.
 
 ## Requirements
 
@@ -208,8 +208,8 @@ orchestra/
 - Windows is the supported host platform today.
 - The dashboard is designed for a trusted, single-user loopback environment.
 - Antigravity's context percentage is shown only when a trustworthy provider source is available.
-- Generic Codex command failures are currently sanitized into a fallback notice; richer safe error reporting is planned.
-- Rider health proves protocol availability, not that an agent used Rider during a particular turn.
+- Codex command failures expose a bounded, credential-redacted reason when the protocol supplies one; unknown schemas still fall back to a generic safe notice.
+- Rider usage reporting depends on the agents' evolving event schemas. Unrecognized tool events may not appear even when the health probe succeeds.
 - MCP enable/disable management is not yet exposed in the UI.
 - Real-time multi-user collaboration is out of scope.
 

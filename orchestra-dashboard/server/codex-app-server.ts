@@ -71,15 +71,55 @@ export function codexProgressMessage(method: string, params: JsonRecord): string
   if (method === 'item/started') {
     const item = params.item || {};
     if (item.type === 'commandExecution') return friendlyCommandActivity(String(item.command || ''));
+    const mcp = mcpToolActivity(item);
+    if (mcp) return `Using Rider MCP${mcp.tool ? `: ${mcp.tool}` : ''}.`;
     if (item.type === 'todoList') return `Planning ${Array.isArray(item.items) ? item.items.length : 'the'} analysis steps.`;
     if (item.type === 'contextCompaction') return 'Codex is compacting its context before continuing.';
   }
   if (method === 'item/completed') {
     const item = params.item || {};
-    if (item.type === 'commandExecution' && item.status === 'failed') return 'A read-only repository inspection step failed; Codex is trying another approach.';
+    if (item.type === 'commandExecution' && item.status === 'failed') return commandFailureMessage(item);
+    const mcp = mcpToolActivity(item);
+    if (mcp && item.status === 'failed') return `Rider MCP${mcp.tool ? ` tool ${mcp.tool}` : ''} failed${safeFailureDetail(item) ? `: ${safeFailureDetail(item)}` : ''}. Codex is continuing with another inspection method.`;
+    if (mcp) return `Rider MCP${mcp.tool ? ` tool ${mcp.tool}` : ''} completed.`;
     if (item.type === 'contextCompaction') return 'Codex completed context compaction.';
   }
   return null;
+}
+
+export function commandFailureMessage(item: JsonRecord) {
+  const code = finite(item.exitCode ?? item.code);
+  const detail = safeFailureDetail(item);
+  return `A read-only repository inspection command failed${code === null ? '' : ` (exit ${code})`}${detail ? `: ${detail}` : ''}. Codex is continuing with another approach.`;
+}
+
+function safeFailureDetail(item: JsonRecord) {
+  const candidates = [item.stderr, item.aggregatedOutput, item.output, item.error?.message, item.error, item.message];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    const text = typeof candidate === 'string' ? candidate : JSON.stringify(candidate);
+    const ansiColor = new RegExp(String.raw`\u001B\[[0-9;]*m`, 'g');
+    const line = text.split(/\r?\n/).map((value) => value.replace(ansiColor, '').trim())
+      .find((value) => value && !/^usage:/i.test(value) && !/^for more information/i.test(value));
+    if (!line) continue;
+    return redactSensitiveText(line).slice(0, 280);
+  }
+  return '';
+}
+
+function mcpToolActivity(item: JsonRecord) {
+  const type = String(item.type || '').replace(/[_-]/g, '').toLowerCase();
+  const server = String(item.server || item.serverName || item.mcpServer || '').toLowerCase();
+  const rawTool = String(item.tool || item.toolName || item.name || '');
+  if (!(type.includes('mcp') && type.includes('tool')) && !server.includes('rider') && !/rider/i.test(rawTool)) return null;
+  const tool = rawTool.replace(/^rider[_:./-]*/i, '').replace(/[_-]+/g, ' ').trim().slice(0, 80);
+  return { tool };
+}
+
+function redactSensitiveText(value: string) {
+  return value
+    .replace(/(api[_-]?key|token|password|secret)\s*[:=]\s*["']?[^\s"']+/gi, '$1=[REDACTED]')
+    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/g, '[REDACTED_TOKEN]');
 }
 
 class CodexAppServer {

@@ -93,3 +93,12 @@ feat: Implement local Git logger skill for incremental change logging and commit
 *   **Dashboard and Telemetry Updates:** New files were added for system telemetry (`docs/images/system-and-mcp-status.png`) and live run monitoring visualization (`docs/images/live-run-monitor.png`).
 *   **Code Refactoring in `orchestra-
 
+
+## [2026-08-14 07:09:38] Handoff Update
+* **Capability-aware Rider MCP:** Orchestra probes Rider at task start, gives each healthy agent role-bounded Rider guidance, and reports observed Rider tool activity in the recent timeline without exposing arguments.
+* **Actionable Codex failures:** Read-only command failures now include a bounded, credential-redacted exit reason when available instead of only a generic fallback notice.
+* **Faster adaptive review:** Gemma performs advisory diff triage, ordinary implementation reviews use Terra High with a bounded diff-first packet, and Sol High is reserved for sensitive, high-risk, very large, or repeatedly failing reviews.
+* **Automatic incomplete-turn continuation:** A mutating Antigravity turn that returns final text with terminal status `ERROR` is no longer allowed to strand a useful diff. Orchestra retries a no-change turn or carries preserved changes into Codex review, repair, deterministic verification, commit, and push.
+* **Foreground enforcement:** Antigravity prompts explicitly prohibit `invoke_subagent`, `manage_task` delegation, pausing for another agent, and background execution. The dashboard emits `task.provider-recovery` when the fallback is used.
+* **Verification:** Dashboard lint, production build, and all 47 automated tests pass.
+

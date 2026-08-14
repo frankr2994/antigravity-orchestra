@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
@@ -128,6 +128,22 @@ test('Codex app-server notifications expose friendly progress but not raw comman
   assert.doesNotMatch(message || '', /secret-file|Get-Content/);
 });
 
+test('Codex progress reports Rider MCP activity without exposing tool arguments', () => {
+  const started = codexProgressMessage('item/started', { item: { type: 'mcpToolCall', serverName: 'rider', toolName: 'rider_find_usages', arguments: { query: 'private symbol' } } });
+  const completed = codexProgressMessage('item/completed', { item: { type: 'mcpToolCall', serverName: 'rider', toolName: 'rider_find_usages', status: 'completed' } });
+  assert.equal(started, 'Using Rider MCP: find usages.');
+  assert.equal(completed, 'Rider MCP tool find usages completed.');
+  assert.doesNotMatch(started || '', /private symbol/);
+});
+
+test('Codex command failures include a safe actionable reason and redact credentials', () => {
+  const message = codexProgressMessage('item/completed', { item: { type: 'commandExecution', status: 'failed', exitCode: 1, stderr: 'Path F:\\Missing was not found; token=super-secret-value\nUsage: inspect' } });
+  assert.match(message || '', /exit 1/);
+  assert.match(message || '', /Path F:\\Missing was not found/);
+  assert.match(message || '', /token=\[REDACTED\]/);
+  assert.doesNotMatch(message || '', /super-secret-value|Usage:/);
+});
+
 test('Antigravity usage command parsing preserves authoritative quota buckets', () => {
   const output = JSON.stringify({ command: { name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{ id: 'gemini-weekly', remaining_fraction: 0.86539, reset_time: '2026-08-19T13:28:52Z' }] }] } } });
   assert.deepEqual(extractAntigravityQuotas(output), [{ id: 'gemini-weekly', usedPercent: 13.46, remainingPercent: 86.54, resetsAt: '2026-08-19T13:28:52Z', windowMinutes: null }]);
@@ -182,6 +198,15 @@ test('read-only Antigravity output survives a late terminal error', () => {
   assert.throws(() => interpretAntigravityOutput(raw, true), /potentially incomplete file-changing run/);
 });
 
+test('mutating Antigravity output can be preserved for automatic independent review', () => {
+  const raw = JSON.stringify({ event: 'result', result: { conversation_id: 'conversation-123', status: 'ERROR', response: 'I changed project files but paused before completing verification.' } });
+  const result = interpretAntigravityOutput(raw, true, true);
+  assert.equal(result.incomplete, true);
+  assert.equal(result.status, 'ERROR');
+  assert.match(result.warning || '', /continue through independent review and repair/i);
+  assert.match(result.text, /changed project files/);
+});
+
 test('Antigravity terminal errors without final text remain failures', () => {
   const raw = JSON.stringify({ event: 'result', result: { status: 'ERROR' } });
   assert.throws(() => interpretAntigravityOutput(raw, false), /without a final response/);
@@ -208,11 +233,46 @@ test('mutating Antigravity tasks use edit mode without the read-only sandbox', (
 });
 
 test('Antigravity prompts prohibit background work and identify recovery runs', () => {
-  const prompt = buildAntigravityPrompt({ root: 'F:\\Wiring', prompt: 'Finish the tool', mutating: true, recovery: true });
+  const prompt = buildAntigravityPrompt({ root: 'F:\\Wiring', prompt: 'Finish the tool', mutating: true, recovery: true, riderAvailable: true });
   assert.match(prompt, /recovery run/i);
   assert.match(prompt, /uncommitted working-tree changes/i);
   assert.match(prompt, /Do not start background tasks, scheduled waits, development\/watch servers/i);
+  assert.match(prompt, /Do not invoke subagents, delegate through manage_task or invoke_subagent/i);
+  assert.match(prompt, /do not.*pause for another agent/i);
   assert.match(prompt, /cancel or close it before returning/i);
+  assert.match(prompt, /Rider MCP is healthy and enabled/i);
+  assert.match(prompt, /Do not force unrelated work through MCP/i);
+});
+
+test('Antigravity progress reports Rider MCP activity without protocol payloads', () => {
+  const raw = JSON.stringify({ event: 'tool_call', tool_name: 'rider_search_in_files_by_text', arguments: { query: 'private query' } });
+  const decoded = decodeAntigravityProgressLine(raw);
+  assert.deepEqual(decoded, ['Antigravity is using Rider MCP: search in files by text.']);
+  assert.doesNotMatch(decoded?.join(' ') || '', /private query|arguments/);
+});
+
+test('ordinary implementation reviews use Terra and escalate only for material risk or repetition', () => {
+  assert.deepEqual(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 12, triageRisk: 'normal' }), { model: 'gpt-5.6-terra', effort: 'high', reason: 'diff-scoped implementation review' });
+  assert.equal(selectReviewProfile({ request: 'Repair authorization checks', cycle: 0, changedFileCount: 3, triageRisk: 'normal' }).model, 'gpt-5.6-sol');
+  assert.equal(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 3, triageRisk: 'high' }).model, 'gpt-5.6-sol');
+  assert.equal(selectReviewProfile({ request: 'Implement the editor', cycle: 2, changedFileCount: 3, triageRisk: 'normal' }).model, 'gpt-5.6-sol');
+});
+
+test('review packets are bounded, diff-first, and redact secrets', () => {
+  const packet = buildReviewPacket({
+    request: 'Implement feature token=do-not-share',
+    changedFiles: ['src/app.ts'],
+    diff: '+ const password="top-secret";',
+    implementationSummary: 'Implemented src/app.ts',
+    triage: { risk: 'normal', summary: 'Inspect state transitions.', focusFiles: ['src/app.ts'], concerns: ['Potential stale state.'] },
+    previousReview: 'VERDICT: BLOCK\nRepair the state transition.',
+  });
+  assert.match(packet, /# Orchestra review packet/);
+  assert.match(packet, /src\/app\.ts/);
+  assert.match(packet, /Previous Codex review/);
+  assert.match(packet, /token=\[REDACTED\]|token=\[REDACTED_SECRET\]/);
+  assert.doesNotMatch(packet, /do-not-share|top-secret/);
+  assert.ok(packet.length <= 100_000);
 });
 
 test('read-only answers must identify the authoritative active project', () => {
