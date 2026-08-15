@@ -541,10 +541,10 @@ export function normalizeClassification(classification: TaskClassification, prom
 export function hasExplicitMutationIntent(prompt: string) {
   if (/^Orchestra continuation: the user explicitly authorizes implementation and project file changes\./i.test(prompt)) return true;
   if (/\b(?:read[- ]only|do not|don't|without)\s+(?:inspect(?:ion)?\s+and\s+)?(?:modify|edit|change|implement|create|write|commit|push)|\b(?:do not|don't)\s+start\s+(?:implementing|implementation)|\bjust\s+(?:asking|answer|explain|plan)\b/i.test(prompt)) return false;
-  const action = '(?:implement|create|build|add|change|edit|fix|remove|delete|update|commit|push)';
+  const action = '(?:implement|create|build|add|change|edit|fix|remove|delete|update|commit|push|expand|enhance|refactor|develop|integrate|scaffold)';
   return new RegExp(`^\\s*(?:please\\s+)?${action}\\b`, 'i').test(prompt)
     || new RegExp(`\\b(?:go ahead(?:\\s+and)?|please|can you|could you|i want you to|let(?:'|’)s|proceed to)\\b[\\s\\S]{0,120}\\b${action}\\b`, 'i').test(prompt)
-    || new RegExp(`\\b(?:implement|fix|update|add|remove|delete|commit|push)\\s+(?:this|that|it|the|these|those|now)\\b`, 'i').test(prompt)
+    || new RegExp(`\\b(?:implement|fix|update|add|remove|delete|commit|push|expand|enhance|refactor|develop|integrate)\\s+(?:this|that|it|the|these|those|now)\\b`, 'i').test(prompt)
     || /\bplan(?:\s+out)?\s+and\s+implement\b/i.test(prompt);
 }
 
