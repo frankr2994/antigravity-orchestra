@@ -157,14 +157,21 @@ export async function runGemmaDirectChat(input: {
   onOutput?: (chunk: string) => void;
   onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void;
 }): Promise<string> {
-  const system = `You are Gemma, the local AI assistant in Antigravity Orchestra. You are engaged in a direct conversation with the user.
-Active project directory: ${input.root}.
-Answer clearly and helpfully in standard Markdown. Provide concrete explanations, code, or brainstorming advice as requested.`;
+  const system = `You are Gemma, the local AI software engineering assistant in Antigravity Orchestra. You are in a direct 1-on-1 consultation with the developer.
+The authoritative active repository is: ${input.root}.
+
+Below is the repository evidence, including Git status, recent commit history, and the full contents of key project files:
+
+${input.evidence ? input.evidence.text : 'No repository evidence gathered.'}
+
+Instructions:
+- Use the repository evidence above to directly review files, analyze architecture, explain commits, and answer questions.
+- Never claim you lack access to the project files or ask the user to paste files that are present in the evidence.
+- Answer thoroughly and helpfully in GitHub-flavored Markdown with concrete code blocks.`;
 
   const messages: Array<Record<string, unknown>> = [
     { role: 'system', content: system },
     ...(input.sessionContext ? [{ role: 'system', content: `Session context:\n${input.sessionContext}` }] : []),
-    ...(input.evidence ? [{ role: 'system', content: `Repository files available:\n${input.evidence.includedFiles.slice(0, 40).join('\n')}` }] : []),
     { role: 'user', content: input.prompt },
   ];
 

@@ -7,7 +7,7 @@ import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
 import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
-import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
+import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
 import { verificationFailure as describeVerificationFailure, verifyProject } from './verification.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
@@ -243,8 +243,12 @@ export class TaskManager {
 
         if (directAgent === 'gemma') {
           this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model: config.lmStudioModel });
-          const status = await getGitStatus(project.root);
-          const evidence = collectRepositoryEvidence(project.root, task.prompt, status);
+          const [status, commits, diff] = await Promise.all([
+            getGitStatus(project.root),
+            getRecentCommits(project.root, 10),
+            getDiff(project.root, 20_000),
+          ]);
+          const evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff);
           const answer = await runGemmaDirectChat({
             root: project.root,
             prompt: task.prompt,

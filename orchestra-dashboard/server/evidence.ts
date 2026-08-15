@@ -17,7 +17,7 @@ const SENSITIVE_NAMES = /(^|\/)(\.env(?:\..*)?|local\.properties|credentials?|se
 const TEXT_EXTENSIONS = new Set(['.c', '.cc', '.cpp', '.cs', '.css', '.go', '.gradle', '.h', '.hpp', '.html', '.java', '.js', '.json', '.kt', '.kts', '.md', '.mjs', '.ps1', '.py', '.rs', '.sh', '.sql', '.toml', '.ts', '.tsx', '.txt', '.xml', '.yaml', '.yml']);
 const IMPORTANT_NAMES = /^(readme(?:\..*)?|roadmap(?:\..*)?|contributing(?:\..*)?|package\.json|pyproject\.toml|cargo\.toml|go\.mod|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|cmakelists\.txt|makefile)$/i;
 
-export function collectRepositoryEvidence(rootInput: string, prompt: string, git?: GitStatus, maxChars = 120_000): RepositoryEvidence {
+export function collectRepositoryEvidence(rootInput: string, prompt: string, git?: GitStatus, recentCommits?: string, gitDiff?: string, maxChars = 120_000): RepositoryEvidence {
   const root = realpathSync.native(resolve(rootInput));
   const entries: Array<{ path: string; size: number; score: number }> = [];
   const allFiles: string[] = [];
@@ -58,6 +58,8 @@ export function collectRepositoryEvidence(rootInput: string, prompt: string, git
   const sections = [
     `# Repository evidence\nAuthoritative root: ${root}`,
     git ? `## Git snapshot\nRepository: ${git.isGit}\nBranch: ${git.branch || 'unknown'}\nHEAD: ${git.head || 'unknown'}\nDirty: ${git.dirty}\nChanged paths: ${git.files.slice(0, 80).map((file) => file.path).join(', ') || 'none'}` : '',
+    recentCommits ? `## Recent commit history:\n${recentCommits}` : '',
+    gitDiff ? `## Uncommitted working-tree diff:\n${gitDiff.slice(0, 15_000)}` : '',
     `## File inventory (${allFiles.length}${visited >= 5000 ? '+' : ''} files discovered; content is included only for ranked text files)\n${allFiles.slice(0, treeLimit).join('\n')}`,
   ].filter(Boolean);
   const includedFiles: string[] = [];

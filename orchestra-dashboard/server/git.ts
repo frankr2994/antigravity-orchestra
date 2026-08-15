@@ -56,6 +56,11 @@ export async function getDiff(cwd: string, maxChars = 80_000): Promise<string> {
   return `${staged.stdout}\n${unstaged.stdout}\n${extra}`.slice(0, maxChars);
 }
 
+export async function getRecentCommits(cwd: string, count = 10): Promise<string> {
+  const result = await git(['log', `-${count}`, '--oneline', '--no-merges'], cwd).catch(() => null);
+  return result?.code === 0 ? result.stdout.trim() : '';
+}
+
 export async function commitPaths(cwd: string, paths: string[], title: string, body: string) {
   if (!paths.length) throw new Error('No paths were provided for commit');
   const normalized = [...new Set(paths.map((value) => value.includes(' -> ') ? value.split(' -> ').at(-1)! : value))];
