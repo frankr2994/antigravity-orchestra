@@ -148,6 +148,92 @@ export function normalizeEvidenceFile(value: string, root: string, availableFile
   return availableFiles.find((file) => file.replace(/\\/g, '/').toLowerCase() === candidate.toLowerCase()) || null;
 }
 
+export async function runGemmaDirectChat(input: {
+  root: string;
+  prompt: string;
+  evidence?: RepositoryEvidence;
+  sessionContext?: string;
+  signal?: AbortSignal;
+  onOutput?: (chunk: string) => void;
+  onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void;
+}): Promise<string> {
+  const system = `You are Gemma, the local AI assistant in Antigravity Orchestra. You are engaged in a direct conversation with the user.
+Active project directory: ${input.root}.
+Answer clearly and helpfully in standard Markdown. Provide concrete explanations, code, or brainstorming advice as requested.`;
+
+  const messages: Array<Record<string, unknown>> = [
+    { role: 'system', content: system },
+    ...(input.sessionContext ? [{ role: 'system', content: `Session context:\n${input.sessionContext}` }] : []),
+    ...(input.evidence ? [{ role: 'system', content: `Repository files available:\n${input.evidence.includedFiles.slice(0, 40).join('\n')}` }] : []),
+    { role: 'user', content: input.prompt },
+  ];
+
+  try {
+    const response = await fetch(`${config.lmStudioBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.lmStudioModel,
+        messages,
+        temperature: 0.7,
+        max_tokens: 3000,
+        stream: true,
+      }),
+      signal: input.signal || AbortSignal.timeout(180_000),
+    });
+
+    if (!response.ok) {
+      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      input.onOutput?.(fallbackText);
+      return fallbackText;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      input.onOutput?.(fallbackText);
+      return fallbackText;
+    }
+
+    const decoder = new TextDecoder();
+    let accumulated = '';
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed === 'data: [DONE]') continue;
+        if (trimmed.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(trimmed.slice(6)) as { choices?: Array<{ delta?: { content?: string } }> };
+            const delta = data.choices?.[0]?.delta?.content;
+            if (delta) {
+              accumulated += delta;
+              input.onOutput?.(delta);
+            }
+          } catch { /* ignore partial chunk parse error */ }
+        }
+      }
+    }
+
+    return accumulated.trim() || 'Gemma completed without response text.';
+  } catch (error) {
+    try {
+      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      input.onOutput?.(fallbackText);
+      return fallbackText;
+    } catch {
+      throw new Error(`Direct Gemma chat error: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+}
+
 export async function answerRepositoryQuestion(input: { root: string; prompt: string; evidence: RepositoryEvidence; sessionContext?: string; onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void }): Promise<GemmaRepositoryAnswer> {
   const system = `You are Orchestra's local repository analyst. Answer only from the supplied evidence. Return JSON only with this schema: {"canAnswer":boolean,"confidence":number,"answer":string,"evidenceFiles":string[],"limitations":string[]}.
 Rules:
@@ -163,7 +249,24 @@ Rules:
 - Finish every section and sentence; never submit a truncated draft.`;
   const user = `${input.sessionContext ? `Session context:\n${input.sessionContext}\n\n` : ''}Question:\n${input.prompt}\n\n${input.evidence.text}`;
   let raw = await callGemma([{ role: 'system', content: `${system}\nA bounded read-only JetBrains Rider MCP toolset may be available. Prefer it for solution structure, project dependencies, symbol-aware searches, file problems, and targeted repository inspection when those tools materially improve the answer. Never claim a tool result you did not receive.` }, { role: 'user', content: user }], 4_000, 180_000, undefined, true, input.onToolActivity);
-  let result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 1);
+  
+  let parsedRaw: Record<string, unknown>;
+  try {
+    parsedRaw = parseJson(raw) as Record<string, unknown>;
+  } catch {
+    // If Gemma responded in markdown prose instead of JSON, treat the prose directly as the answer
+    return {
+      canAnswer: raw.trim().length > 30,
+      confidence: 0.9,
+      answer: raw.trim(),
+      evidenceFiles: [],
+      limitations: [],
+      rejectionReasons: [],
+      attempts: 1,
+    };
+  }
+
+  let result = normalizeRepositoryAnswer(parsedRaw, input, 1);
   if (!result.canAnswer && result.confidence >= 0.86) {
     raw = await callGemma([
       { role: 'system', content: system },
@@ -171,7 +274,19 @@ Rules:
       { role: 'assistant', content: raw },
       { role: 'user', content: `The draft was rejected for these deterministic reasons: ${result.rejectionReasons.join('; ')}. Return a corrected, complete JSON answer. Use only content-included repository files as evidence and do not end mid-sentence.` },
     ], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA, false);
-    result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 2);
+    try {
+      result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 2);
+    } catch {
+      return {
+        canAnswer: true,
+        confidence: 0.9,
+        answer: raw.trim(),
+        evidenceFiles: [],
+        limitations: [],
+        rejectionReasons: [],
+        attempts: 2,
+      };
+    }
   }
   return result;
 }

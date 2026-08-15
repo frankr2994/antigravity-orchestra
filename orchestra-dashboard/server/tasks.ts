@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -245,9 +245,15 @@ export class TaskManager {
           this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model: config.lmStudioModel });
           const status = await getGitStatus(project.root);
           const evidence = collectRepositoryEvidence(project.root, task.prompt, status);
-          const answer = await answerRepositoryQuestion({ root: project.root, prompt: task.prompt, evidence });
-          this.emit(taskId, 'gemma', 'agent.completed', { phase: 'direct-chat', result: answer.answer });
-          this.complete(taskId, answer.answer, 'gemma');
+          const answer = await runGemmaDirectChat({
+            root: project.root,
+            prompt: task.prompt,
+            evidence,
+            signal,
+            onOutput: (chunk) => this.stream(taskId, 'gemma', chunk),
+          });
+          this.emit(taskId, 'gemma', 'agent.completed', { phase: 'direct-chat', result: answer });
+          this.complete(taskId, answer, 'gemma');
           return;
         }
 
