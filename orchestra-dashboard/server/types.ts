@@ -2,7 +2,8 @@ export type AgentName = 'system' | 'antigravity' | 'codex' | 'gemma' | 'git' | '
 export type TaskState =
   | 'queued' | 'preflight' | 'baseline_required' | 'routing' | 'running'
   | 'recovering' | 'recovery_required' | 'reviewing' | 'verifying' | 'summarizing' | 'committing' | 'pushing'
-  | 'completed' | 'completed_unpushed' | 'failed' | 'cancelled';
+  | 'completed' | 'completed_unpushed' | 'failed' | 'cancelled'
+  | 'review_disputed';
 
 export interface Project {
   id: string;

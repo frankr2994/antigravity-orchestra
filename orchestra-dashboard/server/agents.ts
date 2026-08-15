@@ -2,7 +2,8 @@ import { config } from './config.js';
 import { ProcessIdleTimeoutError, ProcessTimeoutError, runProcess } from './process.js';
 import type { ChatMessage, ModelSelection, TaskClassification, TaskRecord } from './types.js';
 import type { RepositoryEvidence } from './evidence.js';
-import { delimiter } from 'node:path';
+import { delimiter, dirname, resolve } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { codexAppServer } from './codex-app-server.js';
 import { callGemmaRiderTool, getGemmaRiderTools } from './mcp.js';
 
@@ -19,6 +20,10 @@ const CHANGE_SUMMARY_SCHEMA: JsonSchema = { name: 'change_summary', schema: { ty
 const RUN_HEALTH_SCHEMA: JsonSchema = { name: 'run_health', schema: { type: 'object', properties: { explanation: { type: 'string' } }, required: ['explanation'], additionalProperties: false } };
 const REVIEW_TRIAGE_SCHEMA: JsonSchema = { name: 'review_triage', schema: { type: 'object', properties: { risk: { type: 'string', enum: ['low', 'normal', 'high'] }, summary: { type: 'string' }, focusFiles: { type: 'array', items: { type: 'string' } }, concerns: { type: 'array', items: { type: 'string' } } }, required: ['risk', 'summary', 'focusFiles', 'concerns'], additionalProperties: false } };
 const PROVIDER_FAILURE_TRIAGE_SCHEMA: JsonSchema = { name: 'provider_failure_triage', schema: { type: 'object', properties: { category: { type: 'string', enum: ['delegated_wait', 'timeout', 'process_exit', 'tool_failure', 'no_progress', 'unknown'] }, summary: { type: 'string' }, continuationInstructions: { type: 'string' }, safeToReviewPreservedDiff: { type: 'boolean' } }, required: ['category', 'summary', 'continuationInstructions', 'safeToReviewPreservedDiff'], additionalProperties: false } };
+const DISTILLED_ERRORS_SCHEMA: JsonSchema = { name: 'verification_errors_distillation', schema: { type: 'object', properties: { summary: { type: 'string' }, findings: { type: 'array', items: { type: 'object', properties: { file: { type: ['string', 'null'] }, line: { type: ['integer', 'null'] }, errorType: { type: 'string' }, message: { type: 'string' }, suggestion: { type: 'string' } }, required: ['errorType', 'message'], additionalProperties: false } } }, required: ['summary', 'findings'], additionalProperties: false } };
+const SEMANTIC_COMMITS_SCHEMA: JsonSchema = { name: 'semantic_commit_slicing', schema: { type: 'object', properties: { slices: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, files: { type: 'array', items: { type: 'string' } } }, required: ['title', 'body', 'files'], additionalProperties: false } } }, required: ['slices'], additionalProperties: false } };
+const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
+const GEMMA_MICRO_TASK_SCHEMA: JsonSchema = { name: 'gemma_micro_task_execution', schema: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string', enum: ['overwrite', 'create'] }, content: { type: 'string' } }, required: ['path', 'action', 'content'], additionalProperties: false } }, explanation: { type: 'string' } }, required: ['files', 'explanation'], additionalProperties: false } };
 
 export async function lmStudioHealth() {
   try {
@@ -281,6 +286,37 @@ export async function runCodexReview(input: { root: string; model: string; effor
   return result.text || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
 }
 
+export function extractCodexReviewVerdict(reviewText: string): { verdict: 'PASS' | 'BLOCK'; blocked: boolean; summary: string } {
+  const trimmed = (reviewText || '').trim();
+  if (!trimmed) return { verdict: 'BLOCK', blocked: true, summary: 'No review output returned.' };
+  const lines = trimmed.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  
+  // 1. Look for explicit dedicated verdict lines or headers anywhere in the output
+  const verdictLineRegex = /^(?:#+\s*)?(?:\*\*)?(?:Final\s+)?VERDICT:\s*(PASS|BLOCK)(?:\*\*)?/i;
+  const explicitVerdicts: Array<'PASS' | 'BLOCK'> = [];
+  for (const line of lines) {
+    const match = line.match(verdictLineRegex);
+    if (match) {
+      explicitVerdicts.push(match[1].toUpperCase() as 'PASS' | 'BLOCK');
+    }
+  }
+
+  if (explicitVerdicts.length > 0) {
+    // If explicit verdict lines exist, use the primary/last explicit decision (BLOCK takes precedence if mixed)
+    const verdict = explicitVerdicts.includes('BLOCK') ? 'BLOCK' : explicitVerdicts[explicitVerdicts.length - 1];
+    return { verdict, blocked: verdict === 'BLOCK', summary: trimmed.slice(0, 3000) };
+  }
+
+  // 2. Check for explicit Markdown headers (e.g. ## Verdict: PASS)
+  const headerBlock = /^#+\s*(?:Final\s+)?Verdict:?\s*BLOCK\b/im.test(trimmed) || /^\*\*(?:Final\s+)?Verdict:\*\*\s*BLOCK\b/im.test(trimmed);
+  const headerPass = /^#+\s*(?:Final\s+)?Verdict:?\s*PASS\b/im.test(trimmed) || /^\*\*(?:Final\s+)?Verdict:\*\*\s*PASS\b/im.test(trimmed);
+  if (headerBlock) return { verdict: 'BLOCK', blocked: true, summary: trimmed.slice(0, 3000) };
+  if (headerPass) return { verdict: 'PASS', blocked: false, summary: trimmed.slice(0, 3000) };
+
+  // 3. Fallback: if no dedicated verdict line or header was found, treat as BLOCK for safety
+  return { verdict: 'BLOCK', blocked: true, summary: trimmed.slice(0, 3000) };
+}
+
 export interface ReviewTriage { risk: 'low' | 'normal' | 'high'; summary: string; focusFiles: string[]; concerns: string[]; }
 
 export async function triageReview(input: { request: string; diff: string; changedFiles: string[] }): Promise<ReviewTriage> {
@@ -488,11 +524,12 @@ function validateClassification(value: unknown, prompt: string): TaskClassificat
 }
 
 export function normalizeClassification(classification: TaskClassification, prompt: string): TaskClassification {
-  if (isConnectGitRemoteIntent(prompt) || classification.localOperation === 'connect_git_remote') {
+  const isPureRemoteConnect = isConnectGitRemoteIntent(prompt) && prompt.length < 200 && !/\b(scaffold|build|implement|develop|create\s+app|create\s+project|web\s+app|features?)\b/i.test(prompt);
+  if ((isConnectGitRemoteIntent(prompt) || classification.localOperation === 'connect_git_remote') && isPureRemoteConnect) {
     return { ...classification, type: 'implementation', mutating: true, complexity: 'small', riskFlags: [], codexRole: 'none', localOperation: 'connect_git_remote' };
   }
   if (hasExplicitMutationIntent(prompt)) {
-    return { ...classification, type: classification.type === 'question' ? 'implementation' : classification.type, mutating: true };
+    return { ...classification, type: classification.type === 'question' ? 'implementation' : classification.type, mutating: true, localOperation: 'none' };
   }
   const explicitCodexTrigger = /\b(design|architecture|architectural|debug|root cause|security|threat|review|audit|test design|tdd|trade[- ]?off)\b/i.test(prompt);
   if (classification.type === 'question' && !classification.mutating && !explicitCodexTrigger) {
@@ -681,3 +718,179 @@ export function friendlyCodexError(stderr: string, code: number) {
 export function sanitizeCodexPath(value: string) {
   return value.split(delimiter).filter((entry) => !/\\WindowsApps(?:\\|$)/i.test(entry)).join(delimiter);
 }
+
+export interface VerificationFinding {
+  file: string | null;
+  line: number | null;
+  errorType: string;
+  message: string;
+  suggestion?: string;
+}
+
+export interface DistilledVerificationResult {
+  summary: string;
+  findings: VerificationFinding[];
+  repairPromptChunk: string;
+}
+
+export async function distillVerificationErrors(rawOutput: string, command: string): Promise<DistilledVerificationResult> {
+  const sanitized = redactSecrets(rawOutput).slice(-8_000);
+  try {
+    const text = await callGemma([
+      {
+        role: 'system',
+        content: 'You are an expert compiler and test log distiller. Extract the exact failure points, error types, failing tests, or compiler errors from this terminal log. Return clean JSON only.',
+      },
+      {
+        role: 'user',
+        content: `Command executed:\n${command}\n\nTerminal Output:\n${sanitized}`,
+      },
+    ], 900, 45_000, DISTILLED_ERRORS_SCHEMA);
+    const parsed = parseJson(text) as Record<string, unknown>;
+    const summary = String(parsed.summary || `Verification command '${command}' failed.`);
+    const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
+    const findings: VerificationFinding[] = rawFindings.map((f: any) => ({
+      file: typeof f.file === 'string' ? f.file : null,
+      line: Number.isInteger(f.line) ? f.line : null,
+      errorType: String(f.errorType || 'Error'),
+      message: String(f.message || ''),
+      suggestion: typeof f.suggestion === 'string' ? f.suggestion : undefined,
+    }));
+    const findingsFormatted = findings.map((f, i) => {
+      const loc = f.file ? `${f.file}${f.line ? `:${f.line}` : ''}` : 'General';
+      const sug = f.suggestion ? `\n  - Suggested Fix: ${f.suggestion}` : '';
+      return `${i + 1}. [${f.errorType}] ${loc}: ${f.message}${sug}`;
+    }).join('\n');
+
+    const repairPromptChunk = `### Distilled Verification Failures (${command})\n**Summary:** ${summary}\n\n**Actionable Findings:**\n${findingsFormatted || '- ' + summary}\n\n**Raw Failure Snippet:**\n\`\`\`\n${sanitized.slice(-1500)}\n\`\`\``;
+
+    return { summary, findings, repairPromptChunk };
+  } catch {
+    const lines = sanitized.split(/\r?\n/).filter((l) => /(?:error|fail|exception|assert)/i.test(l)).slice(-10);
+    const summary = `Verification command '${command}' failed with errors.`;
+    const fallbackChunk = `### Verification Failure (${command})\n${lines.join('\n') || sanitized.slice(-1000)}`;
+    return { summary, findings: [], repairPromptChunk: fallbackChunk };
+  }
+}
+
+export interface SemanticCommitSlice {
+  title: string;
+  body: string;
+  files: string[];
+}
+
+export async function sliceSemanticCommits(diffText: string, changedFiles: string[], taskRequest: string): Promise<SemanticCommitSlice[]> {
+  if (changedFiles.length <= 2) {
+    const summary = await summarizeChanges(diffText, taskRequest);
+    return [{ title: summary.title, body: summary.summary, files: changedFiles }];
+  }
+  const sanitizedDiff = redactSecrets(diffText).slice(0, 50_000);
+  try {
+    const text = await callGemma([
+      {
+        role: 'system',
+        content: 'You are a Git release engineer. Analyze the changed files and diff. Group the files into 1 to 4 logical, atomic, conventional commit slices (e.g. feat(core), feat(ui), test, docs/chore). Every changed file must belong to exactly one slice. Return JSON only: {"slices":[{"title":"conventional commit title","body":"bulleted summary","files":["relative/path/1", ...]}]}',
+      },
+      {
+        role: 'user',
+        content: `Task Request:\n${taskRequest}\n\nChanged Files:\n${changedFiles.map((f) => `- ${f}`).join('\n')}\n\nDiff:\n${sanitizedDiff}`,
+      },
+    ], 1_200, 60_000, SEMANTIC_COMMITS_SCHEMA);
+    const parsed = parseJson(text) as Record<string, unknown>;
+    const rawSlices = Array.isArray(parsed.slices) ? parsed.slices : [];
+    const validSlices: SemanticCommitSlice[] = [];
+    const assignedFiles = new Set<string>();
+
+    for (const raw of rawSlices) {
+      if (!raw || typeof raw !== 'object') continue;
+      const rawRecord = raw as Record<string, unknown>;
+      const rawSliceFiles = Array.isArray(rawRecord.files) ? rawRecord.files.map(String) : [];
+      const sliceFiles = rawSliceFiles.filter((file: string) => changedFiles.includes(file) && !assignedFiles.has(file));
+      if (sliceFiles.length > 0) {
+        sliceFiles.forEach((f: string) => assignedFiles.add(f));
+        validSlices.push({
+          title: String(rawRecord.title || 'Update project').replace(/[\r\n]/g, ' ').slice(0, 72),
+          body: String(rawRecord.body || '- Updated project files.').trim(),
+          files: sliceFiles,
+        });
+      }
+    }
+
+    const unassigned = changedFiles.filter((f) => !assignedFiles.has(f));
+    if (unassigned.length > 0) {
+      if (validSlices.length > 0) {
+        validSlices[validSlices.length - 1].files.push(...unassigned);
+      } else {
+        const fallbackSummary = await summarizeChanges(diffText, taskRequest);
+        return [{ title: fallbackSummary.title, body: fallbackSummary.summary, files: changedFiles }];
+      }
+    }
+
+    return validSlices.length ? validSlices : [{ title: taskRequest.slice(0, 72), body: '- Updated project files.', files: changedFiles }];
+  } catch {
+    const summary = await summarizeChanges(diffText, taskRequest);
+    return [{ title: summary.title, body: summary.summary, files: changedFiles }];
+  }
+}
+
+export async function preReviewSanityCheck(input: { root: string; changedFiles: string[]; diff: string }): Promise<{ passed: boolean; issues: string[] }> {
+  if (!input.changedFiles.length) return { passed: true, issues: [] };
+  const sanitizedDiff = redactSecrets(input.diff).slice(0, 30_000);
+  try {
+    const text = await callGemma([
+      {
+        role: 'system',
+        content: 'You are a fast syntax and sanity checker. Check this diff for obvious syntax errors, unresolved/missing imports, merge conflict markers (<<<<<<<, >>>>>>>), or empty broken functions. Return JSON: {"passed": boolean, "issues": ["description of issue 1", ...]}',
+      },
+      {
+        role: 'user',
+        content: `Files changed:\n${input.changedFiles.join('\n')}\n\nDiff:\n${sanitizedDiff}`,
+      },
+    ], 500, 30_000, PRE_REVIEW_SANITY_SCHEMA);
+    const parsed = parseJson(text) as Record<string, unknown>;
+    const passed = parsed.passed === true || !Array.isArray(parsed.issues) || parsed.issues.length === 0;
+    const issues = Array.isArray(parsed.issues) ? parsed.issues.map(String).filter(Boolean) : [];
+    return { passed, issues };
+  } catch {
+    return { passed: true, issues: [] };
+  }
+}
+
+export async function executeGemmaMicroTask(input: {
+  root: string;
+  prompt: string;
+  signal: AbortSignal;
+  onOutput?: (chunk: string) => void;
+}): Promise<{ success: boolean; result: string; changedFiles: string[] }> {
+  const text = await callGemma([
+    {
+      role: 'system',
+      content: 'You are a precise coding assistant for targeted micro-tasks (under 30 lines changed). Generate the complete file content for target files. Return JSON: {"files": [{"path": "relative/path", "action": "overwrite"|"create", "content": "full file content"}], "explanation": "what was done"}',
+    },
+    {
+      role: 'user',
+      content: `Directory: ${input.root}\n\nTask:\n${input.prompt}`,
+    },
+  ], 2000, 60_000, GEMMA_MICRO_TASK_SCHEMA);
+
+  const parsed = parseJson(text) as { files?: Array<{ path: string; action: string; content: string }>; explanation?: string };
+  if (!Array.isArray(parsed.files) || !parsed.files.length) {
+    throw new Error('Gemma did not produce any micro-task file operations.');
+  }
+
+  const changedFiles: string[] = [];
+  for (const file of parsed.files) {
+    const fullPath = resolve(input.root, file.path);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, file.content, 'utf8');
+    changedFiles.push(file.path);
+    input.onOutput?.(`Gemma applied micro-edit to ${file.path}\n`);
+  }
+
+  return {
+    success: true,
+    result: parsed.explanation || 'Applied local micro-task changes with Gemma.',
+    changedFiles,
+  };
+}
+

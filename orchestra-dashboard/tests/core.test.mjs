@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, findContinuationRecoveryTask, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
@@ -516,3 +516,63 @@ test('SQLite store persists projects, sessions, messages, tasks, and events', ()
     store.close();
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test('extractCodexReviewVerdict parses strict verdict headers without body false-positives', () => {
+  const directPass = extractCodexReviewVerdict('VERDICT: PASS\n\nAll changes look solid.');
+  assert.equal(directPass.verdict, 'PASS');
+  assert.equal(directPass.blocked, false);
+
+  const directBlock = extractCodexReviewVerdict('VERDICT: BLOCK\n\n1. Critical missing null check in parser.');
+  assert.equal(directBlock.verdict, 'BLOCK');
+  assert.equal(directBlock.blocked, true);
+
+  const markdownHeaderPass = extractCodexReviewVerdict('## Verdict: PASS\n\nPrevious review had VERDICT: BLOCK, but that is now fixed.');
+  assert.equal(markdownHeaderPass.verdict, 'PASS');
+  assert.equal(markdownHeaderPass.blocked, false);
+
+  const bodyMentionWithoutHeader = extractCodexReviewVerdict('Here is the analysis of changes.\nWe discussed why someone might write VERDICT: PASS here, but actually:\n1. [P1] Broken build.');
+  assert.equal(bodyMentionWithoutHeader.verdict, 'BLOCK');
+  assert.equal(bodyMentionWithoutHeader.blocked, true);
+});
+
+test('evaluateRunHealth classifies review_disputed as needs_attention', () => {
+  assert.equal(evaluateRunHealth('review_disputed', false, 0), 'needs_attention');
+  assert.equal(evaluateRunHealth('recovery_required', false, 0), 'needs_attention');
+  assert.equal(evaluateRunHealth('running', true, 10_000), 'active');
+  assert.equal(evaluateRunHealth('running', true, 100_000), 'waiting');
+  assert.equal(evaluateRunHealth('running', false, 0), 'possibly_stalled');
+});
+
+test('distillVerificationErrors provides structured actionable findings or resilient fallback', async () => {
+  const sampleError = `
+server/tasks.ts(285,34): error TS2339: Property 'remote' does not exist on type 'GitStatus'.
+src/App.tsx(42,12): error TS2304: Cannot find name 'unresolvedVariable'.
+`;
+  const result = await distillVerificationErrors(sampleError, 'npm run build');
+  assert.ok(result.summary);
+  assert.ok(result.repairPromptChunk.includes('npm run build'));
+});
+
+test('sliceSemanticCommits preserves all changed files across slices', async () => {
+  const files = ['src/domain/types.ts', 'src/domain/validation.ts', 'src/components/Timeline.tsx', 'README.md'];
+  const diff = `
+diff --git a/src/domain/types.ts b/src/domain/types.ts
++ export interface Span {}
+diff --git a/src/components/Timeline.tsx b/src/components/Timeline.tsx
++ export function Timeline() {}
+`;
+  const slices = await sliceSemanticCommits(diff, files, 'Build LogLens visualizer');
+  assert.ok(Array.isArray(slices));
+  assert.ok(slices.length >= 1);
+  const allAssigned = slices.flatMap((s) => s.files);
+  for (const f of files) {
+    assert.ok(allAssigned.includes(f), `Expected file ${f} to be included in slices`);
+  }
+});
+
+test('preReviewSanityCheck handles clean and empty file inputs safely', async () => {
+  const clean = await preReviewSanityCheck({ root: 'F:/sample', changedFiles: [], diff: '' });
+  assert.equal(clean.passed, true);
+  assert.deepEqual(clean.issues, []);
+});
+

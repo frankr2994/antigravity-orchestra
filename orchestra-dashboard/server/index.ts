@@ -156,6 +156,16 @@ app.post('/api/tasks/:id/recover', async (req, res, next) => {
 app.post('/api/tasks/:id/retry', async (req, res, next) => {
   try { await tasks.retry(requireTask(req.params.id).id); res.status(202).json({ ok: true }); } catch (error) { next(error); }
 });
+app.post('/api/tasks/:id/approve-disputed', async (req, res, next) => {
+  try { const task = await tasks.approveDisputed(requireTask(req.params.id).id); res.status(202).json(task); } catch (error) { next(error); }
+});
+app.post('/api/tasks/:id/steer-disputed', async (req, res, next) => {
+  try {
+    const guidance = String(req.body?.guidance || '').trim();
+    const task = await tasks.steerDisputed(requireTask(req.params.id).id, guidance);
+    res.status(202).json(task);
+  } catch (error) { next(error); }
+});
 app.post('/api/projects/:id/baseline', async (req, res, next) => {
   try { requireProject(req.params.id); const task = requireTask(String(req.body?.taskId || '')); await tasks.resolveBaseline(task.id); res.status(202).json({ ok: true }); } catch (error) { next(error); }
 });

@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, listAntigravityModels, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -106,6 +106,28 @@ export class TaskManager {
     this.emit(task.id, 'system', 'project.onboarding', onboarding);
     this.store.updateTask(task.id, { state: 'queued', error: null });
     this.enqueue(task.id);
+  }
+
+  async approveDisputed(taskId: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    if (task.state !== 'review_disputed') throw new Error(`Only a task in review_disputed state can be approved, but task is ${task.state}.`);
+    const project = requireProject(this.store, task.projectId);
+    const classification = parseTaskClassification(task.classification);
+    const models = task.models ? JSON.parse(task.models) : selectModels(classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title });
+    await this.finalizeGit(taskId, project, task.prompt, classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title }, models);
+    this.complete(taskId, 'Task changes approved and committed by user after review dispute.', 'antigravity');
+    return requireTask(this.store, taskId);
+  }
+
+  async steerDisputed(taskId: string, guidance: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    if (task.state !== 'review_disputed') throw new Error(`Only a task in review_disputed state can be steered, but task is ${task.state}.`);
+    if (!guidance.trim()) throw new Error('Steering guidance cannot be empty.');
+    this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content: `Steering guidance:\n${guidance.trim()}` });
+    this.store.updateTask(taskId, { state: 'recovering', error: null });
+    this.emit(taskId, 'system', 'task.steer', { guidance: guidance.trim(), message: 'Resuming task with user-supplied steering guidance.' });
+    this.enqueue(taskId);
+    return requireTask(this.store, taskId);
   }
 
   private drain() {
@@ -256,6 +278,15 @@ export class TaskManager {
         status = await getGitStatus(project.root);
         if (!status.isGit) {
           throw new Error('File-changing tasks require a Git repository so Orchestra can review, verify, and preserve changes. This non-Git directory contains project files, so Orchestra will not initialize it automatically. Initialize Git in the selected directory, create a clean baseline commit, and retry.');
+        }
+      }
+      if (classification.mutating && status.isGit) {
+        const remoteUrl = findRecentGitHubUrl(this.store, session.id, task.prompt);
+        if (remoteUrl && !status.upstream) {
+          try {
+            const connected = await connectGitHubRemote(project.root, remoteUrl);
+            this.emit(taskId, 'git', 'git.remote', connected);
+          } catch { /* already configured or non-blocking */ }
         }
       }
 
@@ -432,7 +463,7 @@ export class TaskManager {
           let previousRepairChanged = true;
           let noProgressEscalations = 0;
           let verificationPassed = false;
-          const maxRepairAttempts = 6;
+          const maxRepairAttempts = 3;
           for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
             const reviewStatus = await getGitStatus(project.root);
             const changedFiles = reviewStatus.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
@@ -445,19 +476,27 @@ export class TaskManager {
             } catch (error) {
               this.emit(taskId, 'gemma', 'warning', { message: `Local review triage was unavailable; Codex will receive the deterministic diff packet. ${error instanceof Error ? error.message : String(error)}` });
             }
+            try {
+              const sanity = await preReviewSanityCheck({ root: project.root, changedFiles, diff });
+              if (!sanity.passed && sanity.issues.length) {
+                this.emit(taskId, 'gemma', 'warning', { message: `Local sanity check noted issues: ${sanity.issues.join('; ')}` });
+              }
+            } catch { /* non-blocking */ }
             const profile = selectReviewProfile({ request: task.prompt, cycle, changedFileCount: changedFiles.length, triageRisk: triage.risk, repeatedFindings: cycle > 0 && !previousRepairChanged });
             this.emit(taskId, 'system', 'routing.adjustment', { message: `Review cycle ${cycle + 1} uses ${profile.model} (${profile.reason}).`, reviewModel: profile.model, reviewEffort: profile.effort, reason: profile.reason });
             const reviewPacket = buildReviewPacket({ request: task.prompt, changedFiles, diff, implementationSummary: agentResult.text, triage, previousReview });
             this.transition(taskId, 'reviewing');
             this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: profile.model, effort: profile.effort, cycle: cycle + 1, changedFiles: changedFiles.length, triageRisk: triage.risk });
             let review = await runCodexReview({ root: project.root, model: profile.model, effort: profile.effort, reviewPacket, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
-            let blocked = !/VERDICT:\s*PASS/i.test(review) || /VERDICT:\s*BLOCK/i.test(review);
-            this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, model: profile.model, cycle: cycle + 1, summary: review.slice(-5000) });
+            const reviewResult = extractCodexReviewVerdict(review);
+            let blocked = reviewResult.blocked;
+            this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, verdict: reviewResult.verdict, model: profile.model, cycle: cycle + 1, summary: review.slice(-5000) });
             if (!blocked) {
               this.transition(taskId, 'verifying');
               let verificationFailure = '';
+              let verification: Array<{ command: string; code: number; output: string }> = [];
               try {
-                const verification = await verifyProject(project.root, signal);
+                verification = await verifyProject(project.root, signal);
                 this.emit(taskId, 'verification', 'verification.result', { results: verification });
                 verificationFailure = describeVerificationFailure(verification);
               } catch (error) {
@@ -469,17 +508,42 @@ export class TaskManager {
                 break;
               }
               blocked = true;
-              review = `VERDICT: BLOCK\n\nOrchestra deterministic verification failed after Codex review passed. Diagnose and repair the project or verification compatibility issue, then rerun the checks synchronously.\n\n${verificationFailure}`;
-              this.emit(taskId, 'system', 'task.model-takeover', { message: 'Deterministic verification failed after a passing Codex review. Orchestra is transferring the concrete failure to Antigravity for repair, then will repeat independent review and verification.', from: 'verification', to: 'antigravity-repair', cycle: cycle + 1 });
+              const failedItem = verification.find((item) => item.code !== 0);
+              const failedCmd = failedItem?.command || 'verification';
+              this.emit(taskId, 'gemma', 'agent.started', { phase: 'verification-distillation', command: failedCmd });
+              const distilled = await distillVerificationErrors(verificationFailure, failedCmd);
+              this.emit(taskId, 'gemma', 'agent.completed', { phase: 'verification-distillation', summary: distilled.summary, findingCount: distilled.findings.length });
+              review = `VERDICT: BLOCK\n\nOrchestra deterministic verification failed after Codex review passed.\n\n${distilled.repairPromptChunk}`;
+              this.emit(taskId, 'system', 'task.model-takeover', { message: `Deterministic verification failed. Gemma distilled ${distilled.findings.length} actionable failure finding(s) for Antigravity repair.`, from: 'verification', to: 'antigravity-repair', cycle: cycle + 1 });
             }
             const findings = reviewFingerprint(review);
             const repeatedWithoutProgress = Boolean(previousFindings && findings === previousFindings && !previousRepairChanged);
             if (repeatedWithoutProgress) {
               noProgressEscalations += 1;
-              if (noProgressEscalations > 1) throw new Error(`Automatic failover exhausted after Codex twice confirmed the same blocking findings and two fresh Antigravity repairs made no project changes.\n${review.slice(-3000)}`);
+              if (noProgressEscalations > 1) {
+                this.transition(taskId, 'review_disputed');
+                this.emit(taskId, 'system', 'task.review-disputed', {
+                  reason: 'Repeated repairs produced no progress on the same review blockers.',
+                  findings,
+                  reviewSummary: review.slice(-3000),
+                  changedFiles,
+                  message: 'Codex confirmed the same blockers after multiple repairs with no diff progress. You can approve the preserved diff or steer the repair.',
+                });
+                return;
+              }
               this.emit(taskId, 'system', 'task.model-takeover', { message: 'Codex confirmed the same blockers after a no-progress repair. Orchestra is giving the escalated review to a fresh Antigravity conversation for one alternate foreground repair before requiring attention.', from: 'codex-review', to: 'antigravity-fresh-repair', cycle: cycle + 1 });
             } else noProgressEscalations = 0;
-            if (cycle === maxRepairAttempts) throw new Error(`Automatic repair paused after ${maxRepairAttempts} repair attempts. The remaining findings require user direction or a different approach.\n${review.slice(-3000)}`);
+            if (cycle === maxRepairAttempts) {
+              this.transition(taskId, 'review_disputed');
+              this.emit(taskId, 'system', 'task.review-disputed', {
+                reason: `Automatic repair reached its limit of ${maxRepairAttempts} cycles.`,
+                findings,
+                reviewSummary: review.slice(-3000),
+                changedFiles,
+                message: `Automatic repair paused after ${maxRepairAttempts} cycles without full consensus. You can approve and commit the preserved diff directly, or provide specific repair guidance.`,
+              });
+              return;
+            }
             const beforeRepair = diffFingerprint(await getDiff(project.root));
             this.transition(taskId, 'running');
             const priorIncomplete = agentResult.incomplete;
@@ -570,13 +634,27 @@ export class TaskManager {
     const updated = await getGitStatus(project.root);
     const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
     if (!paths.length) return;
-    const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title), summary.summary);
-    this.store.updateTask(taskId, { commitSha: sha });
-    this.emit(taskId, 'git', 'git.commit', { kind: 'task', sha, title: summary.title });
+
+    this.emit(taskId, 'gemma', 'agent.started', { phase: 'semantic-commit-slicing', changedFiles: paths.length });
+    let slices = [{ title: summary.title, body: summary.summary, files: paths }];
+    try {
+      slices = await sliceSemanticCommits(diff, paths, request);
+      this.emit(taskId, 'gemma', 'agent.completed', { phase: 'semantic-commit-slicing', sliceCount: slices.length });
+    } catch (error) {
+      this.emit(taskId, 'gemma', 'warning', { message: `Semantic commit slicing was unavailable; creating single commit. ${error instanceof Error ? error.message : String(error)}` });
+    }
+
+    let latestSha = '';
+    for (const slice of slices) {
+      latestSha = await commitPaths(project.root, slice.files, safeCommitTitle(slice.title), slice.body);
+      this.emit(taskId, 'git', 'git.commit', { kind: 'task', sha: latestSha, title: slice.title, files: slice.files });
+    }
+
+    this.store.updateTask(taskId, { commitSha: latestSha });
     this.transition(taskId, 'pushing');
     const pushed = await pushCurrent(project.root);
     this.store.updateTask(taskId, { pushStatus: pushed.pushed ? 'pushed' : 'unpushed' });
-    this.store.createGitOperation(project.id, taskId, 'task', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
+    this.store.createGitOperation(project.id, taskId, 'task', latestSha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
     this.emit(taskId, 'git', 'git.push', pushed);
   }
 
@@ -652,7 +730,7 @@ export function providerFailoverDisposition(changedFileCount: number): 'review_p
 
 export function evaluateRunHealth(state: TaskState, processAlive: boolean, inactiveMs: number): RunMonitor['health'] {
   if (state === 'completed' || state === 'completed_unpushed') return 'complete';
-  if (state === 'recovery_required' || state === 'baseline_required') return 'needs_attention';
+  if (state === 'recovery_required' || state === 'baseline_required' || state === 'review_disputed') return 'needs_attention';
   if (state === 'failed' || state === 'cancelled') return 'failed';
   if (!processAlive || inactiveMs >= 5 * 60_000) return 'possibly_stalled';
   if (inactiveMs >= 90_000) return 'waiting';
