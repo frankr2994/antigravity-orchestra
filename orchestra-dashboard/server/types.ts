@@ -55,6 +55,9 @@ export interface TaskRecord {
   updatedAt: string;
 }
 
+export type ExecutionMode = 'orchestra' | 'direct';
+export type DirectAgent = 'gemma' | 'antigravity' | 'codex';
+
 export interface TaskClassification {
   type: 'question' | 'implementation' | 'debug' | 'design' | 'review' | 'test';
   mutating: boolean;
@@ -62,6 +65,8 @@ export interface TaskClassification {
   riskFlags: string[];
   codexRole: 'none' | 'design' | 'debug' | 'review';
   localOperation?: 'none' | 'connect_git_remote';
+  executionMode?: ExecutionMode;
+  directAgent?: DirectAgent;
   title: string;
 }
 
@@ -70,7 +75,7 @@ export interface ModelSelection {
   antigravityEffort: 'low' | 'medium' | 'high';
   codex: string | null;
   codexEffort: 'low' | 'medium' | 'high' | 'xhigh' | null;
-  primary?: 'gemma' | 'antigravity';
+  primary?: 'gemma' | 'antigravity' | 'codex';
   gemma?: string;
 }
 

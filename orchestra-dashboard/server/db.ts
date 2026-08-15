@@ -138,11 +138,11 @@ export class Store {
     return this.db.prepare('SELECT * FROM messages WHERE session_id=? ORDER BY created_at').all(sessionId).map(mapMessage);
   }
 
-  createTask(projectId: string, sessionId: string, prompt: string): TaskRecord {
+  createTask(projectId: string, sessionId: string, prompt: string, classification: string | null = null, models: string | null = null): TaskRecord {
     const id = randomUUID(); const stamp = now();
     this.db.prepare(`INSERT INTO tasks
-      (id,project_id,session_id,prompt,title,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-      .run(id, projectId, sessionId, prompt, prompt.slice(0, 72), 'queued', stamp, stamp);
+      (id,project_id,session_id,prompt,title,classification,models,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, projectId, sessionId, prompt, prompt.slice(0, 72), classification, models, 'queued', stamp, stamp);
     return this.getTask(id)!;
   }
 

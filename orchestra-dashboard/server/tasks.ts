@@ -210,14 +210,85 @@ export class TaskManager {
     if (!session) return this.fail(taskId, 'Conversation not found.');
     try {
       if (recoveryReason) this.store.updateTask(taskId, { error: null });
-      this.transition(taskId, 'routing');
-      const originalClassification = recovery ? parseTaskClassification(task.classification) : null;
-      const classified = originalClassification
-        ? { classification: originalClassification, source: 'recovery' as const, warning: undefined }
-        : await classifyTask(task.prompt);
+      const initialTaskClassification = parseTaskClassification(task.classification);
+      const originalClassification = recovery ? initialTaskClassification : null;
+      let classified: { classification: TaskClassification; source: string; warning?: string };
+      if (initialTaskClassification?.executionMode === 'direct') {
+        classified = { classification: initialTaskClassification, source: 'direct' };
+      } else if (originalClassification) {
+        classified = { classification: originalClassification, source: 'recovery' as const, warning: undefined };
+      } else {
+        classified = await classifyTask(task.prompt);
+      }
       const classification = classified.classification;
       if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
-      else this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
+      else if (classification.executionMode !== 'direct') this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
+
+      if (classification.executionMode === 'direct') {
+        const directAgent = classification.directAgent || 'gemma';
+        const directModels: ModelSelection = {
+          primary: directAgent,
+          gemma: config.lmStudioModel,
+          antigravity: 'gemini-3.6-flash-high',
+          antigravityEffort: 'high',
+          codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
+          codexEffort: directAgent === 'codex' ? 'high' : null,
+        };
+        this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(directModels) });
+        this.transition(taskId, 'running');
+
+        let mcpStatus: McpStatus | null = null;
+        try { mcpStatus = await getMcpStatus(); } catch { /* ignore */ }
+        const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
+
+        if (directAgent === 'gemma') {
+          this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model: config.lmStudioModel });
+          const status = await getGitStatus(project.root);
+          const evidence = collectRepositoryEvidence(project.root, task.prompt, status);
+          const answer = await answerRepositoryQuestion({ root: project.root, prompt: task.prompt, evidence });
+          this.emit(taskId, 'gemma', 'agent.completed', { phase: 'direct-chat', result: answer.answer });
+          this.complete(taskId, answer.answer, 'gemma');
+          return;
+        }
+
+        if (directAgent === 'codex') {
+          this.emit(taskId, 'codex', 'agent.started', { role: 'direct-chat', model: 'gpt-5.6-terra', effort: 'high' });
+          const answer = await runCodexAnalysis({
+            root: project.root,
+            prompt: task.prompt,
+            role: 'Direct Architecture & Code Consultation',
+            model: 'gpt-5.6-terra',
+            effort: 'high',
+            riderAvailable: riderFor('codex'),
+            signal,
+            onOutput: (chunk) => this.stream(taskId, 'codex', chunk),
+            onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage),
+          });
+          this.emit(taskId, 'codex', 'agent.completed', { role: 'direct-chat', summary: answer.slice(-3000) });
+          this.complete(taskId, answer, 'codex');
+          return;
+        }
+
+        if (directAgent === 'antigravity') {
+          this.emit(taskId, 'antigravity', 'agent.started', { role: 'direct-chat', model: 'gemini-3.6-flash-high' });
+          const result = await runAntigravity({
+            root: project.root,
+            prompt: `Answer the user inquiry directly in conversational read-only mode. Do not modify files:\n\n${task.prompt}`,
+            model: 'gemini-3.6-flash-high',
+            effort: 'high',
+            mutating: false,
+            conversationId: session.antigravityConversationId,
+            riderAvailable: riderFor('antigravity'),
+            signal,
+            onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk),
+            onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage),
+          });
+          this.emit(taskId, 'antigravity', 'agent.completed', { role: 'direct-chat', result: result.text });
+          this.complete(taskId, result.text, 'antigravity');
+          return;
+        }
+      }
+
       if (!recovery && classification.localOperation === 'connect_git_remote') {
         const localModels: ModelSelection = { ...selectModels(classification), primary: 'gemma', gemma: config.lmStudioModel, codex: null, codexEffort: null };
         this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(localModels) });
@@ -613,7 +684,7 @@ export class TaskManager {
     return response;
   }
 
-  private complete(taskId: string, result: string, agent: 'gemma' | 'antigravity') {
+  private complete(taskId: string, result: string, agent: 'gemma' | 'antigravity' | 'codex') {
     const task = requireTask(this.store, taskId);
     const state: TaskState = task.pushStatus === 'unpushed' ? 'completed_unpushed' : 'completed';
     this.store.updateTask(taskId, { state, result });

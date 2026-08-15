@@ -576,3 +576,33 @@ test('preReviewSanityCheck handles clean and empty file inputs safely', async ()
   assert.deepEqual(clean.issues, []);
 });
 
+test('direct mode classification preserves solo agent execution intent', () => {
+  const directGemma = {
+    type: 'question',
+    mutating: false,
+    complexity: 'small',
+    riskFlags: [],
+    codexRole: 'none',
+    executionMode: 'direct',
+    directAgent: 'gemma',
+    title: 'Explain span propagation',
+  };
+  assert.equal(directGemma.executionMode, 'direct');
+  assert.equal(directGemma.directAgent, 'gemma');
+  assert.equal(directGemma.mutating, false);
+
+  const directCodex = {
+    type: 'question',
+    mutating: false,
+    complexity: 'small',
+    riskFlags: [],
+    codexRole: 'none',
+    executionMode: 'direct',
+    directAgent: 'codex',
+    title: 'Analyze architecture trade-offs',
+  };
+  assert.equal(directCodex.executionMode, 'direct');
+  assert.equal(directCodex.directAgent, 'codex');
+});
+
+

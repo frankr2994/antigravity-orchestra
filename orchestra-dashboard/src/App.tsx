@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bot, CircleAlert, Cpu, FolderGit2, FolderOpen,
   Gauge, GitBranch, History, Hexagon, MemoryStick, MessageSquare, Plus, RefreshCw,
-  Send, Server, Settings, Square, Terminal, Trash2, UploadCloud, Zap,
+  Send, Server, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UploadCloud, Wrench, Zap,
 } from 'lucide-react';
 
 type View = 'dashboard' | 'projects' | 'tasks' | 'settings';
@@ -40,6 +40,8 @@ function App() {
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [input, setInput] = useState('');
+  const [executionMode, setExecutionMode] = useState<'orchestra' | 'direct'>('orchestra');
+  const [directAgent, setDirectAgent] = useState<'gemma' | 'antigravity' | 'codex'>('gemma');
   const [steerInput, setSteerInput] = useState('');
   const [steerOpen, setSteerOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -181,7 +183,10 @@ function App() {
     if (!session || scopeWarning || !input.trim() || activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required')) return;
     const prompt = input.trim(); setInput(''); setError('');
     try {
-      const created = await api<Task>(`/api/sessions/${session.id}/tasks`, { method: 'POST', body: JSON.stringify({ prompt }) });
+      const created = await api<Task>(`/api/sessions/${session.id}/tasks`, {
+        method: 'POST',
+        body: JSON.stringify({ prompt, mode: executionMode, directAgent }),
+      });
       setMessages((current) => [...current, { id: crypto.randomUUID(), taskId: created.id, role: 'user', agent: 'system', content: prompt, createdAt: new Date().toISOString() }]);
       setTasks((current) => [created, ...current]); setActiveTask(created); setActivity([]); watchTask(created.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -343,7 +348,27 @@ function App() {
         <div className="messages" ref={messagesRef}>
           {!project && <Empty icon={<FolderOpen />} title="Choose a project" text="Every conversation and agent process is pinned to a selected directory." />}
           {project && messages.length === 0 && <Empty icon={<Bot />} title={`Ready in ${project.name}`} text="Describe what you want done. Model selection and agent delegation are automatic." />}
-          {messages.map((message) => <article key={message.id} className={`message ${message.role}`}><span>{message.role === 'user' ? 'You' : message.agent}</span><p>{message.content}</p></article>)}
+          {messages.map((message) => (
+            <article key={message.id} className={`message ${message.role}`}>
+              <div className="message-header">
+                <span>{message.role === 'user' ? 'You' : message.agent}</span>
+                {message.role === 'assistant' && message.content && (
+                  <button
+                    type="button"
+                    className="action-link"
+                    onClick={() => {
+                      setExecutionMode('orchestra');
+                      setInput(`Implement the following plan / solution:\n\n${message.content.slice(0, 400)}...`);
+                    }}
+                    title="Promote this answer into an orchestrated multi-agent task"
+                  >
+                    <Wrench size={11} /> Implement with Orchestra
+                  </button>
+                )}
+              </div>
+              <p>{message.content}</p>
+            </article>
+          ))}
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
           {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>Existing changes detected</strong><p>Gemma can review, hand off, commit, and push them separately before this task starts.</p><button className="primary" onClick={resolveBaseline}>Review and commit baseline</button></div>}
           {activeTask?.state === 'recovery_required' && <div className="baseline-card"><CircleAlert /><strong>Partial task changes preserved</strong><p>Resume this same task so Antigravity can finish and Codex can review the complete change set. These files will not be committed as a separate baseline.</p><button className="primary" onClick={() => recoverTask(activeTask)}>Resume and review</button></div>}
@@ -351,7 +376,7 @@ function App() {
             <div className="baseline-card disputed-card">
               <CircleAlert />
               <strong>Review Consensus Not Reached</strong>
-              <p>Automatic repair reached its 2-cycle limit without full consensus. You can approve and commit the preserved diff directly, or steer the next repair attempt.</p>
+              <p>Automatic repair reached its limit without full consensus. You can approve and commit the preserved diff directly, or steer the next repair attempt.</p>
               <div className="dispute-actions">
                 <button className="primary" onClick={() => approveDisputed(activeTask)} disabled={busy}>Approve & Commit Diff</button>
                 <button className="secondary" onClick={() => setSteerOpen(!steerOpen)} disabled={busy}>{steerOpen ? 'Close guidance' : 'Provide guidance & retry'}</button>
@@ -367,11 +392,70 @@ function App() {
         </div>
         <div className="composer">
           {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <button className="stop-button" onClick={() => void cancelTask()}><Square size={12} fill="currentColor" /> Stop task</button>}
+          <div className="mode-selector">
+            <button
+              type="button"
+              className={`mode-pill ${executionMode === 'orchestra' ? 'active' : ''}`}
+              onClick={() => setExecutionMode('orchestra')}
+              title="Tri-Agent Workflow: Full planning, implementation, Codex review, verification, and atomic Git commit"
+            >
+              <Bot size={13} /> Orchestra
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${executionMode === 'direct' && directAgent === 'gemma' ? 'active' : ''}`}
+              onClick={() => { setExecutionMode('direct'); setDirectAgent('gemma'); }}
+              title="Direct Solo Chat with Local Gemma (fast, 0 cloud tokens)"
+            >
+              <Zap size={13} /> Gemma
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${executionMode === 'direct' && directAgent === 'codex' ? 'active' : ''}`}
+              onClick={() => { setExecutionMode('direct'); setDirectAgent('codex'); }}
+              title="Direct Solo Consultation with Codex (GPT-5.6 + JetBrains Rider MCP inspection)"
+            >
+              <ShieldCheck size={13} /> Codex
+            </button>
+            <button
+              type="button"
+              className={`mode-pill ${executionMode === 'direct' && directAgent === 'antigravity' ? 'active' : ''}`}
+              onClick={() => { setExecutionMode('direct'); setDirectAgent('antigravity'); }}
+              title="Direct Solo Chat with Antigravity (Gemini 1M Context read-only inspection)"
+            >
+              <Sparkles size={13} /> Antigravity
+            </button>
+          </div>
           <div className="composer-box">
-            <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }} placeholder={scopeWarning ? 'Select a specific repository before starting a task…' : project ? `Ask Orchestra to work in ${project.name}…` : 'Select a project first…'} disabled={!session || Boolean(scopeWarning)} rows={3} />
+            <textarea
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }}
+              placeholder={
+                scopeWarning
+                  ? 'Select a specific repository before starting a task…'
+                  : executionMode === 'direct'
+                  ? directAgent === 'gemma'
+                    ? 'Ask Local Gemma directly (fast Q&A, 0 tokens, no git commits)…'
+                    : directAgent === 'codex'
+                    ? 'Consult Codex directly (GPT-5.6 + Rider semantic inspection, no file changes)…'
+                    : 'Ask Antigravity directly (Gemini 1M context, read-only)…'
+                  : project
+                  ? `Ask Orchestra to work in ${project.name} (full tri-agent build & review)…`
+                  : 'Select a project first…'
+              }
+              disabled={!session || Boolean(scopeWarning)}
+              rows={3}
+            />
             <button className="send-button" onClick={send} disabled={!session || Boolean(scopeWarning) || !input.trim() || Boolean(activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required' || activeTask.state === 'review_disputed'))}><Send size={17} /></button>
           </div>
-          <small>Enter to send · Shift+Enter for a new line</small>
+          <small>
+            {executionMode === 'direct' ? (
+              <span><strong>Solo Chat Mode:</strong> Direct conversational response without multi-agent review or Git commits.</span>
+            ) : (
+              <span><strong>Orchestra Mode:</strong> Full planning, Antigravity coding, Codex review, verification, and Git commits.</span>
+            )}
+          </small>
         </div>
       </aside>
     </div>

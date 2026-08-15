@@ -103,9 +103,36 @@ app.post('/api/sessions/:id/tasks', async (req, res, next) => {
       res.status(202).json(recovered);
       return;
     }
+    const mode = req.body?.mode === 'direct' ? 'direct' : 'orchestra';
+    const directAgent = req.body?.directAgent === 'codex' ? 'codex' : req.body?.directAgent === 'antigravity' ? 'antigravity' : 'gemma';
+    let initialClassification: string | null = null;
+    let initialModels: string | null = null;
+    if (mode === 'direct') {
+      const cls = {
+        type: 'question' as const,
+        mutating: false,
+        complexity: 'small' as const,
+        riskFlags: [],
+        codexRole: 'none' as const,
+        executionMode: 'direct' as const,
+        directAgent,
+        title: prompt.slice(0, 72),
+      };
+      initialClassification = JSON.stringify(cls);
+      const mod = {
+        primary: directAgent,
+        gemma: config.lmStudioModel,
+        antigravity: 'gemini-3.6-flash-high',
+        antigravityEffort: 'high' as const,
+        codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
+        codexEffort: directAgent === 'codex' ? 'high' as const : null,
+      };
+      initialModels = JSON.stringify(mod);
+    }
+
     const previousTask = sessionTasks[0] || null;
-    const continuationPrompt = buildContinuationPrompt(prompt, previousTask);
-    const task = store.createTask(session.projectId, session.id, continuationPrompt || prompt);
+    const continuationPrompt = mode === 'orchestra' ? buildContinuationPrompt(prompt, previousTask) : null;
+    const task = store.createTask(session.projectId, session.id, continuationPrompt || prompt, initialClassification, initialModels);
     store.addMessage({ sessionId: session.id, taskId: task.id, role: 'user', agent: 'system', content: prompt });
     if (continuationPrompt && previousTask) store.addEvent(task.id, 'system', 'task.continuation', { previousTaskId: previousTask.id, message: 'Continuing the prior task with explicit implementation authorization.' });
     tasks.enqueue(task.id);
