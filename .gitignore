@@ -44,6 +44,52 @@ npm-debug.log
 yarn-error.log
 .pnpm-debug.log
 
+# 環境変数・機密情報
+.env
+.env.local
+.env.*.local
+
+# APIキー・シークレット
+*.pem
+*.key
+secrets.json
+
+# Codex 相談ログ（プライベートな内容を含む可能性）
+logs/codex-responses/*
+!logs/codex-responses/.gitkeep
+
+# OS 生成ファイル
+.DS_Store
+Thumbs.db
+*:Zone.Identifier
+*.Identifier
+
+# エディタ設定
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+.pnpm-debug.log
+
 # テスト・カバレッジ
 .coverage
 htmlcov/
@@ -55,11 +101,9 @@ coverage.xml
 *.dll
 *.so
 *.dylib
+*.zip
 *.png
 !docs/images/
 !docs/images/*.png
-
-# 作者の開発記録（ローカル専用 / Author dev records, local only)
-# ルート直下のみ対象（テンプレート利用者の入れ子 plans/ を巻き込まない）
 /plans/
 /docs/modernization-plan-*.md
