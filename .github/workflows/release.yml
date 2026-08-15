@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: 'orchestra-dashboard/package-lock.json'
+
+      - name: Install dependencies
+        working-directory: orchestra-dashboard
+        run: npm ci
+
+      - name: Run quality gate (lint, build, test)
+        working-directory: orchestra-dashboard
+        run: npm run check
+
+      - name: Package Windows Release Archive
+        shell: pwsh
+        run: |
+          $version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.0.0" }
+          $zipName = "orchestra-$version-windows-x64.zip"
+          $staging = "release-staging"
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          
+          Copy-Item -Path "Start-Orchestra.ps1", "Start-Orchestra.bat", "README.md", "LICENSE" -Destination $staging -Force
+          Copy-Item -Path ".agents", ".codex", "docs" -Destination $staging -Recurse -Force
+          
+          New-Item -ItemType Directory -Path "$staging/orchestra-dashboard" -Force | Out-Null
+          Copy-Item -Path "orchestra-dashboard/package.json", "orchestra-dashboard/package-lock.json" -Destination "$staging/orchestra-dashboard" -Force
+          Copy-Item -Path "orchestra-dashboard/dist", "orchestra-dashboard/dist-server", "orchestra-dashboard/scripts" -Destination "$staging/orchestra-dashboard" -Recurse -Force
+          
+          # Install production-only dependencies in staging
+          Push-Location "$staging/orchestra-dashboard"
+          npm ci --omit=dev
+          Pop-Location
+          
+          Compress-Archive -Path "$staging/*" -DestinationPath $zipName -Force
+          Write-Host "Created release package: $zipName"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: orchestra-*-windows-x64.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
