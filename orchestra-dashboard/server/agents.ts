@@ -198,6 +198,7 @@ Answer clearly and helpfully in standard Markdown. Provide concrete explanations
     const decoder = new TextDecoder();
     let accumulated = '';
     let buffer = '';
+    let textBuffer = '';
 
     while (true) {
       const { done, value } = await reader.read();
@@ -215,11 +216,21 @@ Answer clearly and helpfully in standard Markdown. Provide concrete explanations
             const delta = data.choices?.[0]?.delta?.content;
             if (delta) {
               accumulated += delta;
-              input.onOutput?.(delta);
+              textBuffer += delta;
+              // Flush on newline, punctuation sentence breaks, or when buffer reaches a readable phrase
+              if (textBuffer.includes('\n') || /[.!?:]\s+$/.test(textBuffer) || textBuffer.length >= 140) {
+                const flushText = textBuffer.trim();
+                if (flushText) input.onOutput?.(flushText);
+                textBuffer = '';
+              }
             }
           } catch { /* ignore partial chunk parse error */ }
         }
       }
+    }
+
+    if (textBuffer.trim()) {
+      input.onOutput?.(textBuffer.trim());
     }
 
     return accumulated.trim() || 'Gemma completed without response text.';
