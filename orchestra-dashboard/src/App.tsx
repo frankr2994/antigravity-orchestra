@@ -5,7 +5,7 @@ import {
   Send, Server, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UploadCloud, Wrench, Zap,
 } from 'lucide-react';
 
-type View = 'dashboard' | 'projects' | 'tasks' | 'settings';
+type View = 'dashboard' | 'projects' | 'tasks' | 'mcp' | 'settings';
 type Project = { id: string; name: string; root: string; gitRoot: string | null; onboardingStatus: string; onboardingVersion: string | null; activeSessionId: string | null; updatedAt: string };
 type Session = { id: string; projectId: string; title: string; antigravityConversationId: string | null; summary: string | null; summaryUpdatedAt: string | null; updatedAt: string };
 type Message = { id: string; taskId: string | null; role: 'user' | 'assistant' | 'system'; agent: string; content: string; createdAt: string };
@@ -18,6 +18,22 @@ type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryI
 type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null }> };
 type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
 type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
+type McpServerRecord = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  transportType: 'http' | 'stdio';
+  endpoint: string | null;
+  command: string | null;
+  args: string[];
+  operational: boolean;
+  toolCount: number;
+  tools: string[];
+  latencyMs: number | null;
+  models: { antigravity: boolean; codex: boolean; gemma: boolean };
+  sources: { antigravityGlobal: boolean; antigravityLocal: boolean; codex: boolean };
+  reason: string | null;
+};
 type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null; providerTelemetry: Record<string, ProviderUsage>; providerActivity: Array<Record<string, unknown>> };
 
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
@@ -38,6 +54,8 @@ function App() {
   const [health, setHealth] = useState<Health>({});
   const [usage, setUsage] = useState<Record<string, ProviderUsage>>({});
   const [mcp, setMcp] = useState<McpStatus | null>(null);
+  const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
+  const [mcpBusy, setMcpBusy] = useState(false);
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [input, setInput] = useState('');
   const [executionMode, setExecutionMode] = useState<'orchestra' | 'direct'>('orchestra');
@@ -93,6 +111,31 @@ function App() {
     if (projectId) setProject(projectList.find((item) => item.id === projectId) || null);
   }, [api]);
 
+  const fetchMcpServers = useCallback(async (force = false) => {
+    try {
+      const data = await api<McpServerRecord[]>(`/api/mcp/servers${force ? '?force=true' : ''}`);
+      setMcpServers(data);
+    } catch { /* ignore */ }
+  }, [api]);
+
+  async function toggleServer(id: string, enabled: boolean) {
+    setMcpBusy(true);
+    try {
+      await api<{ ok: boolean; server: McpServerRecord }>(`/api/mcp/servers/${id}/toggle`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled }),
+      });
+      await Promise.all([
+        fetchMcpServers(true),
+        api<McpStatus>('/api/telemetry/mcp').then(setMcp).catch(() => undefined),
+      ]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
   useEffect(() => {
     void fetch('/api/bootstrap').then(async (response) => {
       if (!response.ok) throw new Error('Backend bootstrap failed.');
@@ -100,21 +143,22 @@ function App() {
       tokenRef.current = data.token;
       setToken(data.token); setProjects(data.projects); setTasks(data.tasks); setHealth(data.health); setSettings(data.settings);
       if (data.projects[0]) await activateProject(data.projects[0], data.token);
+      void fetchMcpServers();
     }).catch((reason) => setError(reason.message));
     return () => streamRef.current?.close();
     // Initial bootstrap must run only once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [fetchMcpServers]);
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status')])
+    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers()])
       .then(([nextStats, nextHealth, nextUsage, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); setMcp(nextMcp); })
       .catch((reason) => setError(reason.message));
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
     return () => clearInterval(timer);
-  }, [api, settings, token]);
+  }, [api, fetchMcpServers, settings, token]);
 
   useEffect(() => {
     if (!monitoredTaskId) { setMonitor(null); setMonitorExplanation(''); return; }
@@ -316,6 +360,7 @@ function App() {
           <NavButton active={view === 'dashboard'} icon={<Gauge />} label="Dashboard" onClick={() => setView('dashboard')} />
           <NavButton active={view === 'projects'} icon={<FolderGit2 />} label="Projects" onClick={() => setView('projects')} />
           <NavButton active={view === 'tasks'} icon={<History />} label="Task history" onClick={() => setView('tasks')} />
+          <NavButton active={view === 'mcp'} icon={<Server />} label="MCP Servers" onClick={() => setView('mcp')} />
           <NavButton active={view === 'settings'} icon={<Settings />} label="Settings" onClick={() => setView('settings')} />
         </nav>
         <div className="sidebar-project">
@@ -331,6 +376,7 @@ function App() {
         {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {view === 'tasks' && <Tasks tasks={tasks} projects={projects} onRetryPush={retryPush} onRecover={recoverTask} onRetryTask={retryTask} onStop={cancelTask} onApproveDisputed={approveDisputed} />}
+        {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
         {view === 'settings' && settings && <SettingsView settings={settings} health={health} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
       </main>
 
@@ -541,6 +587,144 @@ function Tasks({ tasks, projects, onRetryPush, onRecover, onRetryTask, onStop, o
   return <section><PageHeader eyebrow="Persisted execution history" title="Tasks" subtitle="Agent routing, verification, commit, and push results survive dashboard restarts." />
     <div className="table-card"><table><thead><tr><th>Task</th><th>Project</th><th>Status</th><th>Commit</th><th>Created</th><th /></tr></thead><tbody>{tasks.map((task) => <tr key={task.id}><td><strong>{task.title}</strong>{task.error && <small className="failure-text">{task.error}</small>}</td><td>{projects.find((item) => item.id === task.projectId)?.name || 'Unknown'}</td><td><StateBadge state={task.state} /></td><td>{task.commitSha ? task.commitSha.slice(0, 8) : '—'}</td><td>{formatDate(task.createdAt)}</td><td>{!terminalStates.has(task.state) ? <button className="stop-button" onClick={() => onStop(task)}><Square size={12} fill="currentColor" /> Stop</button> : task.pushStatus === 'unpushed' ? <button className="secondary compact" onClick={() => onRetryPush(task)}><UploadCloud size={14} /> Retry push</button> : task.state === 'review_disputed' && onApproveDisputed ? <button className="primary compact" onClick={() => onApproveDisputed(task)}>Approve</button> : task.state === 'recovery_required' ? <button className="secondary compact" onClick={() => onRecover(task)}><RefreshCw size={14} /> Resume</button> : task.state === 'failed' ? <button className="secondary compact" onClick={() => onRetryTask(task)}><RefreshCw size={14} /> Retry</button> : null}</td></tr>)}</tbody></table></div>
   </section>;
+}
+
+function McpServersView({ servers, busy, onToggle, onRefresh }: { servers: McpServerRecord[]; busy: boolean; onToggle: (id: string, enabled: boolean) => void; onRefresh: () => void }) {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const toggleExpand = (id: string) => setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
+
+  const totalTools = servers.filter((s) => s.enabled).reduce((acc, s) => acc + s.toolCount, 0);
+  const activeCount = servers.filter((s) => s.enabled && s.operational).length;
+
+  return (
+    <section className="mcp-servers-page">
+      <PageHeader
+        eyebrow="Universal Model Context Protocol Registry"
+        title="MCP Servers"
+        subtitle="Inspect, probe, and toggle MCP servers across Antigravity, Codex, and Gemma."
+        action={
+          <button className="primary" onClick={onRefresh} disabled={busy}>
+            <RefreshCw size={15} className={busy ? 'spin' : ''} /> Refresh status
+          </button>
+        }
+      />
+
+      <div className="summary-strip">
+        <div>
+          <strong>{servers.length}</strong>
+          <span>Discovered servers</span>
+        </div>
+        <div>
+          <strong>{activeCount}</strong>
+          <span>Active & operational</span>
+        </div>
+        <div>
+          <strong>{totalTools}</strong>
+          <span>Live tools available</span>
+        </div>
+      </div>
+
+      <div className="mcp-grid">
+        {servers.map((server) => {
+          const isExpanded = Boolean(expanded[server.id]);
+          const isOk = server.enabled && server.operational;
+          return (
+            <article key={server.id} className={`mcp-card ${server.enabled ? (server.operational ? 'active' : 'warning-card') : 'disabled-card'}`}>
+              <header className="mcp-card-header">
+                <div className="mcp-card-title">
+                  <StatusDot ok={isOk} />
+                  <strong>{server.name}</strong>
+                  <span className={`mcp-badge ${server.transportType}`}>
+                    {server.transportType === 'http' ? 'HTTP Stream' : 'STDIO Command'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className={`mcp-toggle-switch ${server.enabled ? 'on' : 'off'}`}
+                  onClick={() => onToggle(server.id, !server.enabled)}
+                  disabled={busy}
+                  title={server.enabled ? 'Click to disable across all models' : 'Click to enable across all models'}
+                >
+                  <span className="switch-knob" />
+                  <span className="switch-label">{server.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                </button>
+              </header>
+
+              <div className="mcp-card-body">
+                <div className="mcp-endpoint-box">
+                  <Terminal size={12} />
+                  <code>{server.endpoint || server.command || 'stdio process'}</code>
+                </div>
+
+                <div className="mcp-metrics-row">
+                  <div>
+                    <span>Tools</span>
+                    <strong>{server.toolCount}</strong>
+                  </div>
+                  <div>
+                    <span>Latency</span>
+                    <strong>{server.latencyMs !== null ? `${server.latencyMs}ms` : '—'}</strong>
+                  </div>
+                  <div>
+                    <span>Status</span>
+                    <strong className={isOk ? 'text-green' : server.enabled ? 'text-amber' : 'text-muted'}>
+                      {server.enabled ? (server.operational ? 'Operational' : 'Unreachable') : 'Disabled'}
+                    </strong>
+                  </div>
+                </div>
+
+                <div className="mcp-models-row">
+                  <span className="mcp-models-label">Model Visibility:</span>
+                  <div className="mcp-models-badges">
+                    <span className={`model-pill ${server.models.antigravity && server.enabled ? 'active' : 'inactive'}`}>
+                      <Bot size={10} /> Antigravity
+                    </span>
+                    <span className={`model-pill ${server.models.codex && server.enabled ? 'active' : 'inactive'}`}>
+                      <ShieldCheck size={10} /> Codex
+                    </span>
+                    <span className={`model-pill ${server.models.gemma && server.enabled ? 'active' : 'inactive'}`}>
+                      <Zap size={10} /> Gemma
+                    </span>
+                  </div>
+                </div>
+
+                {server.reason && (
+                  <div className="mcp-reason-box">
+                    <CircleAlert size={12} />
+                    <span>{server.reason}</span>
+                  </div>
+                )}
+
+                {server.tools.length > 0 && (
+                  <div className="mcp-tools-section">
+                    <button type="button" className="tools-toggle-btn" onClick={() => toggleExpand(server.id)}>
+                      <span>Registered Tools ({server.tools.length})</span>
+                      <small>{isExpanded ? 'Hide' : 'Show list'}</small>
+                    </button>
+                    {isExpanded && (
+                      <div className="mcp-tools-list">
+                        {server.tools.map((tool) => (
+                          <code key={tool} className="tool-chip">{tool}</code>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+
+      {!servers.length && (
+        <Empty
+          icon={<Server />}
+          title="No MCP servers found"
+          text="Configure MCP servers in ~/.gemini/config/mcp_config.json or ~/.codex/config.toml."
+        />
+      )}
+    </section>
+  );
 }
 
 function SettingsView({ settings, health, onSave }: { settings: SettingsData; health: Health; onSave: (value: Partial<SettingsData>) => void }) {

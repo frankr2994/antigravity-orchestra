@@ -1,11 +1,15 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { runProcess } from './process.js';
 
 const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
 const home = process.env.USERPROFILE || process.cwd();
-const antigravityConfig = resolve(home, '.gemini', 'config', 'mcp_config.json');
+const antigravityGlobalConfig = resolve(home, '.gemini', 'config', 'mcp_config.json');
+const antigravityLocalConfig = resolve(home, '.gemini', 'antigravity-cli', 'mcp.json');
+const antigravitySchemasDir = resolve(home, '.gemini', 'antigravity-cli', 'mcp');
+const codexConfigPath = resolve(home, '.codex', 'config.toml');
+
 const RIDER_NAME = 'rider';
 const READ_ONLY_RIDER_TOOLS = new Set([
   'find_files_by_glob', 'find_files_by_name_keyword', 'get_all_open_file_paths', 'get_database_object_description',
@@ -23,7 +27,33 @@ export interface McpStatus {
 }
 export interface GemmaMcpTool { type: 'function'; function: { name: string; description: string; parameters: Record<string, unknown> } }
 
+export interface McpServerRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  transportType: 'http' | 'stdio';
+  endpoint: string | null;
+  command: string | null;
+  args: string[];
+  operational: boolean;
+  toolCount: number;
+  tools: string[];
+  latencyMs: number | null;
+  models: {
+    antigravity: boolean;
+    codex: boolean;
+    gemma: boolean;
+  };
+  sources: {
+    antigravityGlobal: boolean;
+    antigravityLocal: boolean;
+    codex: boolean;
+  };
+  reason: string | null;
+}
+
 let statusCache: { at: number; value: McpStatus } | null = null;
+let serversCache: { at: number; value: McpServerRecord[] } | null = null;
 let gemmaCapabilityCache: { at: number; available: boolean; reason: string | null } | null = null;
 
 export async function getMcpStatus(force = false): Promise<McpStatus> {
@@ -60,6 +90,275 @@ export async function getMcpStatus(force = false): Promise<McpStatus> {
   };
   statusCache = { at: Date.now(), value };
   return value;
+}
+
+export async function listAllMcpServers(force = false): Promise<McpServerRecord[]> {
+  if (!force && serversCache && Date.now() - serversCache.at < 10_000) return serversCache.value;
+
+  const serverMap = new Map<string, McpServerRecord>();
+
+  const getOrCreate = (id: string, name: string): McpServerRecord => {
+    const key = id.toLowerCase();
+    let existing = serverMap.get(key);
+    if (!existing) {
+      existing = {
+        id: key,
+        name,
+        enabled: true,
+        transportType: 'stdio',
+        endpoint: null,
+        command: null,
+        args: [],
+        operational: false,
+        toolCount: 0,
+        tools: [],
+        latencyMs: null,
+        models: { antigravity: false, codex: false, gemma: false },
+        sources: { antigravityGlobal: false, antigravityLocal: false, codex: false },
+        reason: null,
+      };
+      serverMap.set(key, existing);
+    }
+    return existing;
+  };
+
+  // 1. Scan Antigravity Global Config
+  if (existsSync(antigravityGlobalConfig)) {
+    try {
+      const data = JSON.parse(readFileSync(antigravityGlobalConfig, 'utf8')) as JsonRecord;
+      if (data.mcpServers && typeof data.mcpServers === 'object') {
+        for (const [key, val] of Object.entries(data.mcpServers as Record<string, JsonRecord>)) {
+          const rec = getOrCreate(key, key);
+          rec.sources.antigravityGlobal = true;
+          rec.models.antigravity = true;
+          if (val.disabled === true) rec.enabled = false;
+          if (val.serverUrl) {
+            rec.transportType = 'http';
+            rec.endpoint = String(val.serverUrl);
+          } else if (val.args && Array.isArray(val.args)) {
+            const httpArg = val.args.find((a: unknown) => typeof a === 'string' && a.startsWith('http://'));
+            if (httpArg) {
+              rec.transportType = 'http';
+              rec.endpoint = String(httpArg);
+            }
+          }
+          if (val.command) rec.command = String(val.command);
+          if (Array.isArray(val.args)) rec.args = val.args.map(String);
+        }
+      }
+    } catch { /* ignore JSON parse error */ }
+  }
+
+  // 2. Scan Antigravity Local Config
+  if (existsSync(antigravityLocalConfig)) {
+    try {
+      const data = JSON.parse(readFileSync(antigravityLocalConfig, 'utf8')) as JsonRecord;
+      if (data.mcpServers && typeof data.mcpServers === 'object') {
+        for (const [key, val] of Object.entries(data.mcpServers as Record<string, JsonRecord>)) {
+          const rec = getOrCreate(key, key);
+          rec.sources.antigravityLocal = true;
+          rec.models.antigravity = true;
+          if (val.disabled === true) rec.enabled = false;
+          if (val.serverUrl) {
+            rec.transportType = 'http';
+            rec.endpoint = String(val.serverUrl);
+          }
+          if (val.command) rec.command = String(val.command);
+          if (Array.isArray(val.args)) rec.args = val.args.map(String);
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 3. Scan Codex Config TOML
+  if (existsSync(codexConfigPath)) {
+    try {
+      const tomlContent = readFileSync(codexConfigPath, 'utf8');
+      const codexServers = parseCodexMcpServersFromToml(tomlContent);
+      for (const cs of codexServers) {
+        const rec = getOrCreate(cs.name, cs.name);
+        rec.sources.codex = true;
+        rec.models.codex = true;
+        if (cs.enabled === false) rec.enabled = false;
+        if (cs.url) {
+          rec.transportType = 'http';
+          rec.endpoint = cs.url;
+        }
+        if (cs.command) rec.command = cs.command;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // 4. Discover Schema Tools from .gemini/antigravity-cli/mcp/
+  for (const [id, rec] of serverMap.entries()) {
+    const schemaTools = getToolSchemasForServer(rec.name) || getToolSchemasForServer(id);
+    if (schemaTools.length > 0) {
+      rec.toolCount = schemaTools.length;
+      rec.tools = schemaTools;
+    }
+  }
+
+  // 5. Probe Live HTTP Endpoints
+  await Promise.all(
+    Array.from(serverMap.values()).map(async (rec) => {
+      if (rec.transportType === 'http' && rec.endpoint) {
+        const probe = await probeMcpEndpoint(rec.endpoint);
+        rec.operational = probe.operational;
+        rec.latencyMs = probe.latencyMs;
+        if (probe.operational) {
+          if (probe.tools.length > 0) {
+            rec.toolCount = probe.tools.length;
+            rec.tools = probe.tools.map((t) => String(t.name));
+          }
+        } else {
+          rec.reason = probe.reason;
+        }
+      } else {
+        // STDIO servers: operational if enabled and command/schemas exist
+        rec.operational = rec.enabled && (Boolean(rec.command) || rec.toolCount > 0);
+      }
+
+      // Rider connects to Gemma bridge
+      if (rec.id === 'rider') {
+        rec.models.gemma = rec.operational && rec.enabled;
+      }
+    })
+  );
+
+  const results = Array.from(serverMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  serversCache = { at: Date.now(), value: results };
+  return results;
+}
+
+export async function toggleMcpServer(serverKey: string, enabled: boolean): Promise<McpServerRecord | null> {
+  const normalized = serverKey.toLowerCase();
+
+  // 1. Update Antigravity Global Config
+  if (existsSync(antigravityGlobalConfig)) {
+    updateAntigravityConfigFile(antigravityGlobalConfig, serverKey, enabled);
+  }
+
+  // 2. Update Antigravity Local Config
+  if (existsSync(antigravityLocalConfig)) {
+    updateAntigravityConfigFile(antigravityLocalConfig, serverKey, enabled);
+  }
+
+  // 3. Update Codex Config TOML
+  if (existsSync(codexConfigPath)) {
+    try {
+      const raw = readFileSync(codexConfigPath, 'utf8');
+      const updated = updateCodexMcpServerEnabledInToml(raw, serverKey, enabled);
+      writeFileSync(codexConfigPath, updated, 'utf8');
+    } catch (err) {
+      console.error(`Failed to update Codex config TOML:`, err);
+    }
+  }
+
+  // 4. If disabling, proactively terminate any lingering background processes (e.g. godot-mcp-enhanced)
+  if (!enabled && process.platform === 'win32') {
+    if (normalized.includes('godot')) {
+      void runProcess('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*godot-mcp-enhanced*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`]).catch(() => undefined);
+    }
+  }
+
+  // Invalidate caches
+  statusCache = null;
+  serversCache = null;
+
+  const refreshed = await listAllMcpServers(true);
+  return refreshed.find((s) => s.id === normalized) || null;
+}
+
+export function parseCodexMcpServersFromToml(content: string): Array<{ name: string; enabled: boolean; url: string | null; command: string | null }> {
+  const results: Array<{ name: string; enabled: boolean; url: string | null; command: string | null }> = [];
+  const lines = content.split(/\r?\n/);
+  let currentServer: { name: string; enabled: boolean; url: string | null; command: string | null } | null = null;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const sectionMatch = trimmed.match(/^\[mcp_servers\.(['"]?)([a-zA-Z0-9_-]+)\1\]$/);
+    if (sectionMatch) {
+      if (currentServer) results.push(currentServer);
+      currentServer = { name: sectionMatch[2], enabled: true, url: null, command: null };
+      continue;
+    }
+
+    if (trimmed.startsWith('[') && !trimmed.startsWith('[mcp_servers.')) {
+      if (currentServer) {
+        results.push(currentServer);
+        currentServer = null;
+      }
+      continue;
+    }
+
+    if (currentServer) {
+      const enabledMatch = trimmed.match(/^enabled\s*=\s*(true|false)/i);
+      if (enabledMatch) currentServer.enabled = enabledMatch[1].toLowerCase() === 'true';
+
+      const disabledMatch = trimmed.match(/^disabled\s*=\s*(true|false)/i);
+      if (disabledMatch) currentServer.enabled = disabledMatch[1].toLowerCase() !== 'true';
+
+      const urlMatch = trimmed.match(/^url\s*=\s*['"]([^'"]+)['"]/i);
+      if (urlMatch) currentServer.url = urlMatch[1];
+
+      const cmdMatch = trimmed.match(/^command\s*=\s*['"]([^'"]+)['"]/i);
+      if (cmdMatch) currentServer.command = cmdMatch[1];
+    }
+  }
+
+  if (currentServer) results.push(currentServer);
+  return results;
+}
+
+export function updateCodexMcpServerEnabledInToml(content: string, serverName: string, enabled: boolean): string {
+  const escaped = serverName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const sectionHeaderRegex = new RegExp(`^\\[mcp_servers\\.(?:'|"|)${escaped}(?:'|"|)\\]`, 'im');
+  const match = sectionHeaderRegex.exec(content);
+  if (!match) return content;
+
+  const startIndex = match.index;
+  const afterHeaderIndex = startIndex + match[0].length;
+  const nextSectionMatch = content.slice(afterHeaderIndex).search(/\n\[[a-zA-Z0-9_."'-]+\]/);
+  const sectionEndIndex = nextSectionMatch === -1 ? content.length : afterHeaderIndex + nextSectionMatch;
+
+  let sectionBody = content.slice(startIndex, sectionEndIndex);
+  if (/^\s*enabled\s*=\s*(true|false)/im.test(sectionBody)) {
+    sectionBody = sectionBody.replace(/^\s*enabled\s*=\s*(true|false)/im, `enabled = ${enabled}`);
+  } else {
+    sectionBody = sectionBody.replace(sectionHeaderRegex, `${match[0]}\nenabled = ${enabled}`);
+  }
+
+  return content.slice(0, startIndex) + sectionBody + content.slice(sectionEndIndex);
+}
+
+function updateAntigravityConfigFile(filePath: string, serverKey: string, enabled: boolean) {
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    const data = JSON.parse(raw) as JsonRecord;
+    if (!data.mcpServers || typeof data.mcpServers !== 'object') return;
+
+    const actualKey = Object.keys(data.mcpServers).find((k) => k.toLowerCase() === serverKey.toLowerCase()) || serverKey;
+    if (data.mcpServers[actualKey]) {
+      if (enabled) {
+        delete data.mcpServers[actualKey].disabled;
+      } else {
+        data.mcpServers[actualKey].disabled = true;
+      }
+      writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    }
+  } catch (err) {
+    console.error(`Failed to update Antigravity config file ${filePath}:`, err);
+  }
+}
+
+function getToolSchemasForServer(serverName: string): string[] {
+  try {
+    const dir = resolve(antigravitySchemasDir, serverName);
+    if (!existsSync(dir)) return [];
+    return readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => f.replace(/\.json$/, ''));
+  } catch {
+    return [];
+  }
 }
 
 export async function getGemmaRiderTools(): Promise<GemmaMcpTool[]> {
@@ -101,8 +400,8 @@ async function readCodexRiderConfig() {
 
 function readAntigravityRiderConfig() {
   try {
-    if (!existsSync(antigravityConfig)) return { configured: false, enabled: false, endpoint: null };
-    const value = JSON.parse(readFileSync(antigravityConfig, 'utf8')) as JsonRecord;
+    if (!existsSync(antigravityGlobalConfig)) return { configured: false, enabled: false, endpoint: null };
+    const value = JSON.parse(readFileSync(antigravityGlobalConfig, 'utf8')) as JsonRecord;
     const rider = value.mcpServers?.rider;
     return { configured: Boolean(rider), enabled: Boolean(rider) && rider.disabled !== true, endpoint: typeof rider?.serverUrl === 'string' ? rider.serverUrl : null };
   } catch { return { configured: false, enabled: false, endpoint: null }; }

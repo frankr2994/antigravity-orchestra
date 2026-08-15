@@ -11,7 +11,7 @@ import { runProcess } from './process.js';
 import { answerRunQuestion, buildContinuationPrompt, explainRunHealth, findContinuationRecoveryTask } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
-import { getMcpStatus } from './mcp.js';
+import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 
 const app = express();
 const store = new Store();
@@ -202,6 +202,22 @@ app.post('/api/tasks/:id/retry-push', async (req, res, next) => {
     const result = await pushCurrent(project.root);
     store.updateTask(task.id, { pushStatus: result.pushed ? 'pushed' : 'unpushed', state: result.pushed ? 'completed' : 'completed_unpushed' });
     res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/mcp/servers', async (req, res, next) => {
+  try {
+    const force = req.query.force === 'true';
+    const servers = await listAllMcpServers(force);
+    res.json(servers);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/mcp/servers/:name/toggle', async (req, res, next) => {
+  try {
+    const enabled = Boolean(req.body?.enabled);
+    const updated = await toggleMcpServer(req.params.name, enabled);
+    res.json({ ok: true, server: updated });
   } catch (error) { next(error); }
 });
 
