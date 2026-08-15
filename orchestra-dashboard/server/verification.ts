@@ -1,8 +1,20 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { runProcess } from './process.js';
 
 export interface VerificationResult { command: string; code: number; output: string; }
+
+export function verificationFailure(results: VerificationResult[]): string {
+  const failed = results.find((item) => item.code !== 0);
+  return failed ? `${failed.command}\n${failed.output.slice(-3000)}` : '';
+}
+
+export function npmInvocation(args: string[]): { command: string; args: string[] } {
+  if (process.platform !== 'win32') return { command: 'npm', args };
+  const cli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  if (existsSync(cli)) return { command: process.execPath, args: [cli, ...args] };
+  return { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', 'npm.cmd', ...args] };
+}
 
 export async function verifyProject(root: string, signal: AbortSignal): Promise<VerificationResult[]> {
   const commands: Array<{ command: string; args: string[]; label: string }> = [];
@@ -10,10 +22,9 @@ export async function verifyProject(root: string, signal: AbortSignal): Promise<
   if (existsSync(packagePath)) {
     try {
       const pkg = JSON.parse(readFileSync(packagePath, 'utf8')) as { scripts?: Record<string, string> };
-      const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-      if (pkg.scripts?.lint) commands.push({ command: npm, args: ['run', 'lint'], label: 'npm run lint' });
-      if (pkg.scripts?.build) commands.push({ command: npm, args: ['run', 'build'], label: 'npm run build' });
-      if (pkg.scripts?.test && !/no test specified/i.test(pkg.scripts.test)) commands.push({ command: npm, args: ['test'], label: 'npm test' });
+      if (pkg.scripts?.lint) commands.push({ ...npmInvocation(['run', 'lint']), label: 'npm run lint' });
+      if (pkg.scripts?.build) commands.push({ ...npmInvocation(['run', 'build']), label: 'npm run build' });
+      if (pkg.scripts?.test && !/no test specified/i.test(pkg.scripts.test)) commands.push({ ...npmInvocation(['test']), label: 'npm test' });
     } catch { /* malformed package is reported by the agent/build */ }
   } else if (existsSync(join(root, 'pyproject.toml')) || existsSync(join(root, 'pytest.ini'))) {
     commands.push({ command: process.platform === 'win32' ? 'python.exe' : 'python3', args: ['-m', 'pytest'], label: 'python -m pytest' });

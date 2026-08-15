@@ -4,15 +4,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, extractAntigravityText, extractAntigravityUsage, findContinuationRecoveryTask, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
-import { evaluateRunHealth, implementationChangeState, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
+import { evaluateRunHealth, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
 import { codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
 import { isGemmaRiderToolAllowed } from '../dist-server/mcp.js';
+import { ProcessIdleTimeoutError, runProcess } from '../dist-server/process.js';
+import { npmInvocation, verificationFailure, verifyProject } from '../dist-server/verification.js';
 
 test('model policy escalates deep sensitive work to Pro and Sol', () => {
   const selection = selectModels({ type: 'debug', mutating: true, complexity: 'deep', riskFlags: ['security'], codexRole: 'debug', title: 'Debug auth' });
@@ -60,6 +62,21 @@ test('short approval continues the previous completed task with implementation a
   assert.match(expanded || '', /Plan a wiring editor/);
   assert.equal(hasExplicitMutationIntent(expanded || ''), true);
   assert.equal(buildContinuationPrompt('What does this mean?', { state: 'completed', prompt: 'Explain repo', result: 'Done' }), null);
+  assert.equal(isContinuationCommand('continue'), true);
+  assert.equal(isContinuationCommand('continue?'), true);
+  assert.equal(isContinuationCommand('explain what to continue'), false);
+});
+
+test('local repository answers cannot claim completion while deferring requested work', () => {
+  assert.equal(responseDefersRequestedWork('The repository uses React.', []), false);
+  assert.equal(responseDefersRequestedWork('The repository uses React.', ["The implementation request is an instruction for a subsequent step, as this analysis only covers the existing state."]), true);
+});
+
+test('continuation commands find the preserved task owner behind newer completed summaries', () => {
+  const recovery = { id: 'preserved', state: 'recovery_required' };
+  const tasks = [{ id: 'bad-summary', state: 'completed' }, recovery, { id: 'older', state: 'cancelled' }];
+  assert.equal(findContinuationRecoveryTask('continue', tasks), recovery);
+  assert.equal(findContinuationRecoveryTask('explain the status', tasks), null);
 });
 
 test('implementation completion distinguishes working changes, direct commits, and no progress', () => {
@@ -160,6 +177,60 @@ test('duplicate recovery requests acknowledge the task that already owns the pro
   assert.equal(recoveryDisposition('reviewing', true), 'already_active');
   assert.equal(recoveryDisposition('running', true), 'already_active');
   assert.equal(recoveryDisposition('completed', false), 'reject');
+});
+
+test('provider process failures deterministically transfer diffs or diagnose clean retries', () => {
+  assert.equal(providerFailureStatus('Antigravity exceeded its 20-minute print window.'), 'TIMEOUT');
+  assert.equal(providerFailureStatus('Antigravity produced no stream activity for five minutes. Orchestra stopped the stalled process.'), 'IDLE_TIMEOUT');
+  assert.equal(providerFailureStatus('Antigravity exited with 1'), 'PROCESS_ERROR');
+  assert.equal(providerFailoverDisposition(13), 'review_preserved_diff');
+  assert.equal(providerFailoverDisposition(0), 'diagnose_and_retry');
+});
+
+test('process runner terminates a silent provider before the absolute timeout', async () => {
+  await assert.rejects(
+    () => runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { idleTimeoutMs: 50, timeoutMs: 1_000 }),
+    (error) => error instanceof ProcessIdleTimeoutError,
+  );
+});
+
+test('Windows npm verification bypasses direct cmd-script spawning', () => {
+  const invocation = npmInvocation(['run', 'lint']);
+  if (process.platform === 'win32') {
+    assert.notEqual(invocation.command.toLowerCase(), 'npm.cmd');
+    assert.ok(invocation.command.toLowerCase().endsWith('node.exe') || invocation.command.toLowerCase().endsWith('cmd.exe'));
+  } else assert.deepEqual(invocation, { command: 'npm', args: ['run', 'lint'] });
+});
+
+test('project verification executes npm scripts through the compatible launcher', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orchestra-verification-'));
+  try {
+    writeFileSync(join(root, 'package.json'), JSON.stringify({
+      private: true,
+      scripts: {
+        lint: 'node -e "console.log(\'fixture lint passed\')"',
+        build: 'node -e "console.log(\'fixture build passed\')"',
+        test: 'node -e "console.log(\'fixture tests passed\')"',
+      },
+    }));
+    const results = await verifyProject(root, new AbortController().signal);
+    assert.deepEqual(results.map((result) => [result.command, result.code]), [
+      ['npm run lint', 0],
+      ['npm run build', 0],
+      ['npm test', 0],
+    ]);
+    assert.match(results[0].output, /fixture lint passed/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verification failures become concrete repair input instead of terminal task errors', () => {
+  assert.equal(verificationFailure([{ command: 'npm test', code: 0, output: 'ok' }]), '');
+  assert.equal(
+    verificationFailure([{ command: 'npm test', code: 1, output: 'expected true to equal false' }]),
+    'npm test\nexpected true to equal false',
+  );
 });
 
 test('run health distinguishes healthy silence, waiting, stalls, and attention states', () => {

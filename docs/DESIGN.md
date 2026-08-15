@@ -480,3 +480,76 @@ Antigravity implementation and repair prompts now explicitly prohibit `invoke_su
 - Users can see the automatic provider-recovery decision in the live timeline.
 - Successful runs that crossed this fallback return an Orchestra-generated completion summary rather than Antigravity's stale pause message.
 - Manual recovery remains available for failures that cannot safely make bounded automatic progress.
+
+## 2026-08-14: Orchestra-owned cross-model failover
+
+### Background
+
+The first incomplete-turn repair covered structured Antigravity terminal results, but a resumed implementation turn repeated the delegated-wait pattern and remained alive without output until the CLI exited with process code 1. Because the failure occurred before a structured terminal result could be parsed, the task again entered `recovery_required` with preserved files and zero Codex review cycles. This demonstrated that provider-specific terminal parsing was the wrong recovery boundary.
+
+### Decision
+
+Orchestra, rather than any provider process, owns forward progress. All non-cancelled Antigravity failures—including structured errors, process exits, and timeouts—are normalized into incomplete turn results. Orchestra then coordinates the other models deterministically:
+
+1. Gemma receives the sanitized provider error, last visible output, stage, and changed-file list. It classifies the observable failure and produces bounded continuation instructions.
+2. If a project diff exists, control transfers immediately to independent Codex review. Antigravity's text is untrusted context only.
+3. If no reviewable diff exists, Codex performs a read-only failure diagnosis. Orchestra starts Antigravity again in a fresh provider conversation with Gemma and Codex guidance.
+4. Initial implementation permits two bounded fresh retries after the first attempt. A successful diff enters normal review regardless of whether the provider produced a clean final message.
+5. When a repair makes no changes and Codex repeats the same blocker, the escalated review is sent once to a fresh Antigravity conversation using an explicitly different approach. A second confirmed no-progress failover may require attention.
+
+Antigravity also has a five-minute stream-idle timeout in addition to its absolute execution timeout. Any stdout or stderr activity resets the idle timer. Crossing the idle boundary terminates the process tree and enters the same Gemma/Codex failover path as a nonzero exit.
+
+The timeline emits `task.model-takeover` events naming the failed provider, diagnosing model, receiving role, stage, and next action. `task.provider-recovery` remains the lower-level provider-result signal.
+
+### Reasons
+
+- Process lifecycle details must not decide whether a valid Git diff can be reviewed.
+- Gemma is fast and inexpensive for failure classification, Codex is independent and read-only for diagnosis/review, and Antigravity retains bounded mutation authority.
+- Fresh conversations break provider state that is waiting on abandoned subagents, timers, or scheduled tasks.
+- Bounded retries and repeated-finding fingerprints avoid infinite loops while eliminating single-provider random stops.
+- Direct commits, wrong-project access, destructive ambiguity, and exhausted no-progress cycles still require a fail-closed boundary.
+
+### Impact
+
+- An `Antigravity exited with 1` case now transfers a preserved project diff to Codex instead of stopping before review.
+- A clean-tree timeout triggers Gemma/Codex diagnosis and a fresh Antigravity attempt automatically.
+- The user can see which model took over, why, and what happens next in the recent timeline.
+- Manual recovery becomes the last bounded safety outcome, not the default response to a provider lifecycle failure.
+
+## 2026-08-14: Verification is part of the recoverable review loop
+
+### Background
+
+A file-changing task reached a passing third Codex review, then Orchestra entered `recovery_required` because Node 24 on Windows rejected a direct `spawn('npm.cmd', ...)` verification launch with `EINVAL`. The agents had finished their work; Orchestra's verification transport incorrectly converted its own launcher incompatibility into a stopped project task.
+
+### Decision
+
+- Windows npm verification runs the npm CLI JavaScript entry point through the current `node.exe`. If that bundled entry point cannot be found, Orchestra uses an explicit `cmd.exe /d /s /c npm.cmd` fallback rather than spawning the cmd script directly.
+- Lint, build, or test failures after a passing Codex review become a synthetic blocking review containing the concrete command and bounded output. Antigravity repairs that failure, then Codex independently reviews the new diff and Orchestra verifies it again.
+- Successful review is not sufficient for finalization. A task can commit and push only after both Codex `PASS` and deterministic verification pass in the same bounded review loop.
+- Verification launch behavior is exercised against a temporary package fixture in Orchestra's own test suite, so validation never depends on or operates on a user's test project.
+
+### Impact
+
+- The Windows `spawn EINVAL` regression is detected locally before deployment.
+- Ordinary project check failures no longer force a manual resume between review cycles.
+- Verification remains bounded by the existing repair limit and repeated-no-progress protection.
+
+## 2026-08-14: Continuations bind to preserved task ownership
+
+### Background
+
+After a task entered `recovery_required`, the user submitted the one-word prompt `continue`. Continuation expansion accepted only previously completed tasks, so Gemma saw the word without its prior intent, classified it as a small read-only question, produced a repository summary, and explicitly listed implementation as a subsequent step. Orchestra accepted that answer because confidence and evidence-path checks passed. The resulting summary task became newer than the actual preserved task, making a naive "previous task" lookup unreliable.
+
+### Decision
+
+- Short continuation commands first search the current session for a `recovery_required` task. When found, the existing task is recovered in place; no new task is created.
+- Recovery lookup searches past newer terminal summaries, preserving the identity of the task that owns the uncommitted changes.
+- Completed-task continuation expansion remains available when there is no preserved recovery task.
+- Gemma repository answers fail deterministic acceptance when their answer or limitations defer requested work to a later step or describe themselves as analysis-only.
+
+### Impact
+
+- `continue` cannot be downgraded to an isolated repository question while a session has preserved task changes.
+- An erroneous newer summary cannot hide the true recovery owner.
+- Explicit deferral is treated as incomplete work regardless of model confidence.

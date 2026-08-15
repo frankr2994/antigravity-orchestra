@@ -35,7 +35,7 @@ export function ensureAntigravityStatusCollector() {
       return { configured: status.command.includes('antigravity-statusline.mjs'), reason: status.command.includes('antigravity-statusline.mjs') ? undefined : 'A different custom Antigravity status-line command is already configured.' };
     }
     const script = join(config.dashboardRoot, 'scripts', 'antigravity-statusline.mjs');
-    value.statusLine = { ...status, type: 'command', enabled: true, stack_with_default: true, command: `node "${script}"` };
+    value.statusLine = { ...status, type: 'command', enabled: true, stack_with_default: true, command: `node ${script}` };
     writeFileSync(antigravitySettings, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
     return { configured: true, reason: 'Configured the supported Antigravity status-line collector.' };
   } catch (error) { return { configured: false, reason: error instanceof Error ? error.message : String(error) }; }

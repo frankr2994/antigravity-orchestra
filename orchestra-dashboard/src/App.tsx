@@ -20,7 +20,7 @@ type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolea
 type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
 type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null; providerTelemetry: Record<string, ProviderUsage>; providerActivity: Array<Record<string, unknown>> };
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'task.provider-recovery', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required']);
 
 function App() {
@@ -358,8 +358,8 @@ function Dashboard({ stats, health, usage, mcp, project, tasks, activeTask, moni
 }
 
 function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void }) {
-  const recent = events.filter((event) => ['task.state', 'task.repair-progress', 'task.provider-recovery', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push'].includes(event.type)).slice(-20).reverse();
-  const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed' || event.type === 'task.provider-recovery');
+  const recent = events.filter((event) => ['task.state', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push'].includes(event.type)).slice(-20).reverse();
+  const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed' || event.type === 'task.provider-recovery' || event.type === 'task.model-takeover');
   const running = !terminalStates.has(task.state);
   return <article className={`live-monitor health-${monitor?.health || 'waiting'}`}>
     <header><div><span className="eyebrow">Live run monitor</span><h2>{task.title}</h2></div><div className="monitor-actions"><span className="health-pill"><StatusDot ok={monitor?.health === 'active' || monitor?.health === 'complete'} /> {humanState(monitor?.health || 'loading')}</span>{running && <button className="stop-button" onClick={onStop}><Square size={12} fill="currentColor" /> Stop</button>}</div></header>
@@ -407,7 +407,7 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
 }
 
 function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[]; models: Record<string, string> | null }) {
-  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.provider-recovery', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'warning'].includes(event.type)).slice(-8);
+  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.provider-recovery', 'task.model-takeover', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'warning'].includes(event.type)).slice(-8);
   const primaryModel = models?.primary === 'gemma' ? models.gemma : models?.antigravity;
   return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
 }

@@ -5,11 +5,11 @@ import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, listAntigravityModels, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageReview, validateAgentResponse, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, listAntigravityModels, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
-import { verifyProject } from './verification.js';
+import { verificationFailure as describeVerificationFailure, verifyProject } from './verification.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
 import { getMcpStatus, type McpStatus } from './mcp.js';
 
@@ -272,6 +272,54 @@ export class TaskManager {
         this.emit(taskId, 'system', 'mcp.capability', { message: `Rider MCP capability detection failed; agents will use their ordinary tools. ${error instanceof Error ? error.message : String(error)}` });
       }
       const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
+      const runAntigravityWithFailover = async (input: Parameters<typeof runAntigravity>[0], stage: string): Promise<AgentRunResult> => {
+        let result: AgentRunResult;
+        try {
+          result = await runAntigravity(input);
+          if (!result.incomplete) return result;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          if (!input.mutating) throw error;
+          const reason = error instanceof Error ? error.message : String(error);
+          result = {
+            text: `Antigravity did not complete the ${stage} turn: ${reason}`,
+            conversationId: null,
+            raw: '',
+            warning: `Antigravity did not complete the ${stage} turn. Orchestra is transferring control to its local failure triage and independent Codex workflow.`,
+            usage: null,
+            terminalStatus: providerFailureStatus(reason),
+            incomplete: true,
+            failureReason: reason,
+            continuationGuidance: null,
+          };
+        }
+
+        let changedFiles: string[] = [];
+        try { changedFiles = (await getGitStatus(project.root)).files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path)); } catch { /* Codex receives the Git failure if inspection remains unavailable. */ }
+        const fallback: ProviderFailureTriage = {
+          category: result.terminalStatus === 'TIMEOUT' || result.terminalStatus === 'IDLE_TIMEOUT' ? 'timeout' : result.terminalStatus === 'PROCESS_ERROR' ? 'process_exit' : /subagent|paus|wait/i.test(result.text) ? 'delegated_wait' : 'unknown',
+          summary: result.failureReason || result.warning || 'Antigravity ended before returning a usable completion.',
+          continuationInstructions: 'Inspect the preserved working tree, finish missing work directly in a fresh foreground turn, and run synchronous verification without delegation or scheduled waits.',
+          safeToReviewPreservedDiff: true,
+        };
+        let triage = fallback;
+        this.emit(taskId, 'gemma', 'agent.started', { phase: 'provider-failure-triage', provider: 'antigravity', stage, changedFiles: changedFiles.length });
+        try {
+          triage = await triageProviderFailure({ stage, error: result.failureReason || result.warning || result.terminalStatus || 'Unknown provider failure', lastOutput: result.text, changedFiles });
+          this.emit(taskId, 'gemma', 'agent.completed', { phase: 'provider-failure-triage', provider: 'antigravity', stage, ...triage });
+        } catch (error) {
+          this.emit(taskId, 'gemma', 'warning', { message: `Local provider-failure triage was unavailable; deterministic failover is continuing. ${error instanceof Error ? error.message : String(error)}` });
+        }
+        result.continuationGuidance = triage.continuationInstructions;
+        const disposition = providerFailoverDisposition(changedFiles.length);
+        this.emit(taskId, 'system', 'task.model-takeover', {
+          message: disposition === 'review_preserved_diff'
+            ? `Gemma identified an Antigravity ${triage.category.replaceAll('_', ' ')} during ${stage}. ${changedFiles.length} preserved file${changedFiles.length === 1 ? '' : 's'} will transfer to Codex for independent review.`
+            : `Gemma identified an Antigravity ${triage.category.replaceAll('_', ' ')} during ${stage}. Codex will diagnose a fresh foreground continuation before Antigravity retries.`,
+          from: 'antigravity', to: disposition === 'review_preserved_diff' ? 'codex-review' : 'gemma-codex-diagnosis', stage, category: triage.category, changedFiles: changedFiles.length,
+        });
+        return result;
+      };
 
       const evidence = !classification.mutating ? collectRepositoryEvidence(project.root, task.prompt, status) : null;
       const sessionContext = await this.prepareSessionContext(taskId, session);
@@ -320,7 +368,7 @@ export class TaskManager {
       const rotateConversation = contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 || priorInputTokens !== null && priorInputTokens >= 200_000;
       const conversationId = rotateConversation ? null : session.antigravityConversationId;
       if (!conversationId && session.antigravityConversationId && rotateConversation) this.emit(taskId, 'system', 'routing.adjustment', { message: contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 ? `Antigravity context is ${contextUsed.toFixed(1)}% used. Orchestra started a fresh provider conversation while preserving the local session summary.` : `The previous Antigravity turn used ${priorInputTokens?.toLocaleString()} input tokens. Orchestra started a fresh provider conversation while preserving the local session summary.` });
-      let agentResult = await runAntigravity({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId, context: implementationContext, recovery, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) });
+      let agentResult = await runAntigravityWithFailover({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId, context: implementationContext, recovery, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) }, 'implementation');
       let hadIncompleteAgentRun = agentResult.incomplete;
       if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
       if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
@@ -330,29 +378,46 @@ export class TaskManager {
       if (classification.mutating) {
         let progress = implementationChangeState(status.head, await getGitStatus(project.root));
         if (progress === 'committed') throw new Error('Antigravity committed project changes directly. Orchestra stopped because it can no longer review and finalize the complete uncommitted change set safely.');
-        if (progress === 'none') {
-          this.emit(taskId, 'system', 'task.implementation-retry', { attempt: 1, message: 'The first implementation turn produced no project changes. Orchestra is retrying automatically with explicit write instructions.' });
-          agentResult = await runAntigravity({
+        const maxImplementationRetries = 2;
+        for (let retryAttempt = 1; progress === 'none' && retryAttempt <= maxImplementationRetries; retryAttempt += 1) {
+          let codexGuidance = '';
+          this.transition(taskId, 'reviewing');
+          this.emit(taskId, 'system', 'task.model-takeover', { message: `The implementation turn produced no reviewable diff. Codex is taking over failure diagnosis before fresh Antigravity attempt ${retryAttempt + 1}.`, from: 'antigravity', to: 'codex-diagnosis', attempt: retryAttempt });
+          this.emit(taskId, 'codex', 'agent.started', { role: 'failover-diagnosis', model: 'gpt-5.6-terra', effort: 'high', attempt: retryAttempt });
+          try {
+            codexGuidance = await runCodexAnalysis({
+              root: project.root,
+              prompt: `Diagnose why an Antigravity implementation turn produced no reviewable project diff and provide concrete instructions for a fresh foreground retry. Do not edit files.\n\nOriginal request:\n${task.prompt}\n\nProvider failure or output:\n${agentResult.failureReason || agentResult.text}\n\nGemma continuation guidance:\n${agentResult.continuationGuidance || 'No local guidance was available.'}`,
+              role: 'debug', model: 'gpt-5.6-terra', effort: 'high', riderAvailable: riderFor('codex'), signal,
+              onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage),
+            });
+            this.emit(taskId, 'codex', 'agent.completed', { role: 'failover-diagnosis', attempt: retryAttempt, summary: codexGuidance.slice(-4000) });
+          } catch (error) {
+            this.emit(taskId, 'codex', 'warning', { message: `Codex failover diagnosis was unavailable; Gemma's guidance and deterministic retry policy will continue. ${error instanceof Error ? error.message : String(error)}` });
+          }
+          this.transition(taskId, 'running');
+          this.emit(taskId, 'system', 'task.implementation-retry', { attempt: retryAttempt, maxAttempts: maxImplementationRetries, message: `Orchestra is starting fresh foreground implementation attempt ${retryAttempt + 1} with Gemma/Codex recovery guidance.` });
+          agentResult = await runAntigravityWithFailover({
             root: project.root,
-            prompt: `The prior implementation turn produced no project file changes. Implement the original request now. Work directly in this foreground turn: do not invoke or wait for subagents, delegate the task, return another plan, request approval, or stop at analysis. Create or modify the necessary project files, run synchronous verification, and leave the complete changes uncommitted for Orchestra review.\n\nOriginal request:\n${task.prompt}`,
+            prompt: `The prior implementation turn produced no project file changes. Implement the original request now using the recovery guidance below. Work directly in this foreground turn: do not invoke or wait for subagents, delegate the task, use scheduled waits, return another plan, request approval, or stop at analysis. Create or modify the necessary project files, run synchronous verification, and leave the complete changes uncommitted for Orchestra review.\n\nOriginal request:\n${task.prompt}\n\nGemma failure guidance:\n${agentResult.continuationGuidance || 'Inspect the project and finish the request directly.'}\n\nCodex failure diagnosis:\n${codexGuidance || 'No Codex diagnosis was available; follow the deterministic foreground requirements.'}`,
             model: models.antigravity,
             effort: 'high',
             mutating: true,
-            conversationId: agentResult.incomplete ? null : agentResult.conversationId || session.antigravityConversationId,
+            conversationId: null,
             riderAvailable: riderFor('antigravity'),
             signal,
             onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk),
             onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage),
-          });
+          }, `implementation retry ${retryAttempt}`);
           hadIncompleteAgentRun ||= agentResult.incomplete;
           if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
           if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
-          if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's foreground retry ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra will continue with any preserved diff and independent review.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: 1 });
-          else this.emit(taskId, 'antigravity', 'agent.completed', { retry: 1, summary: agentResult.text.slice(-5000) });
+          if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's foreground retry ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra will continue with any preserved diff or the next bounded failover attempt.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: retryAttempt });
+          else this.emit(taskId, 'antigravity', 'agent.completed', { retry: retryAttempt, summary: agentResult.text.slice(-5000) });
           progress = implementationChangeState(status.head, await getGitStatus(project.root));
           if (progress === 'committed') throw new Error('Antigravity committed project changes directly during the automatic retry. Orchestra stopped because it cannot safely review and finalize that hidden change set.');
-          if (progress === 'none') throw new Error('Implementation produced no project file changes after an automatic retry. Orchestra did not mark the request complete; inspect the agent output or retry with a more specific implementation request.');
         }
+        if (progress === 'none') throw new Error(`Implementation produced no project file changes after ${maxImplementationRetries + 1} foreground attempts with Gemma and Codex failover guidance. Orchestra exhausted bounded automatic alternatives without a reviewable diff.`);
       }
 
       if (!classification.mutating && evidence) agentResult.text = await this.postflight(taskId, project.root, task.prompt, agentResult.text, evidence);
@@ -365,6 +430,8 @@ export class TaskManager {
           let previousFindings = '';
           let previousReview = '';
           let previousRepairChanged = true;
+          let noProgressEscalations = 0;
+          let verificationPassed = false;
           const maxRepairAttempts = 6;
           for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
             const reviewStatus = await getGitStatus(project.root);
@@ -383,18 +450,40 @@ export class TaskManager {
             const reviewPacket = buildReviewPacket({ request: task.prompt, changedFiles, diff, implementationSummary: agentResult.text, triage, previousReview });
             this.transition(taskId, 'reviewing');
             this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: profile.model, effort: profile.effort, cycle: cycle + 1, changedFiles: changedFiles.length, triageRisk: triage.risk });
-            const review = await runCodexReview({ root: project.root, model: profile.model, effort: profile.effort, reviewPacket, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
-            const blocked = !/VERDICT:\s*PASS/i.test(review) || /VERDICT:\s*BLOCK/i.test(review);
+            let review = await runCodexReview({ root: project.root, model: profile.model, effort: profile.effort, reviewPacket, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
+            let blocked = !/VERDICT:\s*PASS/i.test(review) || /VERDICT:\s*BLOCK/i.test(review);
             this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, model: profile.model, cycle: cycle + 1, summary: review.slice(-5000) });
-            if (!blocked) break;
+            if (!blocked) {
+              this.transition(taskId, 'verifying');
+              let verificationFailure = '';
+              try {
+                const verification = await verifyProject(project.root, signal);
+                this.emit(taskId, 'verification', 'verification.result', { results: verification });
+                verificationFailure = describeVerificationFailure(verification);
+              } catch (error) {
+                verificationFailure = error instanceof Error ? error.message : String(error);
+                this.emit(taskId, 'verification', 'warning', { message: `Verification infrastructure failed; Orchestra is routing the failure through automatic repair instead of stopping. ${verificationFailure}` });
+              }
+              if (!verificationFailure) {
+                verificationPassed = true;
+                break;
+              }
+              blocked = true;
+              review = `VERDICT: BLOCK\n\nOrchestra deterministic verification failed after Codex review passed. Diagnose and repair the project or verification compatibility issue, then rerun the checks synchronously.\n\n${verificationFailure}`;
+              this.emit(taskId, 'system', 'task.model-takeover', { message: 'Deterministic verification failed after a passing Codex review. Orchestra is transferring the concrete failure to Antigravity for repair, then will repeat independent review and verification.', from: 'verification', to: 'antigravity-repair', cycle: cycle + 1 });
+            }
             const findings = reviewFingerprint(review);
             const repeatedWithoutProgress = Boolean(previousFindings && findings === previousFindings && !previousRepairChanged);
-            if (repeatedWithoutProgress) throw new Error(`Automatic repair paused because Codex repeated the same blocking findings and the previous repair made no project changes.\n${review.slice(-3000)}`);
+            if (repeatedWithoutProgress) {
+              noProgressEscalations += 1;
+              if (noProgressEscalations > 1) throw new Error(`Automatic failover exhausted after Codex twice confirmed the same blocking findings and two fresh Antigravity repairs made no project changes.\n${review.slice(-3000)}`);
+              this.emit(taskId, 'system', 'task.model-takeover', { message: 'Codex confirmed the same blockers after a no-progress repair. Orchestra is giving the escalated review to a fresh Antigravity conversation for one alternate foreground repair before requiring attention.', from: 'codex-review', to: 'antigravity-fresh-repair', cycle: cycle + 1 });
+            } else noProgressEscalations = 0;
             if (cycle === maxRepairAttempts) throw new Error(`Automatic repair paused after ${maxRepairAttempts} repair attempts. The remaining findings require user direction or a different approach.\n${review.slice(-3000)}`);
             const beforeRepair = diffFingerprint(await getDiff(project.root));
             this.transition(taskId, 'running');
             const priorIncomplete = agentResult.incomplete;
-            agentResult = await runAntigravity({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification. Perform the repair directly in this foreground turn; do not invoke or wait for subagents, delegate the repair, or pause before synchronous verification completes:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: priorIncomplete ? null : agentResult.conversationId || session.antigravityConversationId, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) });
+            agentResult = await runAntigravityWithFailover({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification. ${repeatedWithoutProgress ? 'The previous repair made no progress, so use a different implementation approach in this fresh turn. ' : ''}Perform the repair directly in this foreground turn; do not invoke or wait for subagents, delegate the repair, use scheduled waits, or pause before synchronous verification completes:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: priorIncomplete || repeatedWithoutProgress ? null : agentResult.conversationId || session.antigravityConversationId, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) }, `repair cycle ${cycle + 1}`);
             hadIncompleteAgentRun ||= agentResult.incomplete;
             if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
             if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's repair turn ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra preserved the repair diff and is returning it to Codex review automatically.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: cycle + 1 });
@@ -404,12 +493,7 @@ export class TaskManager {
             previousReview = review;
             this.emit(taskId, 'system', 'task.repair-progress', { attempt: cycle + 1, maxAttempts: maxRepairAttempts, changed: previousRepairChanged });
           }
-
-          this.transition(taskId, 'verifying');
-          const verification = await verifyProject(project.root, signal);
-          this.emit(taskId, 'verification', 'verification.result', { results: verification });
-          const failed = verification.find((item) => item.code !== 0);
-          if (failed) throw new Error(`Verification failed: ${failed.command}\n${failed.output.slice(-3000)}`);
+          if (!verificationPassed) throw new Error('Automatic review and repair ended without a passing deterministic verification result.');
 
           await this.finalizeGit(taskId, project, task.prompt, classification, models);
           if (hadIncompleteAgentRun) {
@@ -555,6 +639,15 @@ export function recoveryDisposition(state: TaskState, taskAlreadyOwnsProject: bo
   if (state === 'failed' || state === 'recovery_required') return 'start';
   if (taskAlreadyOwnsProject) return 'already_active';
   return 'reject';
+}
+
+export function providerFailureStatus(reason: string): 'IDLE_TIMEOUT' | 'TIMEOUT' | 'PROCESS_ERROR' {
+  if (/no stream activity|produced no output|stalled process/i.test(reason)) return 'IDLE_TIMEOUT';
+  return /timed?\s*out|timeout|exceeded/i.test(reason) ? 'TIMEOUT' : 'PROCESS_ERROR';
+}
+
+export function providerFailoverDisposition(changedFileCount: number): 'review_preserved_diff' | 'diagnose_and_retry' {
+  return changedFileCount > 0 ? 'review_preserved_diff' : 'diagnose_and_retry';
 }
 
 export function evaluateRunHealth(state: TaskState, processAlive: boolean, inactiveMs: number): RunMonitor['health'] {

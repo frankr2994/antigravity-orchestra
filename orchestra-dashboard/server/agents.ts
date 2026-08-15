@@ -1,5 +1,5 @@
 import { config } from './config.js';
-import { ProcessTimeoutError, runProcess } from './process.js';
+import { ProcessIdleTimeoutError, ProcessTimeoutError, runProcess } from './process.js';
 import type { ChatMessage, ModelSelection, TaskClassification, TaskRecord } from './types.js';
 import type { RepositoryEvidence } from './evidence.js';
 import { delimiter } from 'node:path';
@@ -8,7 +8,7 @@ import { callGemmaRiderTool, getGemmaRiderTools } from './mcp.js';
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
 
-export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; usage: Record<string, number> | null; terminalStatus: string | null; incomplete: boolean; }
+export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; usage: Record<string, number> | null; terminalStatus: string | null; incomplete: boolean; failureReason: string | null; continuationGuidance: string | null; }
 interface StreamDecoder { push: (chunk: string) => void; flush: () => void; sandboxFailed: () => boolean; }
 type JsonSchema = { name: string; schema: Record<string, unknown> };
 
@@ -18,6 +18,7 @@ const POSTFLIGHT_SCHEMA: JsonSchema = { name: 'repository_postflight', schema: {
 const CHANGE_SUMMARY_SCHEMA: JsonSchema = { name: 'change_summary', schema: { type: 'object', properties: { title: { type: 'string' }, summary: { type: 'string' } }, required: ['title', 'summary'], additionalProperties: false } };
 const RUN_HEALTH_SCHEMA: JsonSchema = { name: 'run_health', schema: { type: 'object', properties: { explanation: { type: 'string' } }, required: ['explanation'], additionalProperties: false } };
 const REVIEW_TRIAGE_SCHEMA: JsonSchema = { name: 'review_triage', schema: { type: 'object', properties: { risk: { type: 'string', enum: ['low', 'normal', 'high'] }, summary: { type: 'string' }, focusFiles: { type: 'array', items: { type: 'string' } }, concerns: { type: 'array', items: { type: 'string' } } }, required: ['risk', 'summary', 'focusFiles', 'concerns'], additionalProperties: false } };
+const PROVIDER_FAILURE_TRIAGE_SCHEMA: JsonSchema = { name: 'provider_failure_triage', schema: { type: 'object', properties: { category: { type: 'string', enum: ['delegated_wait', 'timeout', 'process_exit', 'tool_failure', 'no_progress', 'unknown'] }, summary: { type: 'string' }, continuationInstructions: { type: 'string' }, safeToReviewPreservedDiff: { type: 'boolean' } }, required: ['category', 'summary', 'continuationInstructions', 'safeToReviewPreservedDiff'], additionalProperties: false } };
 
 export async function lmStudioHealth() {
   try {
@@ -46,6 +47,24 @@ export async function answerRunQuestion(question: string, evidence: Record<strin
     { role: 'user', content: `Question:\n${question}\n\nSanitized run evidence:\n${redactSecrets(JSON.stringify(evidence)).slice(-100_000)}` },
   ], 1_200, 90_000);
   return raw.trim();
+}
+
+export interface ProviderFailureTriage { category: 'delegated_wait' | 'timeout' | 'process_exit' | 'tool_failure' | 'no_progress' | 'unknown'; summary: string; continuationInstructions: string; safeToReviewPreservedDiff: boolean; }
+
+export async function triageProviderFailure(input: { stage: string; error: string; lastOutput: string; changedFiles: string[] }): Promise<ProviderFailureTriage> {
+  const raw = await callGemma([
+    { role: 'system', content: 'Diagnose an agent-provider failure for an automated coding orchestrator. Return JSON only. Explain the observable failure category and give concise instructions addressed to the next foreground implementation attempt. Never claim hidden reasoning. Do not ask the user to intervene, wait, inspect logs, restart the orchestrator, or approve another step. The continuation must inspect current files, finish directly without subagents or scheduled waits, and verify synchronously. Preserved Git changes are safe to send to an independent read-only reviewer unless the evidence explicitly indicates a direct commit, repository corruption, destructive operation, or wrong-project access.' },
+    { role: 'user', content: `Stage: ${input.stage}\nProvider error:\n${redactSecrets(input.error).slice(0, 4_000)}\n\nLast visible output:\n${redactSecrets(input.lastOutput).slice(-6_000)}\n\nChanged project files:\n${input.changedFiles.slice(0, 120).join('\n') || '(none)'}` },
+  ], 600, 45_000, PROVIDER_FAILURE_TRIAGE_SCHEMA);
+  const value = parseJson(raw) as Record<string, unknown>;
+  const allowed = ['delegated_wait', 'timeout', 'process_exit', 'tool_failure', 'no_progress', 'unknown'];
+  const category = allowed.includes(String(value.category)) ? String(value.category) as ProviderFailureTriage['category'] : 'unknown';
+  return {
+    category,
+    summary: String(value.summary || 'The provider turn ended before Orchestra received a usable completion.').trim().slice(0, 1_000),
+    continuationInstructions: String(value.continuationInstructions || 'Inspect the current working tree, finish the request directly in the foreground, and run synchronous verification.').trim().slice(0, 2_000),
+    safeToReviewPreservedDiff: value.safeToReviewPreservedDiff !== false,
+  };
 }
 
 async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false, onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void): Promise<string> {
@@ -166,7 +185,13 @@ function normalizeRepositoryAnswer(value: Record<string, unknown>, input: { root
   if (answer.length <= 80) rejectionReasons.push('the proposed answer was too short to be useful');
   if (/\b(?:the|a|an|and|or|to|of|with|including|such as|based on)\s*$/i.test(answer) || /[:;,(-]\s*$/.test(answer)) rejectionReasons.push('the proposed answer ended mid-sentence');
   if (!evidenceFiles.length) rejectionReasons.push(suppliedEvidenceFiles.length ? 'none of the cited paths referred to files whose contents were included in the evidence packet' : 'the answer cited no repository evidence files');
+  if (responseDefersRequestedWork(answer, limitations)) rejectionReasons.push('the proposed answer explicitly deferred requested work to a later step');
   return { canAnswer: rejectionReasons.length === 0, confidence, answer: rootedAnswer, evidenceFiles, limitations, rejectionReasons, attempts };
+}
+
+export function responseDefersRequestedWork(answer: string, limitations: string[] = []) {
+  const text = `${answer}\n${limitations.join('\n')}`;
+  return /\b(?:instruction|work|implementation|request)\s+(?:is|was|has been)\s+(?:deferred|left|reserved)\b|\b(?:defer(?:red|ring)?|postpone(?:d)?)\b[\s\S]{0,80}\b(?:later|future|next|subsequent)\b|\b(?:subsequent|future|later)\s+(?:step|phase|task|turn)\b|\b(?:this|the)\s+(?:analysis|response|answer)\s+only\s+(?:covers|describes|reviews)\b/i.test(text);
 }
 
 function isActionablePostflightIssue(issue: string) {
@@ -312,9 +337,12 @@ export async function runAntigravity(input: { root: string; prompt: string; mode
   const decoder = createAntigravityStreamDecoder(input.onOutput);
   let result;
   try {
-    result = await runProcess(AGY, args, { cwd: input.root, timeoutMs: 21 * 60_000, signal: input.signal, onStdout: decoder.push, onStderr: decoder.push });
+    result = await runProcess(AGY, args, { cwd: input.root, timeoutMs: 21 * 60_000, idleTimeoutMs: 5 * 60_000, signal: input.signal, onStdout: decoder.push, onStderr: decoder.push });
   } catch (error) {
     decoder.flush();
+    if (error instanceof ProcessIdleTimeoutError) {
+      throw new Error('Antigravity produced no stream activity for five minutes. Orchestra stopped the stalled process so another model can diagnose and continue the task.');
+    }
     if (error instanceof ProcessTimeoutError) {
       throw new Error('Antigravity exceeded its 20-minute print window. Orchestra stopped the process and preserved any uncommitted task changes for safe recovery.');
     }
@@ -328,7 +356,7 @@ export async function runAntigravity(input: { root: string; prompt: string; mode
   if (!input.mutating && !responseIdentifiesProject(terminal.text, input.root)) {
     throw new Error(`Antigravity's response did not identify the active project directory (${input.root}), so Orchestra rejected it to prevent cross-repository output. Start a new conversation and retry.`);
   }
-  return { text: terminal.text, conversationId: terminal.conversationId, raw: result.stdout, warning: terminal.warning, usage, terminalStatus: terminal.status, incomplete: terminal.incomplete };
+  return { text: terminal.text, conversationId: terminal.conversationId, raw: result.stdout, warning: terminal.warning, usage, terminalStatus: terminal.status, incomplete: terminal.incomplete, failureReason: terminal.incomplete ? terminal.warning : null, continuationGuidance: null };
 }
 
 export function extractAntigravityUsage(output: string) {
@@ -484,11 +512,19 @@ export function hasExplicitMutationIntent(prompt: string) {
 }
 
 export function buildContinuationPrompt(prompt: string, previous: Pick<TaskRecord, 'prompt' | 'result' | 'state'> | null) {
-  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, '').trim();
-  const continuation = /^(?:yes(?:,?\s+please)?|proceed|continue|go ahead|do it|start|begin|start implementation|begin implementation|implement it|yes,?\s+(?:proceed|continue|go ahead|do it|start|begin))$/.test(normalized);
-  if (!continuation || !previous || !['completed', 'completed_unpushed'].includes(previous.state)) return null;
+  if (!isContinuationCommand(prompt) || !previous || !['completed', 'completed_unpushed'].includes(previous.state)) return null;
   const priorResult = previous.result?.trim().slice(-6_000);
   return `Orchestra continuation: the user explicitly authorizes implementation and project file changes.\n\nContinue and complete the previously requested work without asking for another approval. Implement and verify the approved next step.\n\nPrevious request:\n${previous.prompt}${priorResult ? `\n\nPrevious task result and proposed next step:\n${priorResult}` : ''}\n\nCurrent user instruction:\n${prompt}`;
+}
+
+export function isContinuationCommand(prompt: string) {
+  const normalized = prompt.trim().toLowerCase().replace(/[.!?]+$/g, '').trim();
+  return /^(?:yes(?:,?\s+please)?|proceed|continue|go ahead|do it|start|begin|start implementation|begin implementation|implement it|yes,?\s+(?:proceed|continue|go ahead|do it|start|begin))$/.test(normalized);
+}
+
+export function findContinuationRecoveryTask<T extends Pick<TaskRecord, 'state'>>(prompt: string, sessionTasks: T[]): T | null {
+  if (!isContinuationCommand(prompt)) return null;
+  return sessionTasks.find((task) => task.state === 'recovery_required') || null;
 }
 
 export function normalizeRiskFlags(value: unknown): string[] {

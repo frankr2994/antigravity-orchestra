@@ -7,11 +7,19 @@ export class ProcessTimeoutError extends Error {
     this.name = 'ProcessTimeoutError';
   }
 }
+export class ProcessIdleTimeoutError extends ProcessTimeoutError {
+  constructor(timeoutMs: number, stdout: string, stderr: string) {
+    super(timeoutMs, stdout, stderr);
+    this.message = `Process produced no output for ${timeoutMs}ms`;
+    this.name = 'ProcessIdleTimeoutError';
+  }
+}
 export interface RunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   input?: string;
   timeoutMs?: number;
+  idleTimeoutMs?: number;
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
@@ -27,18 +35,25 @@ export function runProcess(command: string, args: string[], options: RunOptions 
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let stdout = ''; let stderr = ''; let settled = false;
+    let idleTimer: NodeJS.Timeout | undefined;
     const finish = (error?: Error, code = -1) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (idleTimer) clearTimeout(idleTimer);
       options.signal?.removeEventListener('abort', abort);
       if (error) reject(error); else resolve({ code, stdout, stderr });
     };
     const abort = () => { terminateTree(child.pid); finish(new Error('Process cancelled')); };
     const timer = options.timeoutMs ? setTimeout(() => { terminateTree(child.pid); finish(new ProcessTimeoutError(options.timeoutMs!, stdout, stderr)); }, options.timeoutMs) : undefined;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      if (options.idleTimeoutMs) idleTimer = setTimeout(() => { terminateTree(child.pid); finish(new ProcessIdleTimeoutError(options.idleTimeoutMs!, stdout, stderr)); }, options.idleTimeoutMs);
+    };
+    resetIdleTimer();
     options.signal?.addEventListener('abort', abort, { once: true });
-    child.stdout.on('data', (data: Buffer) => { const chunk = data.toString(); stdout += chunk; options.onStdout?.(chunk); });
-    child.stderr.on('data', (data: Buffer) => { const chunk = data.toString(); stderr += chunk; options.onStderr?.(chunk); });
+    child.stdout.on('data', (data: Buffer) => { const chunk = data.toString(); stdout += chunk; resetIdleTimer(); options.onStdout?.(chunk); });
+    child.stderr.on('data', (data: Buffer) => { const chunk = data.toString(); stderr += chunk; resetIdleTimer(); options.onStderr?.(chunk); });
     child.on('error', (error) => finish(error));
     child.on('close', (code) => finish(undefined, code ?? -1));
     if (options.input !== undefined) child.stdin.end(options.input); else child.stdin.end();

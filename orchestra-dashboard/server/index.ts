@@ -8,7 +8,7 @@ import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, on
 import { getGitStatus, pushCurrent } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
-import { answerRunQuestion, buildContinuationPrompt, explainRunHealth } from './agents.js';
+import { answerRunQuestion, buildContinuationPrompt, explainRunHealth, findContinuationRecoveryTask } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus } from './mcp.js';
@@ -87,14 +87,23 @@ app.post('/api/projects/:id/sessions', (req, res) => res.status(201).json(store.
 app.get('/api/sessions/:id/messages', (req, res) => { requireSession(req.params.id); res.json(store.listMessages(req.params.id)); });
 app.post('/api/sessions/:id/activate', (req, res) => { const session = requireSession(req.params.id); store.activateSession(session.id, session.projectId); res.json(session); });
 
-app.post('/api/sessions/:id/tasks', (req, res, next) => {
+app.post('/api/sessions/:id/tasks', async (req, res, next) => {
   try {
     const session = requireSession(req.params.id);
     const existingTaskId = tasks.activeTaskId(session.projectId);
     if (existingTaskId) throw new Error(`This project already has an active or queued task (${existingTaskId}). Open that task instead of creating a duplicate.`);
     const prompt = String(req.body?.prompt || '').trim();
     if (!prompt || prompt.length > 100_000) throw new Error('A prompt between 1 and 100,000 characters is required.');
-    const previousTask = store.listTasks(session.projectId).find((candidate) => candidate.sessionId === session.id) || null;
+    const sessionTasks = store.listTasks(session.projectId).filter((candidate) => candidate.sessionId === session.id);
+    const recoveryTask = findContinuationRecoveryTask(prompt, sessionTasks);
+    if (recoveryTask) {
+      store.addMessage({ sessionId: session.id, taskId: recoveryTask.id, role: 'user', agent: 'system', content: prompt });
+      store.addEvent(recoveryTask.id, 'system', 'task.continuation', { previousTaskId: recoveryTask.id, message: 'The continuation command is resuming the existing task that owns the preserved changes.' });
+      const recovered = await tasks.recover(recoveryTask.id);
+      res.status(202).json(recovered);
+      return;
+    }
+    const previousTask = sessionTasks[0] || null;
     const continuationPrompt = buildContinuationPrompt(prompt, previousTask);
     const task = store.createTask(session.projectId, session.id, continuationPrompt || prompt);
     store.addMessage({ sessionId: session.id, taskId: task.id, role: 'user', agent: 'system', content: prompt });
