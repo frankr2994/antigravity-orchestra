@@ -122,7 +122,7 @@ app.post('/api/sessions/:id/tasks', async (req, res, next) => {
       const mod = {
         primary: directAgent,
         gemma: config.lmStudioModel,
-        antigravity: 'gemini-3.6-flash-high',
+        antigravity: 'gemini-3.7-flash-high',
         antigravityEffort: 'high' as const,
         codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
         codexEffort: directAgent === 'codex' ? 'high' as const : null,

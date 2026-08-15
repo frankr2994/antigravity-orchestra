@@ -229,7 +229,7 @@ export class TaskManager {
         const directModels: ModelSelection = {
           primary: directAgent,
           gemma: config.lmStudioModel,
-          antigravity: 'gemini-3.6-flash-high',
+          antigravity: 'gemini-3.7-flash-high',
           antigravityEffort: 'high',
           codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
           codexEffort: directAgent === 'codex' ? 'high' : null,
@@ -270,11 +270,11 @@ export class TaskManager {
         }
 
         if (directAgent === 'antigravity') {
-          this.emit(taskId, 'antigravity', 'agent.started', { role: 'direct-chat', model: 'gemini-3.6-flash-high' });
+          this.emit(taskId, 'antigravity', 'agent.started', { role: 'direct-chat', model: 'gemini-3.7-flash-high' });
           const result = await runAntigravity({
             root: project.root,
             prompt: `Answer the user inquiry directly in conversational read-only mode. Do not modify files:\n\n${task.prompt}`,
-            model: 'gemini-3.6-flash-high',
+            model: 'gemini-3.7-flash-high',
             effort: 'high',
             mutating: false,
             conversationId: session.antigravityConversationId,
@@ -312,8 +312,8 @@ export class TaskManager {
       const routingReasons: string[] = [];
       const antigravityRemaining = minimumRemaining(antigravityAccount);
       const codexRemaining = minimumRemaining(codexAccount);
-      if (!recovery && classification.complexity === 'small' && antigravityRemaining !== null && antigravityRemaining <= 10 && models.antigravity === 'gemini-3.6-flash-high') {
-        models = { ...models, antigravity: 'gemini-3.6-flash-medium', antigravityEffort: 'medium' };
+      if (!recovery && classification.complexity === 'small' && antigravityRemaining !== null && antigravityRemaining <= 10 && models.antigravity === 'gemini-3.7-flash-high') {
+        models = { ...models, antigravity: 'gemini-3.7-flash-medium', antigravityEffort: 'medium' };
         routingReasons.push(`Antigravity quota is ${antigravityRemaining.toFixed(1)}% remaining, so a small task was moved to Flash Medium.`);
       }
       if (!recovery && classification.complexity === 'small' && codexRemaining !== null && codexRemaining <= 10 && models.codex && models.codex !== 'gpt-5.6-luna') {

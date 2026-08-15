@@ -247,16 +247,24 @@ export async function classifyTask(prompt: string): Promise<{ classification: Ta
 }
 
 export function selectModels(classification: TaskClassification, failedAttempts = 0): ModelSelection {
-  if (failedAttempts > 0 || classification.complexity === 'deep' || classification.riskFlags.length > 0) {
-    return { antigravity: 'gemini-3.1-pro-high', antigravityEffort: 'high', codex: classification.codexRole === 'none' ? null : 'gpt-5.6-sol', codexEffort: 'high' };
+  // Level 5 (Maximum Frontier): High-risk security or repeated failures -> Sol High + Gemini 3.7 Flash High
+  if (failedAttempts > 1 || classification.riskFlags.includes('security') || classification.riskFlags.includes('data_loss')) {
+    return { antigravity: 'gemini-3.7-flash-high', antigravityEffort: 'high', codex: classification.codexRole === 'none' ? null : 'gpt-5.6-sol', codexEffort: 'high' };
   }
+  // Level 4 (Deep Reasoning / First Retry / Sensitive): Sol Medium + Gemini 3.7 Flash High
+  if (failedAttempts === 1 || classification.complexity === 'deep' || classification.riskFlags.length > 0) {
+    return { antigravity: 'gemini-3.7-flash-high', antigravityEffort: 'high', codex: classification.codexRole === 'none' ? null : 'gpt-5.6-sol', codexEffort: 'medium' };
+  }
+  // Level 3 (Review / Test Analysis): Terra Medium + Gemini 3.7 Flash Medium
   if (classification.type === 'review' || classification.type === 'test') {
-    return { antigravity: 'gemini-3.6-flash-medium', antigravityEffort: 'medium', codex: 'gpt-5.6-luna', codexEffort: 'medium' };
+    return { antigravity: 'gemini-3.7-flash-medium', antigravityEffort: 'medium', codex: 'gpt-5.6-terra', codexEffort: 'medium' };
   }
+  // Level 2 (Standard Mutating Implementation): Terra Medium + Gemini 3.7 Flash Medium
   if (classification.mutating || classification.codexRole !== 'none') {
-    return { antigravity: 'gemini-3.6-flash-high', antigravityEffort: 'high', codex: 'gpt-5.6-terra', codexEffort: 'high' };
+    return { antigravity: 'gemini-3.7-flash-medium', antigravityEffort: 'medium', codex: 'gpt-5.6-terra', codexEffort: 'medium' };
   }
-  return { antigravity: 'gemini-3.6-flash-medium', antigravityEffort: 'medium', codex: null, codexEffort: null };
+  // Level 1 (Lightweight / Read-only): Gemini 3.7 Flash Low, Codex bypassed
+  return { antigravity: 'gemini-3.7-flash-low', antigravityEffort: 'low', codex: null, codexEffort: null };
 }
 
 export async function listAntigravityModels(): Promise<string[]> {
@@ -268,7 +276,7 @@ export async function listAntigravityModels(): Promise<string[]> {
 
 export function resolveAntigravityModel(selected: string, available: string[]) {
   if (!available.length || available.includes(selected)) return { model: selected, warning: null };
-  const fallback = ['gemini-3.6-flash-high', 'gemini-3.6-flash-medium', 'gemini-3.6-flash-low'].find((model) => available.includes(model));
+  const fallback = ['gemini-3.7-flash-high', 'gemini-3.7-flash-medium', 'gemini-3.7-flash-low'].find((model) => available.includes(model));
   return { model: fallback || selected, warning: fallback ? `${selected} is unavailable; using ${fallback}.` : 'Unable to verify Antigravity model availability.' };
 }
 
@@ -280,10 +288,14 @@ export async function runCodexAnalysis(input: { root: string; prompt: string; ro
     return result.text || 'Codex completed its analysis without a final text response.';
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (/at capacity|overloaded|try a different model|rate limit|busy/i.test(msg) && input.model !== 'gpt-5.6-terra') {
-      input.onOutput(`Codex model ${input.model} is temporarily at capacity. Automatically falling back to gpt-5.6-terra.`);
-      const result = await codexAppServer.runReadOnlyTurn({ ...input, model: 'gpt-5.6-terra', prompt: instruction, onTelemetry: input.onUsage });
-      return result.text || 'Codex completed its analysis without a final text response.';
+    if (/at capacity|overloaded|try a different model|rate limit|busy/i.test(msg)) {
+      const fallbackModel = input.model === 'gpt-5.6-sol' ? 'gpt-5.6-terra' : 'gpt-5.6-luna';
+      const fallbackEffort = input.effort === 'high' ? 'medium' : 'low';
+      if (input.model !== fallbackModel) {
+        input.onOutput(`Codex model ${input.model} (${input.effort}) is temporarily at capacity. Automatically falling back to ${fallbackModel} (${fallbackEffort}).`);
+        const result = await codexAppServer.runReadOnlyTurn({ ...input, model: fallbackModel, effort: fallbackEffort, prompt: instruction, onTelemetry: input.onUsage });
+        return result.text || 'Codex completed its analysis without a final text response.';
+      }
     }
     throw error;
   }
@@ -297,10 +309,14 @@ export async function runCodexReview(input: { root: string; model: string; effor
     return result.text || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (/at capacity|overloaded|try a different model|rate limit|busy/i.test(msg) && input.model !== 'gpt-5.6-terra') {
-      input.onOutput(`Codex model ${input.model} is temporarily at capacity. Automatically falling back to gpt-5.6-terra.`);
-      const result = await codexAppServer.runReadOnlyTurn({ ...input, model: 'gpt-5.6-terra', prompt, onTelemetry: input.onUsage });
-      return result.text || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
+    if (/at capacity|overloaded|try a different model|rate limit|busy/i.test(msg)) {
+      const fallbackModel = input.model === 'gpt-5.6-sol' ? 'gpt-5.6-terra' : 'gpt-5.6-luna';
+      const fallbackEffort = input.effort === 'high' ? 'medium' : 'low';
+      if (input.model !== fallbackModel) {
+        input.onOutput(`Codex model ${input.model} (${input.effort}) is temporarily at capacity. Automatically falling back to ${fallbackModel} (${fallbackEffort}).`);
+        const result = await codexAppServer.runReadOnlyTurn({ ...input, model: fallbackModel, effort: fallbackEffort, prompt, onTelemetry: input.onUsage });
+        return result.text || 'VERDICT: BLOCK\nCodex review completed without a final verdict.';
+      }
     }
     throw error;
   }
@@ -381,10 +397,21 @@ export function buildReviewPacket(input: { request: string; changedFiles: string
 
 export function selectReviewProfile(input: { request: string; cycle: number; changedFileCount: number; triageRisk: ReviewTriage['risk']; repeatedFindings?: boolean }) {
   const explicitlySensitive = /\b(?:security|authorization|authentication|credential|secret|payment|production migration|data loss|destructive|encryption|permission)\b/i.test(input.request);
-  const escalate = explicitlySensitive || input.triageRisk === 'high' || input.changedFileCount >= 60 || input.cycle >= 2 || input.repeatedFindings;
-  return escalate
-    ? { model: 'gpt-5.6-sol', effort: 'high' as const, reason: explicitlySensitive ? 'explicitly sensitive request' : input.triageRisk === 'high' ? 'high-risk local triage' : input.changedFileCount >= 60 ? 'large change set' : 'repeated repair review' }
-    : { model: 'gpt-5.6-terra', effort: 'high' as const, reason: 'diff-scoped implementation review' };
+  
+  // Tier 5: Critical security, repeated dispute cycles -> Sol High
+  if (explicitlySensitive || input.cycle >= 2 || input.repeatedFindings) {
+    return { model: 'gpt-5.6-sol', effort: 'high' as const, reason: explicitlySensitive ? 'explicitly sensitive request' : 'repeated repair review' };
+  }
+  // Tier 4: High-risk local triage, massive diffs (50+ files) -> Sol Medium
+  if (input.triageRisk === 'high' || input.changedFileCount >= 50) {
+    return { model: 'gpt-5.6-sol', effort: 'medium' as const, reason: input.triageRisk === 'high' ? 'high-risk local triage' : 'large change set' };
+  }
+  // Tier 3: Substantial change sets (15+ files) or 1st-cycle repair check -> Terra High
+  if (input.changedFileCount >= 15 || input.cycle === 1) {
+    return { model: 'gpt-5.6-terra', effort: 'high' as const, reason: 'multi-file repair review' };
+  }
+  // Tier 2: Standard routine diff-scoped implementation review -> Terra Medium
+  return { model: 'gpt-5.6-terra', effort: 'medium' as const, reason: 'diff-scoped implementation review' };
 }
 
 export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; recovery?: boolean; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<AgentRunResult> {

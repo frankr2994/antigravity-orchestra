@@ -18,14 +18,14 @@ import { npmInvocation, verificationFailure, verifyProject } from '../dist-serve
 
 test('model policy escalates deep sensitive work to Pro and Sol', () => {
   const selection = selectModels({ type: 'debug', mutating: true, complexity: 'deep', riskFlags: ['security'], codexRole: 'debug', title: 'Debug auth' });
-  assert.equal(selection.antigravity, 'gemini-3.1-pro-high');
+  assert.equal(selection.antigravity, 'gemini-3.7-flash-high');
   assert.equal(selection.codex, 'gpt-5.6-sol');
   assert.equal(selection.codexEffort, 'high');
 });
 
 test('model policy keeps simple questions on Flash without Codex', () => {
   const selection = selectModels({ type: 'question', mutating: false, complexity: 'small', riskFlags: [], codexRole: 'none', title: 'Question' });
-  assert.equal(selection.antigravity, 'gemini-3.6-flash-medium');
+  assert.equal(selection.antigravity, 'gemini-3.7-flash-low');
   assert.equal(selection.codex, null);
 });
 
@@ -42,7 +42,7 @@ test('classification removes sentinel risk flags and prevents Codex over-routing
   const normalized = normalizeClassification({ type: 'question', mutating: false, complexity: 'small', riskFlags: [], codexRole: 'design', title: 'Explain directory' }, 'Can you explain what is in this directory?');
   const selection = selectModels(normalized);
   assert.equal(normalized.codexRole, 'none');
-  assert.equal(selection.antigravity, 'gemini-3.6-flash-medium');
+  assert.equal(selection.antigravity, 'gemini-3.7-flash-low');
   assert.equal(selection.codex, null);
 });
 
@@ -323,7 +323,8 @@ test('Antigravity progress reports Rider MCP activity without protocol payloads'
 });
 
 test('ordinary implementation reviews use Terra and escalate only for material risk or repetition', () => {
-  assert.deepEqual(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 12, triageRisk: 'normal' }), { model: 'gpt-5.6-terra', effort: 'high', reason: 'diff-scoped implementation review' });
+  assert.deepEqual(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 12, triageRisk: 'normal' }), { model: 'gpt-5.6-terra', effort: 'medium', reason: 'diff-scoped implementation review' });
+  assert.deepEqual(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 20, triageRisk: 'normal' }), { model: 'gpt-5.6-terra', effort: 'high', reason: 'multi-file repair review' });
   assert.equal(selectReviewProfile({ request: 'Repair authorization checks', cycle: 0, changedFileCount: 3, triageRisk: 'normal' }).model, 'gpt-5.6-sol');
   assert.equal(selectReviewProfile({ request: 'Implement the editor', cycle: 0, changedFileCount: 3, triageRisk: 'high' }).model, 'gpt-5.6-sol');
   assert.equal(selectReviewProfile({ request: 'Implement the editor', cycle: 2, changedFileCount: 3, triageRisk: 'normal' }).model, 'gpt-5.6-sol');
