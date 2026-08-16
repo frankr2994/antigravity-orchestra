@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { runProcess } from './process.js';
@@ -255,7 +255,20 @@ export async function toggleMcpServer(serverKey: string, enabled: boolean): Prom
     }
   }
 
-  // 4. If disabling, proactively terminate any lingering background processes (e.g. godot-mcp-enhanced)
+  // 4. Update Schema Directory in .gemini/antigravity-cli/mcp/ (prevents Antigravity CLI from auto-spawning)
+  try {
+    const activeDir = resolve(antigravitySchemasDir, serverKey);
+    const disabledDir = resolve(antigravitySchemasDir, `${serverKey}.disabled`);
+    if (enabled && !existsSync(activeDir) && existsSync(disabledDir)) {
+      renameSync(disabledDir, activeDir);
+    } else if (!enabled && existsSync(activeDir)) {
+      renameSync(activeDir, disabledDir);
+    }
+  } catch (err) {
+    console.warn(`Failed to rename schema dir for ${serverKey}:`, err);
+  }
+
+  // 5. If disabling, proactively terminate any lingering background processes (e.g. godot-mcp-enhanced)
   if (!enabled && process.platform === 'win32') {
     if (normalized.includes('godot')) {
       void runProcess('powershell', ['-NoProfile', '-Command', `Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" | Where-Object { $_.CommandLine -like "*godot-mcp-enhanced*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`]).catch(() => undefined);
@@ -354,7 +367,10 @@ function updateAntigravityConfigFile(filePath: string, serverKey: string, enable
 
 function getToolSchemasForServer(serverName: string): string[] {
   try {
-    const dir = resolve(antigravitySchemasDir, serverName);
+    let dir = resolve(antigravitySchemasDir, serverName);
+    if (!existsSync(dir)) {
+      dir = resolve(antigravitySchemasDir, `${serverName}.disabled`);
+    }
     if (!existsSync(dir)) return [];
     return readdirSync(dir).filter((f) => f.endsWith('.json')).map((f) => f.replace(/\.json$/, ''));
   } catch {
