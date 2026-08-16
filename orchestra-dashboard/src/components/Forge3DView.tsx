@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   Box, CheckCircle2, Download, Layers,
   Loader2, Palette, RefreshCw, RotateCcw,
@@ -185,44 +186,57 @@ export function Forge3DView({ api }: Forge3DViewProps) {
       currentMeshRef.current = null;
     }
 
-    // Build 3D representation
-    const group = new THREE.Group();
+    if (selectedAsset?.modelUrl) {
+      const loader = new GLTFLoader();
+      loader.load(
+        selectedAsset.modelUrl,
+        (gltf) => {
+          if (!sceneRef.current) return;
+          const root = gltf.scene;
 
-    // Procedural multi-part geometry for showcase
-    const mainGeometry = new THREE.DodecahedronGeometry(1.0, 1);
-    let material: THREE.Material;
+          // Center & scale model to viewport
+          const box = new THREE.Box3().setFromObject(root);
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const scale = maxDim > 0 ? 2.4 / maxDim : 1;
+          root.scale.setScalar(scale);
 
-    if (renderMode === 'wireframe') {
-      material = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true });
-    } else if (renderMode === 'clay') {
-      material = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.5, metalness: 0.1 });
-    } else {
-      material = new THREE.MeshStandardMaterial({
-        color: 0x0284c7,
-        roughness: 0.3,
-        metalness: 0.7,
-      });
+          const center = box.getCenter(new THREE.Vector3());
+          root.position.x = -center.x * scale;
+          root.position.y = -center.y * scale;
+          root.position.z = -center.z * scale;
+
+          root.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const mesh = child as THREE.Mesh;
+              if (renderMode === 'wireframe') {
+                mesh.material = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true });
+              } else if (renderMode === 'clay') {
+                mesh.material = new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.5, metalness: 0.1 });
+              }
+            }
+          });
+
+          sceneRef.current.add(root);
+          currentMeshRef.current = root;
+        },
+        undefined,
+        () => {
+          // Fallback geometric representation if raw file fails to parse
+          const group = new THREE.Group();
+          const mainGeometry = new THREE.DodecahedronGeometry(1.0, 1);
+          const material = renderMode === 'wireframe'
+            ? new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true })
+            : renderMode === 'clay'
+            ? new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.5, metalness: 0.1 })
+            : new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.3, metalness: 0.7 });
+          const mainMesh = new THREE.Mesh(mainGeometry, material);
+          group.add(mainMesh);
+          scene.add(group);
+          currentMeshRef.current = group;
+        }
+      );
     }
-
-    const mainMesh = new THREE.Mesh(mainGeometry, material);
-    group.add(mainMesh);
-
-    if (wireframeOverlay && renderMode !== 'wireframe') {
-      const wireMat = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true, transparent: true, opacity: 0.35 });
-      const wireMesh = new THREE.Mesh(mainGeometry, wireMat);
-      wireMesh.scale.setScalar(1.002);
-      group.add(wireMesh);
-    }
-
-    // Floating ring accent
-    const torusGeo = new THREE.TorusGeometry(1.4, 0.04, 16, 64);
-    const torusMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, roughness: 0.2, metalness: 0.9 });
-    const torus = new THREE.Mesh(torusGeo, torusMat);
-    torus.rotation.x = Math.PI / 3;
-    group.add(torus);
-
-    scene.add(group);
-    currentMeshRef.current = group;
   }, [selectedAsset, renderMode, wireframeOverlay]);
 
   // Mouse Orbit Controls
