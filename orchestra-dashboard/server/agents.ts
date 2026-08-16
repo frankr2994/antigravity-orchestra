@@ -25,24 +25,39 @@ const SEMANTIC_COMMITS_SCHEMA: JsonSchema = { name: 'semantic_commit_slicing', s
 const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
 const GEMMA_MICRO_TASK_SCHEMA: JsonSchema = { name: 'gemma_micro_task_execution', schema: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string', enum: ['overwrite', 'create'] }, content: { type: 'string' } }, required: ['path', 'action', 'content'], additionalProperties: false } }, explanation: { type: 'string' } }, required: ['files', 'explanation'], additionalProperties: false } };
 
-export async function getActiveLmStudioModel(): Promise<string> {
+export async function getLoadedLmStudioModels(): Promise<string[]> {
+  try {
+    const v0Res = await fetch(`${config.lmStudioBaseUrl.replace(/\/v1\/?$/, '')}/api/v0/models`, { signal: AbortSignal.timeout(3000) });
+    if (v0Res.ok) {
+      const body = await v0Res.json() as { data?: Array<{ id?: string; state?: string; type?: string }> };
+      const loaded = body.data
+        ?.filter((item) => item.state === 'loaded' && item.type !== 'embeddings')
+        .map((item) => item.id)
+        .filter(Boolean) as string[];
+      if (loaded && loaded.length > 0) return loaded;
+    }
+  } catch { /* Fallback to v1 endpoint */ }
+
   try {
     const response = await fetch(`${config.lmStudioBaseUrl}/models`, { signal: AbortSignal.timeout(3000) });
     if (response.ok) {
       const body = await response.json() as { data?: Array<{ id?: string }> };
-      const loaded = body.data?.[0]?.id;
-      if (loaded) return loaded;
+      return (body.data?.map((item) => item.id).filter(Boolean) as string[]) || [];
     }
-  } catch { /* fallback to config */ }
+  } catch { /* Offline */ }
+
+  return [];
+}
+
+export async function getActiveLmStudioModel(): Promise<string> {
+  const loaded = await getLoadedLmStudioModels();
+  if (loaded.length > 0) return loaded[0]!;
   return config.lmStudioModel;
 }
 
 export async function lmStudioHealth() {
   try {
-    const response = await fetch(`${config.lmStudioBaseUrl}/models`, { signal: AbortSignal.timeout(4000) });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const body = await response.json() as { data?: Array<{ id?: string }> };
-    const models = body.data?.map((item) => item.id).filter(Boolean) || [];
+    const models = await getLoadedLmStudioModels();
     return { available: true, modelAvailable: models.length > 0, models };
   } catch (error) {
     return { available: false, modelAvailable: false, models: [], error: error instanceof Error ? error.message : String(error) };
