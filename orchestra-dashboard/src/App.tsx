@@ -844,11 +844,13 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
                     <div className="tier-field">
                       <label>Antigravity Model</label>
                       <select value={cfg.antigravityModel} onChange={(e) => updateTier(t.key, 'antigravityModel', e.target.value)}>
-                        <option value="gemini-3.7-flash-high">gemini-3.7-flash-high</option>
-                        <option value="gemini-3.7-flash-medium">gemini-3.7-flash-medium</option>
-                        <option value="gemini-3.7-flash-low">gemini-3.7-flash-low</option>
-                        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                        <option value="gemini-3.7-flash-high">Gemini 3.7 Flash (High)</option>
+                        <option value="gemini-3.7-flash-medium">Gemini 3.7 Flash (Medium)</option>
+                        <option value="gemini-3.7-flash-low">Gemini 3.7 Flash (Low)</option>
+                        <option value="gemini-3.1-pro-high">Gemini 3.1 Pro (High)</option>
+                        <option value="gemini-3.1-pro-low">Gemini 3.1 Pro (Low)</option>
+                        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (Thinking)</option>
+                        <option value="claude-opus-4-6-thinking">Claude Opus 4.6 (Thinking)</option>
                       </select>
                     </div>
                     <div className="tier-field">
