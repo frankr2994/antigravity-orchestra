@@ -12,7 +12,7 @@ type Message = { id: string; taskId: string | null; role: 'user' | 'assistant' |
 type Task = { id: string; projectId: string; sessionId: string; title: string; state: string; classification: string | null; models: string | null; result: string | null; error: string | null; commitSha: string | null; pushStatus: string | null; createdAt: string };
 type TaskEvent = { id: number; taskId: string; agent: string; type: string; payload: Record<string, unknown>; createdAt: string };
 type Stats = { cpu: { load: number; speed: string | null; name: string }; memory: { used: number; total: number; percent: number }; gpu: { load: number | null; name: string; temp: number | null }; timestamp: string };
-type HealthItem = { available?: boolean; version?: string | null; modelAvailable?: boolean; error?: string };
+type HealthItem = { available?: boolean; version?: string | null; modelAvailable?: boolean; models?: string[]; error?: string };
 type Health = Record<string, HealthItem>;
 type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'medium' | 'high'; codexModel: string | null; codexEffort: 'low' | 'medium' | 'high' | null };
 type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
@@ -776,6 +776,7 @@ function McpServersView({ servers, busy, onToggle, onRefresh }: { servers: McpSe
 
 function SettingsView({ settings, health, onSave }: { settings: SettingsData; health: Health; onSave: (value: Partial<SettingsData>) => void }) {
   const [interval, setIntervalValue] = useState(settings.telemetryInterval);
+  const [localModel, setLocalModel] = useState(settings.lmStudioModel);
   const [policy, setPolicy] = useState<QuotaPolicy>(settings.quotaPolicy || {
     tierAbove20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-sol', codexEffort: 'high' },
     tier15to20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-terra', codexEffort: 'high' },
@@ -783,6 +784,8 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
     tier5to10: { antigravityModel: 'gemini-3.7-flash-low', antigravityEffort: 'low', codexModel: 'gpt-5.6-luna', codexEffort: 'low' },
     tierBelow5: { antigravityModel: 'gemini-3.7-flash-low', antigravityEffort: 'low', codexModel: null, codexEffort: null },
   });
+
+  const detectedLmModels = health.lmStudio?.models || [];
 
   const updateTier = (tierKey: keyof QuotaPolicy, field: keyof QuotaTierConfig, value: string | null) => {
     setPolicy((prev) => {
@@ -808,10 +811,54 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
     <section>
       <PageHeader eyebrow="Local configuration & Quota Management" title="Settings" subtitle="Customize real-time telemetry, model routing, and quota tier policies." />
       <div className="settings-grid">
-        <Card title="Local model" icon={<Bot />}>
+        <Card title="Local model (LM Studio)" icon={<Bot />}>
           <Field label="LM Studio URL" value={settings.lmStudioBaseUrl} />
-          <Field label="Model" value={settings.lmStudioModel} />
-          <Field label="Status" value={health.lmStudio?.modelAvailable ? 'Connected and loaded' : 'Unavailable or model not loaded'} />
+          <Field
+            label="Status"
+            value={
+              health.lmStudio?.modelAvailable
+                ? `Connected (${detectedLmModels.length} model${detectedLmModels.length === 1 ? '' : 's'} detected)`
+                : 'Unavailable or no model loaded'
+            }
+          />
+          <div className="form-field" style={{ margin: '8px 0 0 0' }}>
+            <span>Active Model (Auto-detect / Select)</span>
+            {detectedLmModels.length > 0 ? (
+              <select
+                value={localModel}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setLocalModel(val);
+                  onSave({ lmStudioModel: val });
+                }}
+              >
+                {detectedLmModels.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                value={localModel}
+                placeholder="gemma-4-12b-it-qat"
+                onChange={(e) => setLocalModel(e.target.value)}
+                onBlur={() => onSave({ lmStudioModel: localModel })}
+                style={{
+                  border: '1px solid var(--border)',
+                  borderRadius: '6px',
+                  background: 'rgba(0,0,0,.5)',
+                  color: 'var(--text)',
+                  padding: '7px 9px',
+                  fontSize: '11px',
+                }}
+              />
+            )}
+          </div>
+          {detectedLmModels.length > 0 && (
+            <small style={{ color: 'var(--cyan)', fontSize: '10px', marginTop: '6px', display: 'block' }}>
+              ✓ Auto-detected from LM Studio: {localModel || detectedLmModels[0]}
+            </small>
+          )}
         </Card>
         <Card title="Telemetry" icon={<Activity />}>
           <label className="form-field">
@@ -823,7 +870,7 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
               <option value={10000}>10 seconds</option>
             </select>
           </label>
-          <button className="primary" onClick={() => onSave({ telemetryInterval: interval, quotaPolicy: policy })}>Save settings</button>
+          <button className="primary" onClick={() => onSave({ telemetryInterval: interval, quotaPolicy: policy, lmStudioModel: localModel })}>Save settings</button>
         </Card>
       </div>
 
