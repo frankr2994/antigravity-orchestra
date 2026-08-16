@@ -111,10 +111,12 @@ function App() {
       { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
     ],
     codex: [
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Deep Reasoning & Architecture)' },
-      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Implementation & Debug)' },
-      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast Budget Saver)' },
-      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max' },
+      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Flagship Deep Reasoning)' },
+      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Balanced Quality & Implementation)' },
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast / Budget Saver)' },
+      { id: 'gpt-5.6', name: 'GPT-5.6 (Auto-Routed)' },
+      { id: 'gpt-5.4', name: 'GPT-5.4' },
+      { id: 'gpt-4.1', name: 'GPT-4.1' },
     ],
     lmStudio: [],
   });
@@ -1647,10 +1649,12 @@ function SettingsView({
                       <label>Codex Review Model</label>
                       <select value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
                         {(availableModels?.codex || [
-                          { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' },
-                          { id: 'gpt-5.6-terra', name: 'gpt-5.6-terra' },
-                          { id: 'gpt-5.6-luna', name: 'gpt-5.6-luna' },
-                          { id: 'gpt-5.1-codex-max', name: 'gpt-5.1-codex-max' },
+                          { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
+                          { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
+                          { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+                          { id: 'gpt-5.6', name: 'GPT-5.6' },
+                          { id: 'gpt-5.4', name: 'GPT-5.4' },
+                          { id: 'gpt-4.1', name: 'GPT-4.1' },
                         ]).map((m) => (
                           <option key={m.id} value={m.id}>{m.name || m.id}</option>
                         ))}

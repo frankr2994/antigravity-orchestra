@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import si from 'systeminformation';
 import { runProcess, commandAvailable } from './process.js';
 import { lmStudioHealth } from './agents.js';
@@ -75,6 +77,34 @@ export async function getAntigravityModels(): Promise<Array<{ id: string; name: 
     { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)' },
     { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
   ];
+}
+
+export async function getCodexModels(): Promise<Array<{ id: string; name: string }>> {
+  const models: Array<{ id: string; name: string }> = [
+    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Flagship Deep Reasoning)' },
+    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Balanced Quality & Implementation)' },
+    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast / Budget Saver)' },
+    { id: 'gpt-5.6', name: 'GPT-5.6 (Auto-Routed)' },
+    { id: 'gpt-5.4', name: 'GPT-5.4' },
+    { id: 'gpt-4.1', name: 'GPT-4.1' },
+  ];
+
+  try {
+    const home = process.env.USERPROFILE || process.env.HOME || '';
+    const configPath = join(home, '.codex', 'config.toml');
+    if (existsSync(configPath)) {
+      const content = readFileSync(configPath, 'utf8');
+      const match = content.match(/^model\s*=\s*["']([^"']+)["']/m);
+      if (match && match[1]) {
+        const configuredModel = match[1].trim();
+        if (!models.some((m) => m.id === configuredModel)) {
+          models.unshift({ id: configuredModel, name: `${configuredModel} (Configured Default)` });
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  return models;
 }
 
 export async function getUsage() {

@@ -6,7 +6,7 @@ import { Store } from './db.js';
 import { TaskManager } from './tasks.js';
 import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, onboardProject, registerProject } from './projects.js';
 import { createManualCheckpoint, getCommitDiffDetails, getGitStatus, getProjectCheckpoints, pushCurrent, revertToCheckpoint } from './git.js';
-import { getAntigravityModels, getHealth, getStats, getUsage } from './telemetry.js';
+import { getAntigravityModels, getCodexModels, getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
 import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, explainRunHealth, findContinuationRecoveryTask, getInstalledLmStudioModels, loadLmStudioModel, type QuotaPolicy, suggestSteeringGuidance, unloadLmStudioModel } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
@@ -281,16 +281,11 @@ app.post('/api/tasks/:id/suggest-steering', async (req, res, next) => {
 
 app.get('/api/models', async (_req, res, next) => {
   try {
-    const [antigravity, lmStudio] = await Promise.all([
+    const [antigravity, codex, lmStudio] = await Promise.all([
       getAntigravityModels(),
+      getCodexModels(),
       getInstalledLmStudioModels().catch(() => []),
     ]);
-    const codex = [
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Deep Reasoning & Architecture)' },
-      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Implementation & Debug)' },
-      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast Budget Saver)' },
-      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max' },
-    ];
     res.json({ antigravity, codex, lmStudio });
   } catch (error) { next(error); }
 });
