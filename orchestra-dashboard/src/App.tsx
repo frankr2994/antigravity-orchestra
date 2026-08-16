@@ -62,6 +62,19 @@ type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' 
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
 
+function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
+  if (m.displayName) {
+    const quant = m.quantization ? ` · ${m.quantization}` : '';
+    return `${m.displayName}${quant}`;
+  }
+  let clean = m.id.includes('/') ? m.id.split('/').pop()! : m.id;
+  if (clean.includes('@')) clean = clean.split('@')[0];
+  clean = clean.replace(/[-_]+/g, ' ').trim();
+  clean = clean.split(' ').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  const quant = m.quantization ? ` · ${m.quantization}` : '';
+  return `${clean}${quant}`;
+}
+
 function App() {
   const [token, setToken] = useState('');
   const [view, setView] = useState<View>('dashboard');
@@ -83,6 +96,12 @@ function App() {
   const [input, setInput] = useState('');
   const [executionMode, setExecutionMode] = useState<'orchestra' | 'direct'>('orchestra');
   const [directAgent, setDirectAgent] = useState<'gemma' | 'antigravity' | 'codex'>('gemma');
+  const [soloAntigravityModel, setSoloAntigravityModel] = useState<string>('gemini-3.7-flash-high');
+  const [soloAntigravityEffort, setSoloAntigravityEffort] = useState<'low' | 'medium' | 'high'>('high');
+  const [soloCodexModel, setSoloCodexModel] = useState<string>('gpt-5.6-sol');
+  const [soloCodexEffort, setSoloCodexEffort] = useState<'low' | 'medium' | 'high'>('high');
+  const [soloGemmaModel, setSoloGemmaModel] = useState<string>('');
+  const [installedLmStudioModels, setInstalledLmStudioModels] = useState<InstalledLmStudioModel[]>([]);
   const [steerInput, setSteerInput] = useState('');
   const [steerOpen, setSteerOpen] = useState(false);
   const [steerSuggestion, setSteerSuggestion] = useState<string | null>(null);
@@ -143,6 +162,13 @@ function App() {
     } catch { /* ignore */ }
   }, [api]);
 
+  const fetchLmStudioModels = useCallback(async () => {
+    try {
+      const data = await api<{ models: InstalledLmStudioModel[] }>('/api/lmstudio/models');
+      if (data?.models) setInstalledLmStudioModels(data.models);
+    } catch { /* ignore */ }
+  }, [api]);
+
   async function toggleServer(id: string, enabled: boolean) {
     setMcpBusy(true);
     try {
@@ -169,21 +195,22 @@ function App() {
       setToken(data.token); setProjects(data.projects); setTasks(data.tasks); setHealth(data.health); setSettings(data.settings);
       if (data.projects[0]) await activateProject(data.projects[0], data.token);
       void fetchMcpServers();
+      void fetchLmStudioModels();
     }).catch((reason) => setError(reason.message));
     return () => streamRef.current?.close();
     // Initial bootstrap must run only once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchMcpServers]);
+  }, [fetchMcpServers, fetchLmStudioModels]);
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers()])
+    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers(), fetchLmStudioModels()])
       .then(([nextStats, nextHealth, nextUsage, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); setMcp(nextMcp); })
       .catch((reason) => setError(reason.message));
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
     return () => clearInterval(timer);
-  }, [api, fetchMcpServers, settings, token]);
+  }, [api, fetchMcpServers, fetchLmStudioModels, settings, token]);
 
   useEffect(() => {
     if (!monitoredTaskId) { setMonitor(null); setMonitorExplanation(''); return; }
@@ -258,9 +285,27 @@ function App() {
     if (!session || scopeWarning || !input.trim() || activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required')) return;
     const prompt = input.trim(); setInput(''); setError('');
     try {
+      const directModel =
+        executionMode === 'direct'
+          ? directAgent === 'antigravity'
+            ? soloAntigravityModel
+            : directAgent === 'codex'
+            ? soloCodexModel
+            : soloGemmaModel || null
+          : null;
+
+      const directEffort =
+        executionMode === 'direct'
+          ? directAgent === 'antigravity'
+            ? soloAntigravityEffort
+            : directAgent === 'codex'
+            ? soloCodexEffort
+            : null
+          : null;
+
       const created = await api<Task>(`/api/sessions/${session.id}/tasks`, {
         method: 'POST',
-        body: JSON.stringify({ prompt, mode: executionMode, directAgent }),
+        body: JSON.stringify({ prompt, mode: executionMode, directAgent, directModel, directEffort }),
       });
       setMessages((current) => [...current, { id: crypto.randomUUID(), taskId: created.id, role: 'user', agent: 'system', content: prompt, createdAt: new Date().toISOString() }]);
       setTasks((current) => [created, ...current]); setActiveTask(created); setActivity([]); watchTask(created.id);
@@ -521,25 +566,77 @@ function App() {
               onClick={() => { setExecutionMode('direct'); setDirectAgent('gemma'); }}
               title="Direct Solo Chat with Local Gemma (fast, 0 cloud tokens)"
             >
-              <Zap size={13} /> Gemma
+              <Zap size={13} /> Gemma Solo
             </button>
             <button
               type="button"
               className={`mode-pill ${executionMode === 'direct' && directAgent === 'codex' ? 'active' : ''}`}
               onClick={() => { setExecutionMode('direct'); setDirectAgent('codex'); }}
-              title="Direct Solo Consultation with Codex (GPT-5.6 + JetBrains Rider MCP inspection)"
+              title="Direct Solo Consultation with Codex"
             >
-              <ShieldCheck size={13} /> Codex
+              <ShieldCheck size={13} /> Codex Solo
             </button>
             <button
               type="button"
               className={`mode-pill ${executionMode === 'direct' && directAgent === 'antigravity' ? 'active' : ''}`}
               onClick={() => { setExecutionMode('direct'); setDirectAgent('antigravity'); }}
-              title="Direct Solo Chat with Antigravity (Gemini 1M Context read-only inspection)"
+              title="Direct Solo Chat with Antigravity (Gemini read-only inspection)"
             >
-              <Sparkles size={13} /> Antigravity
+              <Sparkles size={13} /> Antigravity Solo
             </button>
           </div>
+
+          {executionMode === 'direct' && directAgent === 'antigravity' && (
+            <div className="solo-model-picker">
+              <span>Model:</span>
+              <select value={soloAntigravityModel} onChange={(e) => setSoloAntigravityModel(e.target.value)}>
+                <option value="gemini-3.7-flash-high">Gemini 3.7 Flash (High Reasoning)</option>
+                <option value="gemini-3.7-flash-medium">Gemini 3.7 Flash (Medium Reasoning)</option>
+                <option value="gemini-3.7-flash-low">Gemini 3.7 Flash (Low Reasoning)</option>
+                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+              </select>
+              <span>Effort:</span>
+              <select value={soloAntigravityEffort} onChange={(e) => setSoloAntigravityEffort(e.target.value as 'low' | 'medium' | 'high')}>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+          )}
+
+          {executionMode === 'direct' && directAgent === 'codex' && (
+            <div className="solo-model-picker">
+              <span>Model:</span>
+              <select value={soloCodexModel} onChange={(e) => setSoloCodexModel(e.target.value)}>
+                <option value="gpt-5.6-sol">GPT-5.6 Sol (Deep Reasoning & Architecture)</option>
+                <option value="gpt-5.6-terra">GPT-5.6 Terra (Implementation & Debug)</option>
+                <option value="gpt-5.6-luna">GPT-5.6 Luna (Fast Budget Saver)</option>
+                <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+              </select>
+              <span>Effort:</span>
+              <select value={soloCodexEffort} onChange={(e) => setSoloCodexEffort(e.target.value as 'low' | 'medium' | 'high')}>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </div>
+          )}
+
+          {executionMode === 'direct' && directAgent === 'gemma' && (
+            <div className="solo-model-picker">
+              <span>Local Model:</span>
+              <select value={soloGemmaModel} onChange={(e) => setSoloGemmaModel(e.target.value)}>
+                <option value="">Auto (Active LM Studio Model)</option>
+                {installedLmStudioModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.state === 'loaded' ? '🟢 ' : '⚪ '}
+                    {formatGenericModelName(m)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
           <div className="composer-box">
             <textarea
               value={input}
@@ -1404,20 +1501,10 @@ function SettingsView({ settings, health, api, onSave }: { settings: SettingsDat
               >
                 {installedModels.map((m) => {
                   const status = m.state === 'loaded' ? '🟢 [LOADED] ' : '⚪ ';
-                  let friendly = m.displayName || m.id;
-                  if (m.id.includes('gemma-4-12b') || m.id.includes('gemma4-v2')) {
-                    friendly = 'Gemma 4 12B (Agentic Composer)';
-                  } else if (m.id.includes('gemma-4-e2b-it-qat') || m.id.includes('gemma-4-E2B_q4_0')) {
-                    friendly = 'Gemma 4 E2B Instruct';
-                  } else if (m.id.includes('gemma-4-e2b-it')) {
-                    friendly = 'Gemma 4 E2B Vision';
-                  } else if (m.id.includes('phi-3.5-mini')) {
-                    friendly = 'Phi 3.5 Mini Instruct';
-                  }
-                  const quant = m.quantization ? ` · ${m.quantization}` : '';
+                  const label = formatGenericModelName(m);
                   return (
                     <option key={m.id} value={m.id} title={m.id}>
-                      {status}{friendly}{quant}
+                      {status}{label}
                     </option>
                   );
                 })}
@@ -1426,7 +1513,7 @@ function SettingsView({ settings, health, api, onSave }: { settings: SettingsDat
               <input
                 type="text"
                 value={localModel}
-                placeholder="gemma-4-12b-it-qat"
+                placeholder="Enter local model ID..."
                 onChange={(e) => setLocalModel(e.target.value)}
                 onBlur={() => onSave({ lmStudioModel: localModel })}
                 style={{

@@ -228,13 +228,20 @@ export class TaskManager {
 
       if (classification.executionMode === 'direct') {
         const directAgent = classification.directAgent || 'gemma';
+        const directModel = (classification as any).directModel || null;
+        const directEffort = (classification as any).directEffort || 'high';
+
+        const chosenAntigravity = directAgent === 'antigravity' ? (directModel || 'gemini-3.7-flash-high') : 'gemini-3.7-flash-high';
+        const chosenCodex = directAgent === 'codex' ? (directModel || 'gpt-5.6-sol') : null;
+        const chosenGemma = directAgent === 'gemma' ? (directModel || activeGemmaModel) : activeGemmaModel;
+
         const directModels: ModelSelection = {
           primary: directAgent,
-          gemma: activeGemmaModel,
-          antigravity: 'gemini-3.7-flash-high',
-          antigravityEffort: 'high',
-          codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
-          codexEffort: directAgent === 'codex' ? 'high' : null,
+          gemma: chosenGemma,
+          antigravity: chosenAntigravity,
+          antigravityEffort: directAgent === 'antigravity' ? directEffort : 'high',
+          codex: chosenCodex,
+          codexEffort: directAgent === 'codex' ? directEffort : null,
         };
         this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(directModels) });
         this.transition(taskId, 'running');
@@ -244,7 +251,7 @@ export class TaskManager {
         const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
 
         if (directAgent === 'gemma') {
-          const model = activeGemmaModel;
+          const model = chosenGemma;
           this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model });
           const [status, commits, diff] = await Promise.all([
             getGitStatus(project.root),
@@ -254,6 +261,7 @@ export class TaskManager {
           const evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff, 35_000);
           const answer = await runGemmaDirectChat({
             root: project.root,
+            model,
             prompt: task.prompt,
             evidence,
             signal,
@@ -265,13 +273,14 @@ export class TaskManager {
         }
 
         if (directAgent === 'codex') {
-          this.emit(taskId, 'codex', 'agent.started', { role: 'direct-chat', model: 'gpt-5.6-terra', effort: 'high' });
+          const model = chosenCodex || 'gpt-5.6-sol';
+          this.emit(taskId, 'codex', 'agent.started', { role: 'direct-chat', model, effort: directEffort });
           const answer = await runCodexAnalysis({
             root: project.root,
             prompt: task.prompt,
             role: 'Direct Architecture & Code Consultation',
-            model: 'gpt-5.6-terra',
-            effort: 'high',
+            model,
+            effort: directEffort,
             riderAvailable: riderFor('codex'),
             signal,
             onOutput: (chunk) => this.stream(taskId, 'codex', chunk),
@@ -283,12 +292,13 @@ export class TaskManager {
         }
 
         if (directAgent === 'antigravity') {
-          this.emit(taskId, 'antigravity', 'agent.started', { role: 'direct-chat', model: 'gemini-3.7-flash-high' });
+          const model = chosenAntigravity;
+          this.emit(taskId, 'antigravity', 'agent.started', { role: 'direct-chat', model });
           const result = await runAntigravity({
             root: project.root,
             prompt: `Answer the user inquiry directly in conversational read-only mode. Do not modify files:\n\n${task.prompt}`,
-            model: 'gemini-3.7-flash-high',
-            effort: 'high',
+            model,
+            effort: directEffort,
             mutating: false,
             conversationId: session.antigravityConversationId,
             riderAvailable: riderFor('antigravity'),

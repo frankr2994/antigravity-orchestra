@@ -256,13 +256,14 @@ export function normalizeEvidenceFile(value: string, root: string, availableFile
 export async function runGemmaDirectChat(input: {
   root: string;
   prompt: string;
+  model?: string | null;
   evidence?: RepositoryEvidence;
   sessionContext?: string;
   signal?: AbortSignal;
   onOutput?: (chunk: string) => void;
   onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void;
 }): Promise<string> {
-  const model = await getActiveLmStudioModel();
+  const model = input.model || await getActiveLmStudioModel();
   const system = `You are Gemma, the local AI software engineering assistant in Antigravity Orchestra. You are in a direct 1-on-1 consultation with the developer.
 The authoritative active repository is: ${input.root}.
 

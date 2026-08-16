@@ -171,10 +171,44 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .action-link { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid rgba(56,189,248,.25); border-radius: 99px; background: rgba(56,189,248,.08); color: var(--cyan); font-size: 9px; cursor: pointer; transition: all .15s ease; }
 .action-link:hover { background: rgba(56,189,248,.18); border-color: rgba(56,189,248,.45); }
 
-.mode-selector { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+.mode-selector { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
 .mode-pill { display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 99px; border: 1px solid var(--border); background: rgba(255,255,255,.03); color: var(--muted); font-size: 10px; font-weight: 500; cursor: pointer; transition: all .15s ease; }
 .mode-pill:hover { background: rgba(255,255,255,.06); color: var(--text); }
 .mode-pill.active { background: rgba(56,189,248,.12); border-color: rgba(56,189,248,.4); color: var(--cyan); font-weight: 600; box-shadow: 0 0 8px rgba(56,189,248,.15); }
+
+.solo-model-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 5px 9px;
+  border-radius: 7px;
+  background: rgba(0,0,0,.35);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.solo-model-picker span {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  font-weight: 600;
+}
+.solo-model-picker select {
+  padding: 3px 7px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 11px;
+  outline: none;
+  max-width: 220px;
+  text-overflow: ellipsis;
+}
+.solo-model-picker select:focus {
+  border-color: rgba(56,189,248,.5);
+}
 
 .composer { padding: 13px 16px 16px; border-top: 1px solid var(--border); }.composer-box { display: flex; align-items: flex-end; gap: 8px; padding: 8px; border: 1px solid var(--border); border-radius: 11px; background: var(--bg); }.composer-box:focus-within { border-color: rgba(56,189,248,.4); box-shadow: 0 0 0 3px rgba(56,189,248,.06); }.composer textarea { flex: 1; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.45; font-size: 12px; }.composer textarea::placeholder { color: #566275; }.send-button { flex: 0 0 auto; display: grid; place-items: center; width: 34px; height: 34px; border: 0; border-radius: 8px; background: var(--blue); color: #03131d; cursor: pointer; }.composer > small { display: block; color: #556174; font-size: 9px; margin: 7px 2px 0; }.stop-button { margin: 0 auto 9px; padding: 6px 9px; background: rgba(251,113,133,.07); color: var(--red); font-size: 10px; }
 

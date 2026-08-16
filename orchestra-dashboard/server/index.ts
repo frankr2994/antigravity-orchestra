@@ -108,6 +108,9 @@ app.post('/api/sessions/:id/tasks', async (req, res, next) => {
     let initialClassification: string | null = null;
     let initialModels: string | null = null;
     if (mode === 'direct') {
+      const directModel = typeof req.body?.directModel === 'string' && req.body.directModel.trim() ? req.body.directModel.trim() : null;
+      const directEffort = req.body?.directEffort === 'low' || req.body?.directEffort === 'medium' || req.body?.directEffort === 'high' ? req.body.directEffort : 'high';
+
       const cls = {
         type: 'question' as const,
         mutating: false,
@@ -116,16 +119,18 @@ app.post('/api/sessions/:id/tasks', async (req, res, next) => {
         codexRole: 'none' as const,
         executionMode: 'direct' as const,
         directAgent,
+        directModel: directModel || undefined,
+        directEffort: directEffort || undefined,
         title: prompt.slice(0, 72),
       };
       initialClassification = JSON.stringify(cls);
       const mod = {
         primary: directAgent,
-        gemma: config.lmStudioModel,
-        antigravity: 'gemini-3.7-flash-high',
-        antigravityEffort: 'high' as const,
-        codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
-        codexEffort: directAgent === 'codex' ? 'high' as const : null,
+        gemma: directAgent === 'gemma' ? (directModel || config.lmStudioModel) : config.lmStudioModel,
+        antigravity: directAgent === 'antigravity' ? (directModel || 'gemini-3.7-flash-high') : 'gemini-3.7-flash-high',
+        antigravityEffort: directAgent === 'antigravity' ? directEffort : 'high' as const,
+        codex: directAgent === 'codex' ? (directModel || 'gpt-5.6-sol') : null,
+        codexEffort: directAgent === 'codex' ? directEffort : null,
       };
       initialModels = JSON.stringify(mod);
     }
