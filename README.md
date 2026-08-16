@@ -38,14 +38,16 @@ The dashboard tracks local system load, agent availability, provider quota, and 
 - Automatically returns blocking findings to Antigravity for repair, using Gemma to distill raw logs into actionable guidance.
 - Resolves review disputes with human-in-the-loop steering, **AI-suggested steering tips ($0 Codex cost)**, or one-click diff approval when repair limits are reached.
 - Provides a **User-Configurable Quota-Tier Routing Policy** with 5 customizable thresholds (`>20%`, `15–20%`, `10–15%`, `5–10%`, `<5%`) to control frontier models, review models, and reasoning effort levels.
+- Features **100% Dynamic Real-Time Model Discovery**: Dynamically queries Google Antigravity models (`agy models`) and OpenAI Codex models (`codex debug models` & `~/.codex/config.toml`), adapting to all supported reasoning tiers (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`) without hardcoded model limits.
 - Features **LM Studio Loaded-Model Auto-Detection** with real-time dropdown selection for actively loaded memory-resident models (`state === 'loaded'`).
+- Features **Time-Travel Checkpoints & Safety Rollback**: Interactive commit and task timeline allowing instant rollbacks to any prior checkpoint with automatic uncommitted change stashing, visual diff inspection, and 1-click chat prompt reloading.
 - Runs bounded project verification before accepting a change set.
 - Slices complex multi-file diffs into atomic semantic conventional commits via Gemma.
 - Creates a handoff entry, commits reviewed files, and pushes through Git.
 - Preserves partial task changes after failures or dashboard restarts.
 - Shows live task health, repair cycles, changed files, context pressure, and quota.
 - Features a **Universal MCP Server Registry** that discovers all configured MCP servers across models and provides 1-click global enable/disable toggles.
-- Supports **Direct Solo Model Mode** (`Gemma Local`, `Codex Direct`, `Antigravity Direct`) for fast Q&A and architecture brainstorming with a 1-click `Implement with Orchestra` promotion action.
+- Supports **Direct Solo Model Mode** (`Gemma Local`, `Codex Solo`, `Antigravity Solo`) with user-selected dynamic models and adaptive reasoning effort for fast Q&A and architecture brainstorming, plus a 1-click `Implement with Orchestra` promotion action.
 - Performs narrowly validated local operations, such as connecting a clean project to an empty GitHub remote, without wasting a three-agent cycle.
 
 ---
@@ -102,12 +104,12 @@ Model selection is adaptive and user-configurable. By default, deep or sensitive
 
 ## Direct Solo Model Mode & 1-Click Promotion
 
-In addition to the autonomous tri-agent pipeline, Orchestra includes a chat mode selector for focused 1-on-1 interaction:
+In addition to the autonomous tri-agent pipeline, Orchestra includes a chat mode selector for focused 1-on-1 interaction with fully dynamic model and reasoning effort selection:
 
 - **🎭 Orchestra (Tri-Agent)**: Full autonomous build, review, verification, and Git push.
-- **⚡ Gemma Local**: Direct, instant conversational response from local Gemma on LM Studio (0 tokens, 0 cloud cost, no file edits, no git commits).
-- **🛡️ Codex Direct**: Direct architectural consultation and deep code review with GPT-5.6 paired with MCP semantic code inspection without mutating files.
-- **✨ Antigravity Direct**: Direct read-only conversational Q&A with Gemini 1M Context for broad codebase research.
+- **⚡ Gemma Solo**: Direct, instant conversational response from local models running in LM Studio (0 cloud tokens, 0 cloud cost, no file edits, no git commits) with real-time active model auto-detection.
+- **🛡️ Codex Solo**: Direct architectural consultation and deep code review with user-selected OpenAI models (`gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`) and adaptive reasoning effort levels (`Low`, `Medium`, `High`, `Xhigh`, `Max`, `Ultra`), paired with MCP semantic code inspection.
+- **✨ Antigravity Solo**: Direct read-only conversational Q&A with Gemini 1M Context (`Gemini 3.7 Flash`, `Gemini 3.1 Pro`, `Claude Sonnet 4.6 Thinking`, etc.) for broad codebase research.
 - **🚀 Implement with Orchestra**: A 1-click button on solo chat messages converts any brainstormed plan into a fully orchestrated implementation and review task.
 
 ---
