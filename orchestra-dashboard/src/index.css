@@ -928,6 +928,168 @@ button:disabled { opacity: .42; cursor: not-allowed; }
   border-radius: 6px;
 }
 
+/* 3D Forge Setup Banner */
+.forge-setup-banner {
+  background: rgba(14, 165, 233, 0.08);
+  border: 1px solid rgba(14, 165, 233, 0.3);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 11px;
+}
+.setup-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue);
+}
+.setup-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.setup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+.setup-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.setup-meta small {
+  color: var(--muted);
+  font-size: 10px;
+}
+.download-progress-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+}
+.progress-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--fg);
+}
+.progress-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--blue);
+  transition: width 0.2s ease;
+}
+
+/* Forge Mode Tabs */
+.forge-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 4px;
+  border-radius: 8px;
+}
+.tab-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.tab-btn.active {
+  background: var(--card);
+  color: var(--fg);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Image Dropzone */
+.image-dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+  cursor: pointer;
+  background: rgba(0, 0, 0, 0.15);
+  transition: all 0.2s ease;
+}
+.image-dropzone:hover {
+  border-color: var(--blue);
+  background: rgba(56, 189, 248, 0.05);
+}
+.dropzone-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+.dropzone-icon {
+  color: var(--blue);
+  margin-bottom: 2px;
+}
+.image-preview-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.image-preview {
+  max-width: 100%;
+  max-height: 140px;
+  border-radius: 6px;
+  object-fit: contain;
+}
+
+/* Floating Concept Card in Viewport */
+.floating-concept-card {
+  position: absolute;
+  top: 56px;
+  right: 16px;
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 10;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+.floating-concept-card span {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--blue);
+  letter-spacing: 0.05em;
+}
+.floating-concept-card img {
+  width: 90px;
+  height: 90px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
 @media (max-width: 1250px) {
   .app-shell { grid-template-columns: 76px minmax(420px, 1fr) 380px; }
   .sidebar { padding-inline: 10px; }.brand { justify-content: center; padding-inline: 0; }.brand div, .nav-button span, .sidebar-project > :not(button):not(.eyebrow) { display: none; }.brand svg { flex: none; }.nav-button { justify-content: center; }.sidebar-project { padding: 8px; }.sidebar-project .eyebrow { display: none; }.sidebar-project button { font-size: 0; padding: 9px; }.sidebar-project button svg { margin: 0; }

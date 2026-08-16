@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { buildConceptGenerationWorkflow, buildTripoSRWorkflow, type ConceptGenParams } from './workflow-loader.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -204,7 +205,6 @@ export async function pollComfyHistory(
         const data = (await res.json()) as Record<string, any>;
         if (data[promptId]) {
           const item = data[promptId];
-          // Check for execution error
           if (item.status?.status_str === 'error') {
             const msgs = item.status.messages || [];
             const errorMsg = msgs.map((m: any) => JSON.stringify(m)).join('; ');
@@ -278,6 +278,40 @@ except Exception as e:
   };
 }
 
+export async function executeConceptGeneration(
+  params: ConceptGenParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildConceptGenerationWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
+
+  const images = history.outputs?.['9']?.images;
+  if (!images || !images.length) {
+    throw new Error('Concept art generation completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Concept image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return {
+    filename,
+    localPath,
+    buffer,
+  };
+}
+
 export async function executeTripoSRGeneration(
   imageName: string,
   options: { geometryResolution?: number; threshold?: number } = {},
@@ -288,29 +322,11 @@ export async function executeTripoSRGeneration(
     throw new Error('ComfyUI installation directory could not be located on this system.');
   }
 
-  const workflow = {
-    '14': {
-      inputs: { model: 'model.ckpt', chunk_size: 8192 },
-      class_type: 'TripoSRModelLoader',
-    },
-    '15': {
-      inputs: { image: imageName },
-      class_type: 'LoadImage',
-    },
-    '12': {
-      inputs: {
-        model: ['14', 0],
-        reference_image: ['15', 0],
-        geometry_resolution: options.geometryResolution || 256,
-        threshold: options.threshold || 25.0,
-      },
-      class_type: 'TripoSRSampler',
-    },
-    '13': {
-      inputs: { mesh: ['12', 0] },
-      class_type: 'TripoSRViewer',
-    },
-  };
+  const workflow = buildTripoSRWorkflow({
+    imageName,
+    geometryResolution: options.geometryResolution,
+    threshold: options.threshold,
+  });
 
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
   const history = await pollComfyHistory(promptId, 90000, endpoint);

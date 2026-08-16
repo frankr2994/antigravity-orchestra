@@ -1,0 +1,30 @@
+{
+  "14": {
+    "inputs": {
+      "model": "model.ckpt",
+      "chunk_size": 8192
+    },
+    "class_type": "TripoSRModelLoader"
+  },
+  "15": {
+    "inputs": {
+      "image": "example.png"
+    },
+    "class_type": "LoadImage"
+  },
+  "12": {
+    "inputs": {
+      "model": ["14", 0],
+      "reference_image": ["15", 0],
+      "geometry_resolution": 256,
+      "threshold": 25.0
+    },
+    "class_type": "TripoSRSampler"
+  },
+  "13": {
+    "inputs": {
+      "mesh": ["12", 0]
+    },
+    "class_type": "TripoSRViewer"
+  }
+}

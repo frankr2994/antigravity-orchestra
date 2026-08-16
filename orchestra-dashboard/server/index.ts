@@ -424,11 +424,30 @@ app.delete('/api/forge3d/assets/:id', (req, res) => {
 
 app.post('/api/forge3d/generate', async (req, res, next) => {
   try {
-    const prompt = String(req.body?.prompt || '').trim();
-    if (!prompt) throw new Error('Prompt is required.');
+    const prompt = typeof req.body?.prompt === 'string' ? req.body.prompt.trim() : undefined;
+    const mode = (req.body?.mode === 'image_to_3d' ? 'image_to_3d' : 'text_to_3d') as 'text_to_3d' | 'image_to_3d';
     const style = String(req.body?.style || 'stylized');
     const autoReview = req.body?.autoReview !== false;
-    const asset = await runForge3DJob(prompt, style, autoReview);
+
+    let imageFilename = typeof req.body?.imageFilename === 'string' ? req.body.imageFilename.trim() : undefined;
+    let imageBuffer: Buffer | undefined;
+
+    if (req.body?.imageBase64 && typeof req.body.imageBase64 === 'string') {
+      const cleanB64 = req.body.imageBase64.replace(/^data:image\/[a-z]+;base64,/, '');
+      imageBuffer = Buffer.from(cleanB64, 'base64');
+      if (!imageFilename) {
+        imageFilename = `upload_${Date.now()}.png`;
+      }
+    }
+
+    const asset = await runForge3DJob({
+      prompt,
+      mode,
+      style,
+      autoReview,
+      imageFilename,
+      imageBuffer,
+    });
     res.status(201).json(asset);
   } catch (error) {
     next(error);

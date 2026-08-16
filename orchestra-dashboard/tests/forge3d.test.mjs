@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
 import { requestGemmaVisionReview, runForge3DJob } from '../dist-server/forge3d.js';
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
+import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
+import { freeComfyMemory } from '../dist-server/gpu-manager.js';
 
 test('ComfyUI installation discovery resolves candidate directories dynamically', () => {
   const installation = findComfyInstallation();
@@ -68,4 +70,33 @@ test('checkForgeDependencies returns structured readiness and dependency statuse
 
 test('getDownloadProgress returns null when idle', () => {
   assert.equal(getDownloadProgress(), null);
+});
+
+test('buildConceptGenerationWorkflow parameterizes JSON template nodes properly', () => {
+  const wf = buildConceptGenerationWorkflow({
+    prompt: 'Dwarven Battleaxe',
+    steps: 25,
+    cfg: 8.0,
+    seed: 42,
+  });
+  assert.ok(wf['6'].inputs.text.includes('Dwarven Battleaxe'));
+  assert.equal(wf['3'].inputs.steps, 25);
+  assert.equal(wf['3'].inputs.cfg, 8.0);
+  assert.equal(wf['3'].inputs.seed, 42);
+});
+
+test('buildTripoSRWorkflow injects image name and geometry resolution', () => {
+  const wf = buildTripoSRWorkflow({
+    imageName: 'test_render.png',
+    geometryResolution: 512,
+    threshold: 30.0,
+  });
+  assert.equal(wf['15'].inputs.image, 'test_render.png');
+  assert.equal(wf['12'].inputs.geometry_resolution, 512);
+  assert.equal(wf['12'].inputs.threshold, 30.0);
+});
+
+test('freeComfyMemory handles unreachable endpoint gracefully', async () => {
+  const result = await freeComfyMemory('http://127.0.0.1:59999');
+  assert.equal(result, false);
 });

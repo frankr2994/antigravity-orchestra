@@ -2,9 +2,9 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
-  Box, CheckCircle2, Download, HardDriveDownload, Layers,
-  Loader2, Palette, RefreshCw, RotateCcw,
-  Sparkles, Trash2, Wand2
+  Box, CheckCircle2, Download, HardDriveDownload, Image as ImageIcon,
+  Layers, Loader2, Palette, RefreshCw, RotateCcw,
+  Sparkles, Trash2, Upload, Wand2
 } from 'lucide-react';
 
 export interface Forge3DReview {
@@ -22,6 +22,7 @@ export interface Forge3DAsset {
   prompt: string;
   refinedPrompt?: string;
   style: string;
+  mode?: 'text_to_3d' | 'image_to_3d';
   modelFormat: 'glb' | 'obj' | 'stl';
   modelPath: string;
   modelUrl: string;
@@ -99,6 +100,7 @@ const STYLE_PRESETS = [
 ];
 
 export function Forge3DView({ api }: Forge3DViewProps) {
+  const [inputMode, setInputMode] = useState<'text_to_3d' | 'image_to_3d'>('text_to_3d');
   const [prompt, setPrompt] = useState('');
   const [selectedStyle, setSelectedStyle] = useState('stylized');
   const [autoReview, setAutoReview] = useState(true);
@@ -113,6 +115,10 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const [error, setError] = useState('');
   const [installingDepId, setInstallingDepId] = useState<string | null>(null);
 
+  // Direct Image Upload State
+  const [uploadedImageBase64, setUploadedImageBase64] = useState<string | null>(null);
+  const [uploadedImageName, setUploadedImageName] = useState<string>('');
+
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -121,6 +127,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const animationFrameRef = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const prevMousePosRef = useRef({ x: 0, y: 0 });
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadStatus = useCallback(async () => {
     try {
@@ -356,22 +363,56 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   };
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadedImageName(file.name);
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setUploadedImageBase64(event.target?.result as string);
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleGenerate = async () => {
-    if (!prompt.trim() || busy) return;
+    if (busy) return;
+    if (inputMode === 'text_to_3d' && !prompt.trim()) return;
+    if (inputMode === 'image_to_3d' && !uploadedImageBase64) {
+      setError('Please select or upload a 2D reference image first.');
+      return;
+    }
+
     setBusy(true);
     setError('');
 
-    const preset = STYLE_PRESETS.find((p) => p.id === selectedStyle);
-    const fullPrompt = `${prompt.trim()}${preset ? preset.promptSuffix : ''}`;
-
     try {
+      let payload: any;
+      if (inputMode === 'text_to_3d') {
+        const preset = STYLE_PRESETS.find((p) => p.id === selectedStyle);
+        const fullPrompt = `${prompt.trim()}${preset ? preset.promptSuffix : ''}`;
+        payload = {
+          mode: 'text_to_3d',
+          prompt: fullPrompt,
+          style: selectedStyle,
+          autoReview,
+        };
+      } else {
+        payload = {
+          mode: 'image_to_3d',
+          imageBase64: uploadedImageBase64,
+          imageFilename: uploadedImageName,
+          autoReview,
+        };
+      }
+
       const created = await api<Forge3DAsset>('/api/forge3d/generate', {
         method: 'POST',
-        body: JSON.stringify({ prompt: fullPrompt, style: selectedStyle, autoReview }),
+        body: JSON.stringify(payload),
       });
       setAssets((current) => [created, ...current]);
       setSelectedAsset(created);
-      setPrompt('');
+      if (inputMode === 'text_to_3d') setPrompt('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -468,30 +509,80 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
         {error && <div className="forge-error-box">{error}</div>}
 
-        {/* Generation Prompt Box */}
-        <div className="forge-form">
-          <label>Describe 3D Asset to Forge</label>
-          <textarea
-            rows={3}
-            placeholder="e.g. Dwarven warhammer with glowing runes, medieval health potion flask, modular sci-fi power generator..."
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            disabled={busy}
-          />
+        {/* Mode Selector Tabs */}
+        <div className="forge-tabs">
+          <button
+            type="button"
+            className={`tab-btn ${inputMode === 'text_to_3d' ? 'active' : ''}`}
+            onClick={() => setInputMode('text_to_3d')}
+          >
+            <Wand2 size={13} /> Text to 3D
+          </button>
+          <button
+            type="button"
+            className={`tab-btn ${inputMode === 'image_to_3d' ? 'active' : ''}`}
+            onClick={() => setInputMode('image_to_3d')}
+          >
+            <ImageIcon size={13} /> Image to 3D
+          </button>
+        </div>
 
-          <label>Art & Topology Style</label>
-          <div className="preset-grid">
-            {STYLE_PRESETS.map((p) => (
-              <button
-                key={p.id}
-                type="button"
-                className={`preset-btn ${selectedStyle === p.id ? 'active' : ''}`}
-                onClick={() => setSelectedStyle(p.id)}
+        {/* Generation Input Box */}
+        <div className="forge-form">
+          {inputMode === 'text_to_3d' ? (
+            <>
+              <label>Describe 3D Asset to Forge</label>
+              <textarea
+                rows={3}
+                placeholder="e.g. Dwarven warhammer with glowing runes, medieval health potion flask, modular sci-fi power generator..."
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                disabled={busy}
+              />
+
+              <label>Art & Topology Style</label>
+              <div className="preset-grid">
+                {STYLE_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    type="button"
+                    className={`preset-btn ${selectedStyle === p.id ? 'active' : ''}`}
+                    onClick={() => setSelectedStyle(p.id)}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <>
+              <label>Reference 2D Concept Image</label>
+              <div
+                className="image-dropzone"
+                onClick={() => fileInputRef.current?.click()}
               >
-                {p.name}
-              </button>
-            ))}
-          </div>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept="image/png,image/jpeg,image/webp"
+                  style={{ display: 'none' }}
+                  onChange={handleFileSelect}
+                />
+                {uploadedImageBase64 ? (
+                  <div className="image-preview-container">
+                    <img src={uploadedImageBase64} alt="Upload preview" className="image-preview" />
+                    <small>{uploadedImageName}</small>
+                  </div>
+                ) : (
+                  <div className="dropzone-placeholder">
+                    <Upload size={24} className="dropzone-icon" />
+                    <span>Click or drag 2D image here</span>
+                    <small>PNG, JPG, WEBP (Neutral background recommended)</small>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
 
           <label className="checkbox-row">
             <input
@@ -505,10 +596,10 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           <button
             className="primary forge-btn"
             onClick={handleGenerate}
-            disabled={busy || !prompt.trim()}
+            disabled={busy || (inputMode === 'text_to_3d' && !prompt.trim()) || (inputMode === 'image_to_3d' && !uploadedImageBase64)}
           >
             {busy ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />}
-            {busy ? 'Forging 3D Mesh & Reviewing...' : 'Forge 3D Asset'}
+            {busy ? 'Reconstructing 3D Mesh on GPU...' : (inputMode === 'text_to_3d' ? 'Forge 3D Asset' : 'Reconstruct from Image')}
           </button>
         </div>
 
@@ -614,6 +705,14 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           onWheel={handleWheel}
           onContextMenu={(e) => e.preventDefault()}
         />
+
+        {/* Floating 2D Concept Thumbnail if available */}
+        {selectedAsset?.previewUrl && (
+          <div className="floating-concept-card" title="2D Reference / Concept Art">
+            <span>2D Concept</span>
+            <img src={selectedAsset.previewUrl} alt="2D Concept" />
+          </div>
+        )}
 
         {/* Bottom Review & Mesh Statistics Overlay */}
         {selectedAsset && (

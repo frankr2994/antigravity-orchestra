@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
-import { executeTripoSRGeneration, getComfyStatus } from './comfy.js';
+import { executeConceptGeneration, executeTripoSRGeneration, findComfyInstallation, getComfyStatus } from './comfy.js';
+import { stageGpuForStep } from './gpu-manager.js';
 
 export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
@@ -19,6 +20,7 @@ export interface Forge3DAsset {
   prompt: string;
   refinedPrompt?: string;
   style: string;
+  mode: 'text_to_3d' | 'image_to_3d';
   modelFormat: 'glb' | 'obj' | 'stl';
   modelPath: string;
   modelUrl: string;
@@ -35,7 +37,8 @@ export interface Forge3DJob {
   id: string;
   prompt: string;
   style: string;
-  status: 'queued' | 'generating_concept' | 'reconstructing_mesh' | 'awaiting_visual_review' | 'evaluating_vision' | 'completed' | 'failed';
+  mode: 'text_to_3d' | 'image_to_3d';
+  status: 'queued' | 'generating_concept' | 'staging_gpu' | 'reconstructing_mesh' | 'awaiting_visual_review' | 'evaluating_vision' | 'completed' | 'failed';
   currentIteration: number;
   maxIterations: number;
   progress: number;
@@ -44,6 +47,15 @@ export interface Forge3DJob {
   error?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface Forge3DGenerateOptions {
+  prompt?: string;
+  imageFilename?: string;
+  imageBuffer?: Buffer;
+  style?: string;
+  autoReview?: boolean;
+  mode?: 'text_to_3d' | 'image_to_3d';
 }
 
 const FORGE_DIR = join(config.dataDir, 'forge3d');
@@ -194,15 +206,24 @@ Respond strictly in valid JSON format:
 }
 
 export async function runForge3DJob(
-  prompt: string,
-  style = 'stylized',
-  _autoReview = true
+  input: string | Forge3DGenerateOptions,
+  styleArg = 'stylized',
+  _autoReviewArg = true
 ): Promise<Forge3DAsset> {
+  const options: Forge3DGenerateOptions = typeof input === 'string'
+    ? { prompt: input, style: styleArg, autoReview: _autoReviewArg, mode: 'text_to_3d' }
+    : { mode: 'text_to_3d', style: 'stylized', autoReview: true, ...input };
+
+  const mode = options.mode || (options.imageFilename ? 'image_to_3d' : 'text_to_3d');
+  const prompt = (options.prompt || '').trim();
+  const style = options.style || 'stylized';
+
   const jobId = randomUUID();
   const job: Forge3DJob = {
     id: jobId,
-    prompt,
+    prompt: prompt || (options.imageFilename ? `Image: ${options.imageFilename}` : '3D Generation'),
     style,
+    mode,
     status: 'queued',
     currentIteration: 1,
     maxIterations: 2,
@@ -214,6 +235,11 @@ export async function runForge3DJob(
   activeJobs.set(jobId, job);
 
   try {
+    const installation = findComfyInstallation();
+    if (!installation) {
+      throw new Error('ComfyUI installation directory not found.');
+    }
+
     const comfy = await getComfyStatus();
     if (!comfy.available) {
       throw new Error(`ComfyUI is not reachable at ${comfy.endpoint}. Please ensure ComfyUI is running.`);
@@ -222,19 +248,61 @@ export async function runForge3DJob(
       throw new Error('ComfyUI is reachable but TripoSR nodes (TripoSRModelLoader / TripoSRSampler) are not loaded.');
     }
 
-    job.status = 'generating_concept';
-    job.progress = 25;
-    job.message = `Engine ready on ${comfy.devices[0]?.name || 'GPU'}. Preparing reconstruction pipeline...`;
-
     const assetId = `forge_${Date.now()}_${randomUUID().slice(0, 6)}`;
-    const assetTitle = prompt.length > 35 ? prompt.slice(0, 32).trim() + '…' : prompt;
+    const assetTitle = prompt.length > 35 ? prompt.slice(0, 32).trim() + '…' : (prompt || 'Reconstructed Mesh');
+    let inputImageForTripo: string;
+    let previewUrl: string | undefined;
+
+    if (mode === 'text_to_3d') {
+      if (!prompt) throw new Error('Prompt is required for Text-to-3D generation.');
+
+      // Check if 2D concept checkpoint exists
+      const sdCkpt = join(installation.comfyCoreDir, 'models', 'checkpoints', 'v1-5-pruned-emaonly.safetensors');
+      if (!existsSync(sdCkpt)) {
+        throw new Error('2D Concept Generator checkpoint (v1-5-pruned-emaonly.safetensors) is not installed. Use the 1-Click Engine Setup in the banner to download it.');
+      }
+
+      job.status = 'generating_concept';
+      job.progress = 20;
+      job.message = 'Generating isolated 2D concept art with Stable Diffusion...';
+
+      const concept = await executeConceptGeneration({ prompt });
+
+      // Save concept PNG to Orchestra forge directory
+      const localConceptPath = join(FORGE_DIR, `${assetId}.png`);
+      writeFileSync(localConceptPath, concept.buffer);
+      previewUrl = `/api/forge3d/assets/${assetId}.png`;
+
+      // Copy to ComfyUI input folder so TripoSR can load it
+      const comfyInputTarget = join(installation.inputDir, concept.filename);
+      copyFileSync(concept.localPath, comfyInputTarget);
+      inputImageForTripo = concept.filename;
+
+      // GPU Memory Staging: Free 2D diffusion weights from VRAM before loading TripoSR
+      job.status = 'staging_gpu';
+      job.progress = 45;
+      job.message = 'Staging VRAM for 3D reconstruction (freeing 2D diffusion weights)...';
+      await stageGpuForStep('reconstruction');
+    } else {
+      // Image to 3D mode
+      if (!options.imageFilename) throw new Error('Image filename is required for Image-to-3D generation.');
+      inputImageForTripo = options.imageFilename;
+
+      if (options.imageBuffer) {
+        const dest = join(installation.inputDir, options.imageFilename);
+        writeFileSync(dest, options.imageBuffer);
+        const localPreview = join(FORGE_DIR, `${assetId}.png`);
+        writeFileSync(localPreview, options.imageBuffer);
+        previewUrl = `/api/forge3d/assets/${assetId}.png`;
+      }
+    }
 
     job.status = 'reconstructing_mesh';
-    job.progress = 50;
-    job.message = 'Executing TripoSR neural reconstruction on GPU...';
+    job.progress = 60;
+    job.message = 'Executing TripoSR neural 3D reconstruction on GPU...';
 
-    // Execute real neural reconstruction
-    const tripoResult = await executeTripoSRGeneration('example.png', { geometryResolution: 256 });
+    // Neural mesh reconstruction
+    const tripoResult = await executeTripoSRGeneration(inputImageForTripo, { geometryResolution: 256 });
     if (!tripoResult.glbBuffer || tripoResult.glbBuffer.length === 0) {
       throw new Error('TripoSR did not produce valid GLB data.');
     }
@@ -248,9 +316,11 @@ export async function runForge3DJob(
       title: assetTitle,
       prompt,
       style,
+      mode,
       modelFormat: 'glb',
       modelPath: glbFilePath,
       modelUrl: `/api/forge3d/assets/${glbFileName}`,
+      previewUrl,
       vertexCount: tripoResult.vertexCount,
       triangleCount: tripoResult.triangleCount,
       fileSizeBytes: tripoResult.glbBuffer.length,
