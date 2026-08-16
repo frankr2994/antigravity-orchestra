@@ -119,7 +119,6 @@ function App() {
     lmStudio: [],
   });
   const [soloAntigravityModel, setSoloAntigravityModel] = useState<string>('gemini-3.7-flash-high');
-  const [soloAntigravityEffort, setSoloAntigravityEffort] = useState<'low' | 'medium' | 'high'>('high');
   const [soloCodexModel, setSoloCodexModel] = useState<string>('gpt-5.6-sol');
   const [soloCodexEffort, setSoloCodexEffort] = useState<'low' | 'medium' | 'high'>('high');
   const [soloGemmaModel, setSoloGemmaModel] = useState<string>('');
@@ -326,7 +325,11 @@ function App() {
       const directEffort =
         executionMode === 'direct'
           ? directAgent === 'antigravity'
-            ? soloAntigravityEffort
+            ? soloAntigravityModel.includes('-low')
+              ? 'low'
+              : soloAntigravityModel.includes('-medium')
+              ? 'medium'
+              : 'high'
             : directAgent === 'codex'
             ? soloCodexEffort
             : null
@@ -622,12 +625,6 @@ function App() {
                 {availableModels.antigravity.map((m) => (
                   <option key={m.id} value={m.id}>{m.name || m.id}</option>
                 ))}
-              </select>
-              <span>Effort:</span>
-              <select value={soloAntigravityEffort} onChange={(e) => setSoloAntigravityEffort(e.target.value as 'low' | 'medium' | 'high')}>
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
               </select>
             </div>
           )}
