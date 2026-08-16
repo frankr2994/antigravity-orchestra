@@ -36,7 +36,9 @@ The dashboard tracks local system load, agent availability, provider quota, and 
 - Sends Codex analysis to Antigravity for implementation.
 - Runs independent Codex review after changes are made.
 - Automatically returns blocking findings to Antigravity for repair, using Gemma to distill raw logs into actionable guidance.
-- Resolves review disputes with human-in-the-loop steering or one-click diff approval when repair limits are reached.
+- Resolves review disputes with human-in-the-loop steering, **AI-suggested steering tips ($0 Codex cost)**, or one-click diff approval when repair limits are reached.
+- Provides a **User-Configurable Quota-Tier Routing Policy** with 5 customizable thresholds (`>20%`, `15–20%`, `10–15%`, `5–10%`, `<5%`) to control frontier models, review models, and reasoning effort levels.
+- Features **LM Studio Loaded-Model Auto-Detection** with real-time dropdown selection for actively loaded memory-resident models (`state === 'loaded'`).
 - Runs bounded project verification before accepting a change set.
 - Slices complex multi-file diffs into atomic semantic conventional commits via Gemma.
 - Creates a handoff entry, commits reviewed files, and pushes through Git.
@@ -94,7 +96,7 @@ Explicit implementation language is normalized deterministically, so a model can
 | Codex | Architecture, root-cause analysis, test design, independent review | Read-only analysis |
 | Orchestra | Task state, project isolation, recovery, verification, commits, pushes, telemetry, universal MCP management | Validated local adapters and dashboard-owned Git finalization |
 
-Model selection is automatic. Deep or sensitive design work can use stronger reasoning profiles; small work can use faster models, and quota pressure may move only non-critical work to a cheaper model. Ordinary implementation reviews use Terra High with a bounded diff-first packet. Orchestra escalates review to Sol High for sensitive requests, high-risk Gemma triage, very large change sets, or repeated repair cycles, with automatic capacity failover. Required design and review roles are not skipped merely to save quota.
+Model selection is adaptive and user-configurable. By default, deep or sensitive design work uses frontier reasoning profiles; lightweight work uses faster models, and quota tiers automatically step down to protect your allowance. Users can fully customize the exact models and reasoning effort levels across 5 remaining quota tiers (`>20%`, `15–20%`, `10–15%`, `5–10%`, `<5%`) directly from the Settings panel. Ordinary implementation reviews use Terra High with a bounded diff-first packet. Orchestra escalates review to Sol High for sensitive requests, high-risk Gemma triage, very large change sets, or repeated repair cycles, with automatic capacity failover.
 
 ---
 
@@ -166,8 +168,7 @@ A short continuation command such as `continue`, `proceed`, or `go ahead` resume
 - Git
 - Google Antigravity CLI (`agy`), authenticated
 - OpenAI Codex CLI, authenticated
-- LM Studio with its OpenAI-compatible server enabled
-- `gemma-4-e2b-it-qat` loaded by default, or `LM_STUDIO_MODEL` set to another tool-capable local model
+- LM Studio with its local server enabled (auto-detects any loaded model, e.g. Gemma 4 12B, Gemma 4 E2B, or custom GGUFs)
 
 ### Optional
 
@@ -180,7 +181,7 @@ A short continuation command such as `continue`, `proceed`, or `go ahead` resume
 ## Quick Start
 
 ### Option 1: Pre-packaged Release
-1. Download `orchestra-v1.0.0-windows-x64.zip` from [GitHub Releases](https://github.com/frankr2994/antigravity-orchestra/releases).
+1. Download the latest release from [GitHub Releases](https://github.com/frankr2994/antigravity-orchestra/releases).
 2. Extract the archive.
 3. Double-click `Start-Orchestra.bat` (or run `.\Start-Orchestra.ps1` in PowerShell).
 
