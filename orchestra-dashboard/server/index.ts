@@ -5,7 +5,7 @@ import { config } from './config.js';
 import { Store } from './db.js';
 import { TaskManager } from './tasks.js';
 import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, onboardProject, registerProject } from './projects.js';
-import { getGitStatus, pushCurrent } from './git.js';
+import { createManualCheckpoint, getCommitDiffDetails, getGitStatus, getProjectCheckpoints, pushCurrent, revertToCheckpoint } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
 import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, explainRunHealth, findContinuationRecoveryTask, getInstalledLmStudioModels, loadLmStudioModel, type QuotaPolicy, suggestSteeringGuidance, unloadLmStudioModel } from './agents.js';
@@ -201,6 +201,42 @@ app.post('/api/tasks/:id/retry-push', async (req, res, next) => {
     const task = requireTask(req.params.id); const project = requireProject(task.projectId);
     const result = await pushCurrent(project.root);
     store.updateTask(task.id, { pushStatus: result.pushed ? 'pushed' : 'unpushed', state: result.pushed ? 'completed' : 'completed_unpushed' });
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/projects/:id/checkpoints', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id);
+    const tasks = store.listTasks(project.id);
+    const result = await getProjectCheckpoints(project.root, tasks);
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.get('/api/projects/:id/checkpoints/:sha/diff', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id);
+    const result = await getCommitDiffDetails(project.root, req.params.sha);
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/projects/:id/checkpoints/create', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id);
+    const message = typeof req.body?.message === 'string' ? req.body.message : 'manual checkpoint';
+    const result = await createManualCheckpoint(project.root, message);
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/projects/:id/checkpoints/:sha/revert', async (req, res, next) => {
+  try {
+    const project = requireProject(req.params.id);
+    const mode = req.body?.mode === 'branch' ? 'branch' : 'rollback';
+    const branchName = typeof req.body?.branchName === 'string' ? req.body.branchName : undefined;
+    const result = await revertToCheckpoint(project.root, req.params.sha, { mode, branchName });
     res.json(result);
   } catch (error) { next(error); }
 });

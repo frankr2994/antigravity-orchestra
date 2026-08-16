@@ -220,6 +220,336 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .mcp-tools-list { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; max-height: 120px; overflow-y: auto; }
 .tool-chip { padding: 2px 6px; border-radius: 5px; background: rgba(0,0,0,.45); border: 1px solid rgba(148,163,184,.12); color: #a5b4fc; font: 9px 'JetBrains Mono', monospace; }
 
+/* Checkpoints Timeline & Revert System */
+.checkpoints-page { display: flex; flex-direction: column; gap: 16px; }
+
+.manual-checkpoint-bar {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: rgba(34,211,238,.06);
+  border: 1px solid rgba(34,211,238,.25);
+}
+.manual-checkpoint-bar input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.5);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.action-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.action-banner.success {
+  background: rgba(74,222,128,.1);
+  border: 1px solid rgba(74,222,128,.3);
+  color: #86efac;
+}
+.action-banner.error {
+  background: rgba(251,113,133,.1);
+  border: 1px solid rgba(251,113,133,.3);
+  color: #fca5a5;
+}
+.action-banner button {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font-size: 16px;
+  cursor: pointer;
+}
+
+.current-head-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.head-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.head-info small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+.branch-tag {
+  color: var(--cyan);
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+}
+.head-stats {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.checkpoint-timeline {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+}
+.checkpoint-node {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 12px;
+  position: relative;
+}
+.timeline-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.rail-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2px solid rgba(148,163,184,.3);
+  display: grid;
+  place-items: center;
+  z-index: 2;
+  margin-top: 14px;
+}
+.rail-dot.active-dot {
+  border-color: var(--green);
+  background: rgba(74,222,128,.15);
+  color: var(--green);
+  box-shadow: 0 0 10px rgba(74,222,128,.5);
+}
+.inner-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(148,163,184,.4);
+}
+.rail-line {
+  flex: 1;
+  width: 2px;
+  background: rgba(148,163,184,.12);
+  margin-top: 4px;
+  margin-bottom: -10px;
+}
+
+.checkpoint-card {
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  margin-bottom: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color .15s ease;
+}
+.checkpoint-node.is-head .checkpoint-card {
+  border-color: rgba(74,222,128,.35);
+  box-shadow: inset 3px 0 var(--green);
+}
+.checkpoint-card:hover {
+  border-color: rgba(56,189,248,.35);
+}
+
+.checkpoint-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.checkpoint-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 200px;
+}
+.head-pill {
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: rgba(74,222,128,.15);
+  color: var(--green);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.checkpoint-message {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.checkpoint-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.cp-sha code {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--cyan);
+  background: rgba(34,211,238,.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.checkpoint-task-badge {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: rgba(0,0,0,.35);
+  border: 1px solid rgba(148,163,184,.08);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.task-tag {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.task-prompt-text {
+  margin: 0;
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.models-tag {
+  color: var(--muted);
+  font-size: 9px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.checkpoint-files-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  flex-wrap: wrap;
+}
+.files-count-label {
+  color: var(--muted);
+}
+.files-chips-list {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.file-chip {
+  padding: 2px 6px;
+  border-radius: 5px;
+  background: rgba(255,255,255,.03);
+  border: 1px solid rgba(148,163,184,.12);
+  color: #e2e8f0;
+  font: 10px 'JetBrains Mono', monospace;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.file-stats {
+  color: var(--green);
+  font-size: 9px;
+}
+.file-chip-more {
+  color: var(--muted);
+  font-size: 10px;
+  padding: 2px 4px;
+}
+
+.checkpoint-actions-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(148,163,184,.06);
+  flex-wrap: wrap;
+}
+.primary-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.revert-btn {
+  color: #fde68a !important;
+  border-color: rgba(251,191,36,.3) !important;
+}
+.revert-btn:hover {
+  background: rgba(251,191,36,.12) !important;
+}
+
+.branch-prompt-box {
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(56,189,248,.07);
+  border: 1px solid rgba(56,189,248,.25);
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.branch-prompt-box input {
+  flex: 1;
+  padding: 6px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: rgba(0,0,0,.5);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.checkpoint-diff-drawer {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #030712;
+  border: 1px solid rgba(148,163,184,.15);
+  max-height: 320px;
+  overflow: auto;
+}
+.diff-code-block {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  line-height: 1.45;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+.diff-loading, .diff-empty {
+  color: var(--muted);
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+}
+
 @media (max-width: 1250px) {
   .app-shell { grid-template-columns: 76px minmax(420px, 1fr) 380px; }
   .sidebar { padding-inline: 10px; }.brand { justify-content: center; padding-inline: 0; }.brand div, .nav-button span, .sidebar-project > :not(button):not(.eyebrow) { display: none; }.brand svg { flex: none; }.nav-button { justify-content: center; }.sidebar-project { padding: 8px; }.sidebar-project .eyebrow { display: none; }.sidebar-project button { font-size: 0; padding: 9px; }.sidebar-project button svg { margin: 0; }

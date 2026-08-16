@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
-import { extractGitHubRemoteUrl, getGitStatus, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
+import { createManualCheckpoint, extractGitHubRemoteUrl, getCommitDiffDetails, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { evaluateRunHealth, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
@@ -605,5 +605,59 @@ test('direct mode classification preserves solo agent execution intent', () => {
   assert.equal(directCodex.executionMode, 'direct');
   assert.equal(directCodex.directAgent, 'codex');
 });
+
+test('getProjectCheckpoints returns structured commits with matching task records and diff details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-checkpoint-test-'));
+  try {
+    spawnSync('git.exe', ['init', '-b', 'main'], { cwd: dir });
+    spawnSync('git.exe', ['config', 'user.name', 'Tester'], { cwd: dir });
+    spawnSync('git.exe', ['config', 'user.email', 'tester@example.com'], { cwd: dir });
+    writeFileSync(join(dir, 'file1.txt'), 'Hello world');
+    spawnSync('git.exe', ['add', 'file1.txt'], { cwd: dir });
+    spawnSync('git.exe', ['commit', '-m', 'feat: initial file'], { cwd: dir });
+
+    const headSha = spawnSync('git.exe', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim();
+
+    const sampleTasks = [{
+      id: 'task-123',
+      projectId: 'proj-1',
+      title: 'Create initial file',
+      commitSha: headSha,
+      models: 'Gemini 3.7 Flash High · GPT-5.6 Terra',
+      state: 'completed',
+    }];
+
+    const result = await getProjectCheckpoints(dir, sampleTasks);
+    assert.equal(result.isDirty, false);
+    assert.equal(result.currentBranch, 'main');
+    assert.ok(result.checkpoints.length >= 1);
+    const firstCp = result.checkpoints[0];
+    assert.equal(firstCp.sha, headSha);
+    assert.equal(firstCp.isHead, true);
+    assert.equal(firstCp.message, 'feat: initial file');
+    assert.equal(firstCp.task?.title, 'Create initial file');
+    assert.equal(firstCp.task?.models, 'Gemini 3.7 Flash High · GPT-5.6 Terra');
+    assert.ok(firstCp.files.some((f) => f.path === 'file1.txt'));
+
+    // Test diff
+    const diff = await getCommitDiffDetails(dir, headSha);
+    assert.ok(diff.stat.includes('file1.txt'));
+    assert.ok(diff.patch.includes('+Hello world'));
+
+    // Test create manual checkpoint
+    writeFileSync(join(dir, 'file2.txt'), 'Second file content');
+    const manualRes = await createManualCheckpoint(dir, 'Save before experiment');
+    assert.equal(manualRes.ok, true);
+    assert.ok(manualRes.sha);
+
+    const updated = await getProjectCheckpoints(dir, sampleTasks);
+    assert.equal(updated.checkpoints.length, 2);
+    assert.equal(updated.checkpoints[0].message, 'checkpoint: Save before experiment');
+    assert.equal(updated.checkpoints[0].isHead, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 
 

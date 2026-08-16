@@ -131,3 +131,155 @@ export function safeCommitTitle(value: string, fallback = 'Update project') {
 export function projectName(root: string) { return basename(root); }
 
 function comparableRemote(value: string) { return value.trim().replace(/\.git$/i, '').replace(/\/$/, '').toLowerCase(); }
+
+export interface CheckpointFile {
+  path: string;
+  added: number;
+  deleted: number;
+}
+
+export interface CheckpointRecord {
+  sha: string;
+  shortSha: string;
+  message: string;
+  author: string;
+  date: string;
+  isHead: boolean;
+  files: CheckpointFile[];
+  task?: {
+    id: string;
+    title: string;
+    state?: string | null;
+    models: string | null;
+    classification: string | null;
+    result: string | null;
+    error: string | null;
+    pushStatus: string | null;
+  } | null;
+}
+
+export async function getProjectCheckpoints(cwd: string, tasks: Array<Record<string, any>> = [], limit = 40): Promise<{ checkpoints: CheckpointRecord[]; currentHead: string | null; currentBranch: string | null; isDirty: boolean }> {
+  const status = await getGitStatus(cwd);
+  if (!status.isGit || !status.root) return { checkpoints: [], currentHead: null, currentBranch: null, isDirty: false };
+
+  const logResult = await git(['log', `-n${limit}`, '--pretty=format:%H%x09%h%x09%an%x09%aI%x09%s'], status.root);
+  if (logResult.code !== 0 || !logResult.stdout.trim()) {
+    return { checkpoints: [], currentHead: status.head, currentBranch: status.branch, isDirty: status.dirty };
+  }
+
+  const lines = logResult.stdout.trim().split(/\r?\n/);
+  const headFull = (await git(['rev-parse', 'HEAD'], status.root).catch(() => ({ stdout: '' }))).stdout.trim();
+
+  const taskMap = new Map<string, Record<string, any>>();
+  for (const t of tasks) {
+    if (t && typeof t.commitSha === 'string' && t.commitSha) {
+      taskMap.set(t.commitSha.toLowerCase(), t);
+      if (t.commitSha.length >= 7) taskMap.set(t.commitSha.slice(0, 7).toLowerCase(), t);
+    }
+  }
+
+  const checkpoints: CheckpointRecord[] = [];
+
+  for (const line of lines) {
+    const [sha, shortSha, author, date, ...rest] = line.split('\t');
+    if (!sha) continue;
+    const message = rest.join('\t');
+
+    const statResult = await git(['show', '--numstat', '--pretty=', sha], status.root, 10_000).catch(() => null);
+    const files: CheckpointFile[] = [];
+    if (statResult?.code === 0 && statResult.stdout.trim()) {
+      for (const statLine of statResult.stdout.trim().split(/\r?\n/)) {
+        const [addStr, delStr, filePath] = statLine.split('\t');
+        if (filePath) {
+          files.push({
+            path: filePath,
+            added: parseInt(addStr, 10) || 0,
+            deleted: parseInt(delStr, 10) || 0,
+          });
+        }
+      }
+    }
+
+    const matchedTask = taskMap.get(sha.toLowerCase()) || taskMap.get(shortSha.toLowerCase()) || null;
+
+    checkpoints.push({
+      sha,
+      shortSha,
+      message: message || 'Checkpoint commit',
+      author: author || 'Developer',
+      date: date || new Date().toISOString(),
+      isHead: sha.toLowerCase() === headFull.toLowerCase(),
+      files,
+      task: matchedTask ? {
+        id: matchedTask.id,
+        title: matchedTask.title,
+        state: matchedTask.state || null,
+        models: matchedTask.models || null,
+        classification: matchedTask.classification || null,
+        result: matchedTask.result || null,
+        error: matchedTask.error || null,
+        pushStatus: matchedTask.pushStatus || null,
+      } : null,
+    });
+  }
+
+  return {
+    checkpoints,
+    currentHead: headFull || status.head,
+    currentBranch: status.branch,
+    isDirty: status.dirty,
+  };
+}
+
+export async function getCommitDiffDetails(cwd: string, sha: string, maxDiffChars = 60_000) {
+  const status = await getGitStatus(cwd);
+  if (!status.isGit || !status.root) throw new Error('Not a git repository.');
+
+  const [statResult, patchResult] = await Promise.all([
+    git(['show', '--stat', sha], status.root),
+    git(['show', '--patch', '--no-color', sha], status.root),
+  ]);
+
+  return {
+    sha,
+    stat: statResult.stdout.slice(0, 5000),
+    patch: patchResult.stdout.slice(0, maxDiffChars),
+  };
+}
+
+export async function revertToCheckpoint(cwd: string, sha: string, options?: { mode?: 'rollback' | 'branch'; branchName?: string }) {
+  const status = await getGitStatus(cwd);
+  if (!status.isGit || !status.root) throw new Error('Not a git repository.');
+
+  let backupStash: string | null = null;
+  if (status.dirty) {
+    const stashMsg = `orchestra-safety-backup-${Date.now()}`;
+    const stashRes = await git(['stash', 'push', '-u', '-m', stashMsg], status.root);
+    if (stashRes.code === 0) backupStash = stashMsg;
+  }
+
+  if (options?.mode === 'branch' && options.branchName) {
+    const safeBranch = options.branchName.trim().replace(/[^a-zA-Z0-9_\-/]/g, '-');
+    const branchRes = await git(['checkout', '-b', safeBranch, sha], status.root);
+    if (branchRes.code !== 0) throw new Error(branchRes.stderr || branchRes.stdout || `Failed to create branch ${safeBranch}`);
+    return { ok: true, mode: 'branch', branch: safeBranch, sha, backupStash };
+  }
+
+  const checkoutRes = await git(['checkout', sha], status.root);
+  if (checkoutRes.code !== 0) throw new Error(checkoutRes.stderr || checkoutRes.stdout || `Failed to checkout ${sha}`);
+
+  return { ok: true, mode: 'rollback', sha, backupStash };
+}
+
+export async function createManualCheckpoint(cwd: string, message: string) {
+  const status = await getGitStatus(cwd);
+  if (!status.isGit || !status.root) throw new Error('Not a git repository.');
+
+  const title = `checkpoint: ${message.trim().slice(0, 60) || 'manual snapshot'}`;
+  await git(['add', '-A'], status.root);
+  const commitRes = await git(['commit', '-m', title, '--allow-empty'], status.root);
+  if (commitRes.code !== 0) throw new Error(commitRes.stderr || commitRes.stdout || 'Failed to create checkpoint commit');
+
+  const head = (await git(['rev-parse', 'HEAD'], status.root)).stdout.trim();
+  return { ok: true, sha: head, title };
+}
