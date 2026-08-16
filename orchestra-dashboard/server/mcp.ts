@@ -2,6 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { runProcess } from './process.js';
+import { getLoadedLmStudioModels } from './agents.js';
 
 const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
 const home = process.env.USERPROFILE || process.cwd();
@@ -410,10 +411,16 @@ function readAntigravityRiderConfig() {
 async function probeGemmaToolCalling() {
   if (gemmaCapabilityCache && Date.now() - gemmaCapabilityCache.at < 5 * 60_000) return gemmaCapabilityCache;
   try {
+    const loadedModels = await getLoadedLmStudioModels();
+    if (loadedModels.length === 0) {
+      gemmaCapabilityCache = { at: Date.now(), available: false, reason: 'No local model is currently loaded in LM Studio.' };
+      return gemmaCapabilityCache;
+    }
+    const modelToProbe = loadedModels[0];
     const response = await fetch(`${config.lmStudioBaseUrl}/chat/completions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: AbortSignal.timeout(15_000),
       body: JSON.stringify({
-        model: config.lmStudioModel, temperature: 0, max_tokens: 40,
+        model: modelToProbe, temperature: 0, max_tokens: 40,
         messages: [{ role: 'system', content: 'Call the supplied health function. Do not answer directly.' }, { role: 'user', content: 'Check Rider bridge health.' }],
         tools: [{ type: 'function', function: { name: 'rider_health_check', description: 'Check Rider MCP bridge health.', parameters: { type: 'object', properties: {}, additionalProperties: false } } }], tool_choice: 'auto',
       }),
@@ -421,7 +428,7 @@ async function probeGemmaToolCalling() {
     if (!response.ok) throw new Error(`LM Studio returned HTTP ${response.status}.`);
     const body = await response.json() as JsonRecord;
     const available = Array.isArray(body.choices?.[0]?.message?.tool_calls) && body.choices[0].message.tool_calls.length > 0;
-    gemmaCapabilityCache = { at: Date.now(), available, reason: available ? null : 'The loaded Gemma model did not emit a tool call.' };
+    gemmaCapabilityCache = { at: Date.now(), available, reason: available ? null : 'The loaded local model did not emit a tool call.' };
   } catch (error) { gemmaCapabilityCache = { at: Date.now(), available: false, reason: error instanceof Error ? error.message : String(error) }; }
   return gemmaCapabilityCache;
 }

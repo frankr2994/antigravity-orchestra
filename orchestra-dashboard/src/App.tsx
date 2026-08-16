@@ -388,7 +388,7 @@ function App() {
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {view === 'tasks' && <Tasks tasks={tasks} projects={projects} onRetryPush={retryPush} onRecover={recoverTask} onRetryTask={retryTask} onStop={cancelTask} onApproveDisputed={approveDisputed} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
-        {view === 'settings' && settings && <SettingsView settings={settings} health={health} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
+        {view === 'settings' && settings && <SettingsView settings={settings} health={health} api={api} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
       </main>
 
       <aside className="chat-panel">
@@ -845,9 +845,28 @@ function McpServersView({ servers, busy, onToggle, onRefresh }: { servers: McpSe
   );
 }
 
-function SettingsView({ settings, health, onSave }: { settings: SettingsData; health: Health; onSave: (value: Partial<SettingsData>) => void }) {
+type InstalledLmStudioModel = {
+  id: string;
+  displayName?: string;
+  publisher?: string;
+  arch?: string;
+  quantization?: string;
+  state: 'loaded' | 'not-loaded';
+  maxContextLength?: number;
+  loadedContextLength?: number;
+  sizeBytes?: number;
+  paramsString?: string;
+  type?: string;
+};
+
+function SettingsView({ settings, health, api, onSave }: { settings: SettingsData; health: Health; api: <T>(path: string, options?: RequestInit) => Promise<T>; onSave: (value: Partial<SettingsData>) => void }) {
   const [interval, setIntervalValue] = useState(settings.telemetryInterval);
   const [localModel, setLocalModel] = useState(settings.lmStudioModel);
+  const [installedModels, setInstalledModels] = useState<InstalledLmStudioModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelActionBusy, setModelActionBusy] = useState(false);
+  const [actionStatus, setActionStatus] = useState<{ text: string; isError: boolean } | null>(null);
+
   const [policy, setPolicy] = useState<QuotaPolicy>(settings.quotaPolicy || {
     tierAbove20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-sol', codexEffort: 'high' },
     tier15to20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-terra', codexEffort: 'high' },
@@ -856,7 +875,75 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
     tierBelow5: { antigravityModel: 'gemini-3.7-flash-low', antigravityEffort: 'low', codexModel: null, codexEffort: null },
   });
 
-  const detectedLmModels = health.lmStudio?.models || [];
+  const fetchInstalledModels = useCallback(async () => {
+    setModelsLoading(true);
+    try {
+      const res = await api<{ models: InstalledLmStudioModel[] }>('/api/lmstudio/models');
+      if (res?.models) {
+        setInstalledModels(res.models);
+        const active = res.models.find((m) => m.state === 'loaded');
+        if (active) {
+          setLocalModel(active.id);
+        } else if (res.models.length > 0) {
+          setLocalModel((prev) => prev || res.models[0].id);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch installed models', err);
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void fetchInstalledModels();
+  }, [fetchInstalledModels]);
+
+  const handleLoadModel = async () => {
+    if (!localModel) return;
+    setModelActionBusy(true);
+    setActionStatus({ text: `Unloading prior models & loading ${localModel} into GPU VRAM…`, isError: false });
+    try {
+      const res = await api<{ ok: boolean; message: string; activeModel?: string }>('/api/lmstudio/load', {
+        method: 'POST',
+        body: JSON.stringify({ modelId: localModel, gpu: 'max' }),
+      });
+      if (res?.ok) {
+        setActionStatus({ text: `✓ Loaded ${localModel} successfully!`, isError: false });
+        onSave({ lmStudioModel: localModel });
+        await fetchInstalledModels();
+      } else {
+        setActionStatus({ text: `Failed: ${res?.message || 'Error loading model.'}`, isError: true });
+      }
+    } catch (err) {
+      setActionStatus({ text: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true });
+    } finally {
+      setModelActionBusy(false);
+    }
+  };
+
+  const handleUnloadModel = async () => {
+    setModelActionBusy(true);
+    setActionStatus({ text: 'Unloading all local models from VRAM…', isError: false });
+    try {
+      const res = await api<{ ok: boolean; message: string }>('/api/lmstudio/unload', {
+        method: 'POST',
+      });
+      if (res?.ok) {
+        setActionStatus({ text: '✓ 100% VRAM freed! Local models unloaded.', isError: false });
+        await fetchInstalledModels();
+      } else {
+        setActionStatus({ text: `Failed: ${res?.message || 'Error unloading model.'}`, isError: true });
+      }
+    } catch (err) {
+      setActionStatus({ text: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true });
+    } finally {
+      setModelActionBusy(false);
+    }
+  };
+
+  const loadedModelCount = installedModels.filter((m) => m.state === 'loaded').length;
+  const activeLoadedModel = installedModels.find((m) => m.state === 'loaded');
 
   const updateTier = (tierKey: keyof QuotaPolicy, field: keyof QuotaTierConfig, value: string | null) => {
     setPolicy((prev) => {
@@ -885,26 +972,34 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
         <Card title="Local model (LM Studio)" icon={<Bot />}>
           <Field label="LM Studio URL" value={settings.lmStudioBaseUrl} />
           <Field
-            label="Status"
+            label="VRAM Status"
             value={
-              health.lmStudio?.modelAvailable
-                ? `Connected (${detectedLmModels.length} model${detectedLmModels.length === 1 ? '' : 's'} detected)`
-                : 'Unavailable or no model loaded'
+              activeLoadedModel
+                ? `🟢 Active: ${activeLoadedModel.displayName || activeLoadedModel.id} (${activeLoadedModel.quantization || 'Q4'})`
+                : '⚪ No model loaded in VRAM'
             }
           />
-          <div className="form-field" style={{ margin: '8px 0 0 0' }}>
-            <span>Active Model (Auto-detect / Select)</span>
-            {detectedLmModels.length > 0 ? (
+          <div className="form-field" style={{ margin: '10px 0 0 0' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+              <span>Select Model from Disk ({installedModels.length} installed)</span>
+              <button type="button" className="action-link" onClick={fetchInstalledModels} disabled={modelsLoading} style={{ fontSize: '10px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <RefreshCw size={10} className={modelsLoading ? 'spin' : ''} /> Refresh Catalog
+              </button>
+            </div>
+            {installedModels.length > 0 ? (
               <select
                 value={localModel}
                 onChange={(e) => {
                   const val = e.target.value;
                   setLocalModel(val);
-                  onSave({ lmStudioModel: val });
                 }}
+                disabled={modelActionBusy}
               >
-                {detectedLmModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
+                {installedModels.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.state === 'loaded' ? '🟢 [LOADED] ' : '⚪ [ON DISK] '}
+                    {m.displayName || m.id} {m.quantization ? `(${m.quantization})` : ''}
+                  </option>
                 ))}
               </select>
             ) : (
@@ -925,10 +1020,32 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
               />
             )}
           </div>
-          {detectedLmModels.length > 0 && (
-            <small style={{ color: 'var(--cyan)', fontSize: '10px', marginTop: '6px', display: 'block' }}>
-              ✓ Auto-detected from LM Studio: {localModel || detectedLmModels[0]}
-            </small>
+
+          <div style={{ display: 'flex', gap: '8px', marginTop: '12px' }}>
+            <button
+              type="button"
+              className="primary compact"
+              onClick={handleLoadModel}
+              disabled={modelActionBusy || !localModel || activeLoadedModel?.id === localModel}
+              style={{ flex: 1 }}
+            >
+              <Zap size={13} /> {modelActionBusy ? 'Loading into VRAM…' : activeLoadedModel?.id === localModel ? 'Model Active in VRAM' : 'Load / Switch Model'}
+            </button>
+            <button
+              type="button"
+              className="secondary compact"
+              onClick={handleUnloadModel}
+              disabled={modelActionBusy || loadedModelCount === 0}
+              title="Unload all models to free 100% GPU VRAM"
+            >
+              <Square size={12} /> Free VRAM
+            </button>
+          </div>
+
+          {actionStatus && (
+            <div style={{ marginTop: '8px', fontSize: '11px', color: actionStatus.isError ? 'var(--red)' : 'var(--cyan)' }}>
+              {actionStatus.text}
+            </div>
           )}
         </Card>
         <Card title="Telemetry" icon={<Activity />}>

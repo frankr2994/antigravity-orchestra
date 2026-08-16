@@ -8,7 +8,7 @@ import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, on
 import { getGitStatus, pushCurrent } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
-import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, explainRunHealth, findContinuationRecoveryTask, type QuotaPolicy, suggestSteeringGuidance } from './agents.js';
+import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, explainRunHealth, findContinuationRecoveryTask, getInstalledLmStudioModels, loadLmStudioModel, type QuotaPolicy, suggestSteeringGuidance, unloadLmStudioModel } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
@@ -235,6 +235,33 @@ app.post('/api/tasks/:id/suggest-steering', async (req, res, next) => {
       reviewBlockers,
     });
     res.json({ suggestion });
+  } catch (error) { next(error); }
+});
+
+app.get('/api/lmstudio/models', async (_req, res, next) => {
+  try {
+    const models = await getInstalledLmStudioModels();
+    res.json({ models });
+  } catch (error) { next(error); }
+});
+
+app.post('/api/lmstudio/load', async (req, res, next) => {
+  try {
+    const modelId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim() : '';
+    if (!modelId) return res.status(400).json({ error: 'modelId is required.' });
+    const result = await loadLmStudioModel(modelId, { gpu: req.body?.gpu, contextLength: req.body?.contextLength });
+    if (result.ok && result.activeModel) {
+      store.setSetting('lmStudioModel', result.activeModel);
+    }
+    res.json(result);
+  } catch (error) { next(error); }
+});
+
+app.post('/api/lmstudio/unload', async (req, res, next) => {
+  try {
+    const modelId = typeof req.body?.modelId === 'string' ? req.body.modelId.trim() : undefined;
+    const result = await unloadLmStudioModel(modelId);
+    res.json(result);
   } catch (error) { next(error); }
 });
 
