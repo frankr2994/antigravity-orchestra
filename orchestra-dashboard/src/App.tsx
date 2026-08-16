@@ -114,9 +114,6 @@ function App() {
       { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Flagship Deep Reasoning)' },
       { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Balanced Quality & Implementation)' },
       { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast / Budget Saver)' },
-      { id: 'gpt-5.6', name: 'GPT-5.6 (Auto-Routed)' },
-      { id: 'gpt-5.4', name: 'GPT-5.4' },
-      { id: 'gpt-4.1', name: 'GPT-4.1' },
     ],
     lmStudio: [],
   });
@@ -1652,9 +1649,6 @@ function SettingsView({
                           { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
                           { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
                           { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
-                          { id: 'gpt-5.6', name: 'GPT-5.6' },
-                          { id: 'gpt-5.4', name: 'GPT-5.4' },
-                          { id: 'gpt-4.1', name: 'GPT-4.1' },
                         ]).map((m) => (
                           <option key={m.id} value={m.id}>{m.name || m.id}</option>
                         ))}

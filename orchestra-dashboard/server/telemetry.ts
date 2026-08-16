@@ -84,9 +84,6 @@ export async function getCodexModels(): Promise<Array<{ id: string; name: string
     { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Flagship Deep Reasoning)' },
     { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Balanced Quality & Implementation)' },
     { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast / Budget Saver)' },
-    { id: 'gpt-5.6', name: 'GPT-5.6 (Auto-Routed)' },
-    { id: 'gpt-5.4', name: 'GPT-5.4' },
-    { id: 'gpt-4.1', name: 'GPT-4.1' },
   ];
 
   try {
