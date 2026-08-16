@@ -416,7 +416,7 @@ function App() {
             </article>
           ))}
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
-          {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>Existing changes detected</strong><p>Gemma can review, hand off, commit, and push them separately before this task starts.</p><button className="primary" onClick={resolveBaseline}>Review and commit baseline</button></div>}
+          {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>External changes detected</strong><p>Uncommitted modifications were detected from outside Orchestra. Gemma can review, summarize in HANDOFF.md, and commit them automatically before this task starts.</p><button className="primary" onClick={resolveBaseline}>Auto-commit baseline with Gemma</button></div>}
           {activeTask?.state === 'recovery_required' && <div className="baseline-card"><CircleAlert /><strong>Partial task changes preserved</strong><p>Resume this same task so Antigravity can finish and Codex can review the complete change set. These files will not be committed as a separate baseline.</p><button className="primary" onClick={() => recoverTask(activeTask)}>Resume and review</button></div>}
           {activeTask?.state === 'review_disputed' && (
             <div className="baseline-card disputed-card">

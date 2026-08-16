@@ -342,9 +342,23 @@ export class TaskManager {
       let status = await getGitStatus(project.root);
       const projectChanges = status.files.filter((file) => !isOrchestraInternalPath(file.path));
       if (classification.mutating && status.isGit && projectChanges.length && !recovery) {
-        this.transition(taskId, 'baseline_required');
-        this.emit(taskId, 'git', 'git.baseline-required', { files: projectChanges, message: 'Existing changes must be reviewed and committed separately before this task can modify the project.' });
-        return;
+        try {
+          const diff = await getDiff(project.root, 35_000);
+          const summary = await summarizeChanges(diff, 'Review and preserve existing working tree modifications before task execution.');
+          appendHandoff(project.root, summary.summary, 'Auto-committed baseline');
+          const updated = await getGitStatus(project.root);
+          const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
+          if (paths.length) {
+            const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore(baseline): preserve existing working tree changes'), summary.summary);
+            this.emit(taskId, 'git', 'git.commit', { kind: 'baseline', sha, title: summary.title, files: paths });
+            this.emit(taskId, 'gemma', 'agent.completed', { phase: 'auto-baseline', sha, summary: summary.summary });
+            status = await getGitStatus(project.root);
+          }
+        } catch {
+          this.transition(taskId, 'baseline_required');
+          this.emit(taskId, 'git', 'git.baseline-required', { files: projectChanges, message: 'Existing external changes must be reviewed and committed separately before this task can modify the project.' });
+          return;
+        }
       }
       if (classification.mutating && status.isGit && projectChanges.length && recovery) {
         this.emit(taskId, 'system', 'task.recovery', { message: 'Continuing from changes owned by this failed task; they will not be committed as a separate baseline.' });
@@ -530,7 +544,7 @@ export class TaskManager {
           progress = implementationChangeState(status.head, await getGitStatus(project.root));
           if (progress === 'committed') throw new Error('Antigravity committed project changes directly during the automatic retry. Orchestra stopped because it cannot safely review and finalize that hidden change set.');
         }
-        if (progress === 'none') throw new Error(`Implementation produced no project file changes after ${maxImplementationRetries + 1} foreground attempts with Gemma and Codex failover guidance. Orchestra exhausted bounded automatic alternatives without a reviewable diff.`);
+        if (progress === 'none') throw new Error(`Implementation produced no project file changes after ${maxImplementationRetries + 1} foreground attempts. Orchestra exhausted bounded automatic alternatives without a reviewable diff.`);
       }
 
       if (!classification.mutating && evidence) agentResult.text = await this.postflight(taskId, project.root, task.prompt, agentResult.text, evidence);
@@ -540,6 +554,16 @@ export class TaskManager {
         if (!afterAgent.isGit) throw new Error('The project stopped being a Git repository during implementation. Orchestra will not accept or finalize unreviewable changes.');
         const agentChanges = afterAgent.files.filter((file) => !isOrchestraInternalPath(file.path));
         if (agentChanges.length) {
+          // Checkpoint initial implementation so changes are safely recorded
+          try {
+            const checkpointDiff = await getDiff(project.root, 35_000);
+            const checkpointSummary = await summarizeChanges(checkpointDiff, task.prompt);
+            const checkpointPaths = agentChanges.map((file) => file.path);
+            const checkpointSha = await commitPaths(project.root, checkpointPaths, safeCommitTitle(checkpointSummary.title, 'feat: implement initial task changes'), checkpointSummary.summary);
+            this.emit(taskId, 'git', 'git.commit', { kind: 'checkpoint', sha: checkpointSha, title: checkpointSummary.title, files: checkpointPaths });
+            this.emit(taskId, 'gemma', 'agent.completed', { phase: 'checkpoint-commit', sha: checkpointSha });
+          } catch { /* proceed to review even if checkpoint commit fails */ }
+
           let previousFindings = '';
           let previousReview = '';
           let previousRepairChanged = true;
