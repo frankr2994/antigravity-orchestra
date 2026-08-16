@@ -12,6 +12,17 @@ export interface ComfySystemDevice {
   vramFree: number;
 }
 
+export interface ComfyInstallation {
+  rootPath: string;
+  pythonPath: string;
+  comfyCoreDir: string;
+  outputDir: string;
+  inputDir: string;
+  modelsDir: string;
+  customNodesDir: string;
+  isPortable: boolean;
+}
+
 export interface ComfyStatus {
   available: boolean;
   endpoint: string;
@@ -22,15 +33,61 @@ export interface ComfyStatus {
   has3DNodes: boolean;
   available3DNodes: string[];
   tripoReady: boolean;
+  installation: ComfyInstallation | null;
   error?: string;
 }
 
-const DEFAULT_COMFY_URL = process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
-const PORTABLE_ROOT = 'F:\\Comfy\\ComfyUI_windows_portable';
-const EMBEDDED_PYTHON = join(PORTABLE_ROOT, 'python_embeded', 'python.exe');
-const COMFY_OUTPUT_DIR = join(PORTABLE_ROOT, 'ComfyUI', 'output');
+export function getComfyUrl(): string {
+  return process.env.COMFYUI_URL || 'http://127.0.0.1:8188';
+}
 
-export async function getComfyStatus(endpoint = DEFAULT_COMFY_URL): Promise<ComfyStatus> {
+export function findComfyInstallation(): ComfyInstallation | null {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  const candidates = [
+    process.env.COMFYUI_PATH,
+    'F:\\Comfy\\ComfyUI_windows_portable',
+    'C:\\ComfyUI_windows_portable',
+    'D:\\ComfyUI_windows_portable',
+    'E:\\ComfyUI_windows_portable',
+    'C:\\ComfyUI',
+    'D:\\ComfyUI',
+    'E:\\ComfyUI',
+    'F:\\ComfyUI',
+    join(home, 'ComfyUI_windows_portable'),
+    join(home, 'ComfyUI'),
+  ].filter((p): p is string => Boolean(p && existsSync(p)));
+
+  for (const root of candidates) {
+    const embeddedPython = join(root, 'python_embeded', 'python.exe');
+    const isPortable = existsSync(embeddedPython);
+    const pythonPath = isPortable ? embeddedPython : (process.platform === 'win32' ? 'python.exe' : 'python3');
+
+    const comfyCoreDir = existsSync(join(root, 'ComfyUI')) ? join(root, 'ComfyUI') : root;
+    const outputDir = join(comfyCoreDir, 'output');
+    const inputDir = join(comfyCoreDir, 'input');
+    const modelsDir = join(comfyCoreDir, 'models');
+    const customNodesDir = join(comfyCoreDir, 'custom_nodes');
+
+    if (existsSync(comfyCoreDir) && (existsSync(modelsDir) || existsSync(customNodesDir))) {
+      return {
+        rootPath: root,
+        pythonPath,
+        comfyCoreDir,
+        outputDir,
+        inputDir,
+        modelsDir,
+        customNodesDir,
+        isPortable,
+      };
+    }
+  }
+
+  return null;
+}
+
+export async function getComfyStatus(endpoint = getComfyUrl()): Promise<ComfyStatus> {
+  const installation = findComfyInstallation();
+
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 3500);
@@ -52,6 +109,7 @@ export async function getComfyStatus(endpoint = DEFAULT_COMFY_URL): Promise<Comf
         has3DNodes: false,
         available3DNodes: [],
         tripoReady: false,
+        installation,
         error: statsRes.status === 'rejected' ? String(statsRes.reason) : `HTTP ${statsRes.value.status}`,
       };
     }
@@ -90,6 +148,7 @@ export async function getComfyStatus(endpoint = DEFAULT_COMFY_URL): Promise<Comf
       has3DNodes: available3DNodes.length > 0,
       available3DNodes: available3DNodes.slice(0, 50),
       tripoReady,
+      installation,
     };
   } catch (error) {
     return {
@@ -100,6 +159,7 @@ export async function getComfyStatus(endpoint = DEFAULT_COMFY_URL): Promise<Comf
       has3DNodes: false,
       available3DNodes: [],
       tripoReady: false,
+      installation,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -107,7 +167,7 @@ export async function getComfyStatus(endpoint = DEFAULT_COMFY_URL): Promise<Comf
 
 export async function submitComfyPrompt(
   workflow: Record<string, any>,
-  endpoint = DEFAULT_COMFY_URL
+  endpoint = getComfyUrl()
 ): Promise<{ promptId: string }> {
   const res = await fetch(`${endpoint}/prompt`, {
     method: 'POST',
@@ -121,13 +181,20 @@ export async function submitComfyPrompt(
   }
 
   const data = (await res.json()) as any;
+  if (data.error) {
+    throw new Error(`ComfyUI prompt error: ${JSON.stringify(data.error)}`);
+  }
+  if (data.node_errors && Object.keys(data.node_errors).length > 0) {
+    throw new Error(`ComfyUI node validation errors: ${JSON.stringify(data.node_errors)}`);
+  }
+
   return { promptId: data.prompt_id };
 }
 
 export async function pollComfyHistory(
   promptId: string,
-  timeoutMs = 60000,
-  endpoint = DEFAULT_COMFY_URL
+  timeoutMs = 90000,
+  endpoint = getComfyUrl()
 ): Promise<any> {
   const startTime = Date.now();
   while (Date.now() - startTime < timeoutMs) {
@@ -135,47 +202,92 @@ export async function pollComfyHistory(
       const res = await fetch(`${endpoint}/history/${promptId}`);
       if (res.ok) {
         const data = (await res.json()) as Record<string, any>;
-        if (data[promptId] && data[promptId].outputs) {
-          return data[promptId];
+        if (data[promptId]) {
+          const item = data[promptId];
+          // Check for execution error
+          if (item.status?.status_str === 'error') {
+            const msgs = item.status.messages || [];
+            const errorMsg = msgs.map((m: any) => JSON.stringify(m)).join('; ');
+            throw new Error(`ComfyUI execution failed: ${errorMsg}`);
+          }
+          if (item.outputs && Object.keys(item.outputs).length > 0) {
+            return item;
+          }
         }
       }
-    } catch {
-      /* ignore transient errors while polling */
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('ComfyUI execution failed')) {
+        throw err;
+      }
     }
     await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error(`ComfyUI execution timed out for prompt ${promptId}`);
+  throw new Error(`ComfyUI execution timed out after ${timeoutMs / 1000}s for prompt ${promptId}`);
 }
 
 export async function convertObjToGlb(
   objPath: string,
   outputGlbPath: string
 ): Promise<{ vertexCount: number; triangleCount: number; sizeBytes: number }> {
-  if (existsSync(EMBEDDED_PYTHON)) {
-    const pyScript = `
+  if (!existsSync(objPath)) {
+    throw new Error(`Cannot convert OBJ to GLB: OBJ file does not exist at ${objPath}`);
+  }
+
+  const installation = findComfyInstallation();
+  const pythonPath = installation?.pythonPath || (process.platform === 'win32' ? 'python.exe' : 'python3');
+
+  const pyScript = `
 import trimesh
 import json
-m = trimesh.load(${JSON.stringify(objPath)})
-m.export(${JSON.stringify(outputGlbPath)})
-print(json.dumps({'vertices': len(m.vertices), 'faces': len(m.faces)}))
+import sys
+
+try:
+    m = trimesh.load(${JSON.stringify(objPath)})
+    if hasattr(m, 'is_empty') and m.is_empty:
+        print(json.dumps({'error': 'Reconstructed mesh is empty (0 vertices/faces)'}))
+        sys.exit(1)
+    m.export(${JSON.stringify(outputGlbPath)})
+    print(json.dumps({'vertices': len(m.vertices), 'faces': len(m.faces)}))
+except Exception as e:
+    print(json.dumps({'error': str(e)}))
+    sys.exit(1)
 `;
-    const { stdout } = await execFileAsync(EMBEDDED_PYTHON, ['-c', pyScript]);
-    const parsed = JSON.parse(stdout.trim().split('\n').pop() || '{}');
-    const glbBuffer = readFileSync(outputGlbPath);
-    return {
-      vertexCount: parsed.vertices || 48000,
-      triangleCount: parsed.faces || 92000,
-      sizeBytes: glbBuffer.length,
-    };
+
+  const { stdout, stderr } = await execFileAsync(pythonPath, ['-c', pyScript]);
+  const lastLine = stdout.trim().split('\n').pop() || '{}';
+  let parsed: any = {};
+  try {
+    parsed = JSON.parse(lastLine);
+  } catch {
+    throw new Error(`Failed to parse Trimesh export output: ${stdout || stderr}`);
   }
-  throw new Error('Embedded Python with trimesh not found for mesh conversion.');
+
+  if (parsed.error) {
+    throw new Error(`Mesh conversion failed: ${parsed.error}`);
+  }
+
+  if (!existsSync(outputGlbPath)) {
+    throw new Error(`Mesh export failed to create GLB at ${outputGlbPath}`);
+  }
+
+  const glbBuffer = readFileSync(outputGlbPath);
+  return {
+    vertexCount: parsed.vertices,
+    triangleCount: parsed.faces,
+    sizeBytes: glbBuffer.length,
+  };
 }
 
 export async function executeTripoSRGeneration(
-  imageName = 'example.png',
+  imageName: string,
   options: { geometryResolution?: number; threshold?: number } = {},
-  endpoint = DEFAULT_COMFY_URL
+  endpoint = getComfyUrl()
 ): Promise<{ glbBuffer: Buffer; vertexCount: number; triangleCount: number; objFilename: string }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
   const workflow = {
     '14': {
       inputs: { model: 'model.ckpt', chunk_size: 8192 },
@@ -201,15 +313,15 @@ export async function executeTripoSRGeneration(
   };
 
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 60000, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
 
   const outputs = history.outputs?.['13']?.mesh;
   if (!outputs || !outputs.length) {
-    throw new Error('TripoSR completed execution without producing mesh output.');
+    throw new Error('TripoSR completed execution without producing any 3D mesh output.');
   }
 
   const objFilename = outputs[0].filename as string;
-  const objPath = join(COMFY_OUTPUT_DIR, objFilename);
+  const objPath = join(installation.outputDir, objFilename);
   const glbPath = objPath.replace(/\.obj$/i, '.glb');
 
   const stats = await convertObjToGlb(objPath, glbPath);

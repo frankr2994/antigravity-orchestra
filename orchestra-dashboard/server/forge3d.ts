@@ -8,6 +8,7 @@ export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
   score: number;
   critique: string;
+  failureType?: 'concept' | 'geometry' | 'texture' | 'none';
   suggestedPromptRefinements?: string;
   reviewedAt: string;
 }
@@ -22,8 +23,8 @@ export interface Forge3DAsset {
   modelPath: string;
   modelUrl: string;
   previewUrl?: string;
-  vertexCount?: number;
-  triangleCount?: number;
+  vertexCount: number;
+  triangleCount: number;
   fileSizeBytes: number;
   review?: Forge3DReview;
   iterations: number;
@@ -34,7 +35,7 @@ export interface Forge3DJob {
   id: string;
   prompt: string;
   style: string;
-  status: 'queued' | 'generating_concept' | 'reconstructing_mesh' | 'vision_review' | 'repairing' | 'completed' | 'failed';
+  status: 'queued' | 'generating_concept' | 'reconstructing_mesh' | 'awaiting_visual_review' | 'evaluating_vision' | 'completed' | 'failed';
   currentIteration: number;
   maxIterations: number;
   progress: number;
@@ -101,45 +102,53 @@ export function getForgeJob(id: string): Forge3DJob | null {
 
 export async function requestGemmaVisionReview(
   prompt: string,
-  imageBase64?: string
+  imagesBase64: string[]
 ): Promise<Forge3DReview> {
+  if (!imagesBase64 || imagesBase64.length === 0) {
+    throw new Error('Gemma vision review requires real rendered viewport captures. Text-only review is disabled to eliminate hallucinated scores.');
+  }
+
   const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
   const model = config.lmStudioModel || 'gemma-4-12b-it-qat';
 
   const systemInstruction = `You are an expert 3D Game Art and Geometric Mesh Quality Inspector.
-Your job is to visually evaluate generated 3D assets against the user's original design request.
+Your job is to visually evaluate rendered multi-angle captures of a generated 3D asset against the user's original design request.
+You are given actual multi-angle views of the 3D model (Front, 3/4 Perspective, Side, Rear, and Clay/Wireframe).
+
 Evaluate:
-1. Adherence to original prompt & concept
-2. Structural integrity & geometric consistency (no warped geometry, proper proportions)
-3. Texture & surface quality (clean material rendering)
+1. Prompt Fidelity: Does the geometry accurately embody "${prompt}"?
+2. 360-Degree Silhouette: Does the rear/side geometry flow naturally or contain unnatural hollows/flattening?
+3. Surface & Topological Quality: Look for warping, disconnected spikes, or bad normals.
 
 Respond strictly in valid JSON format:
 {
   "verdict": "pass" | "needs_repair",
   "score": <0-100 integer score>,
-  "critique": "<2-3 sentence clear assessment of what looks good and any defects>",
+  "critique": "<2-3 sentence honest critique of what is well-reconstructed and any specific geometry defects>",
+  "failureType": "concept" | "geometry" | "texture" | "none",
   "suggestedPromptRefinements": "<specific prompt modifiers to fix any flaws, or empty string if passed>"
 }`;
 
   const userContent: any[] = [
     {
       type: 'text',
-      text: `Original Prompt: "${prompt}"\n\nEvaluate the generated 3D asset. Return only the JSON object.`,
+      text: `Original Prompt: "${prompt}"\n\nInspect the attached multi-angle renders of the reconstructed 3D mesh. Return only the JSON object.`,
     },
   ];
 
-  if (imageBase64) {
+  for (const b64 of imagesBase64) {
     userContent.push({
       type: 'image_url',
-      image_url: { url: `data:image/png;base64,${imageBase64}` },
+      image_url: { url: `data:image/png;base64,${b64}` },
     });
   }
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 20000);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25000);
 
-    const res = await fetch(`${lmStudioUrl}/chat/completions`, {
+  let res: Response;
+  try {
+    res = await fetch(`${lmStudioUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -148,109 +157,46 @@ Respond strictly in valid JSON format:
           { role: 'system', content: systemInstruction },
           { role: 'user', content: userContent },
         ],
-        temperature: 0.2,
+        temperature: 0.1,
       }),
       signal: controller.signal,
     });
+  } catch (err) {
     clearTimeout(timer);
+    throw new Error(`LM Studio vision inspection failed to connect at ${lmStudioUrl}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  clearTimeout(timer);
 
-    if (!res.ok) {
-      return {
-        verdict: 'pass',
-        score: 90,
-        critique: 'Review completed with direct structural verification.',
-        reviewedAt: new Date().toISOString(),
-      };
-    }
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`LM Studio vision review rejected request (HTTP ${res.status}): ${errorText}`);
+  }
 
-    const data = (await res.json()) as any;
-    const rawContent = data.choices?.[0]?.message?.content || '';
-    const cleanJson = rawContent.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
-    const parsed = JSON.parse(cleanJson);
+  const data = (await res.json()) as any;
+  const rawContent = data.choices?.[0]?.message?.content || '';
+  const cleanJson = rawContent.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
 
-    return {
-      verdict: parsed.verdict === 'needs_repair' ? 'needs_repair' : 'pass',
-      score: typeof parsed.score === 'number' ? parsed.score : 88,
-      critique: parsed.critique || 'Asset meets standard quality thresholds.',
-      suggestedPromptRefinements: parsed.suggestedPromptRefinements || '',
-      reviewedAt: new Date().toISOString(),
-    };
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleanJson);
   } catch {
-    return {
-      verdict: 'pass',
-      score: 92,
-      critique: 'Visual geometry verified with healthy silhouette alignment.',
-      reviewedAt: new Date().toISOString(),
-    };
+    throw new Error(`Failed to parse Gemma vision critique JSON: ${rawContent}`);
   }
-}
 
-export function createProceduralPlaceholderGLB(title: string): Buffer {
-  // Generates a minimal valid glTF 2.0 binary cube / geometry
-  const jsonScene = {
-    asset: { version: '2.0', generator: 'Antigravity Orchestra 3D Forge' },
-    scenes: [{ nodes: [0] }],
-    nodes: [{ mesh: 0, name: title }],
-    meshes: [
-      {
-        primitives: [
-          {
-            attributes: { POSITION: 0, NORMAL: 1 },
-            indices: 2,
-            mode: 4,
-          },
-        ],
-      },
-    ],
-    buffers: [{ byteLength: 336 }],
-    bufferViews: [
-      { buffer: 0, byteOffset: 0, byteLength: 144, target: 34962 },
-      { buffer: 0, byteOffset: 144, byteLength: 144, target: 34962 },
-      { buffer: 0, byteOffset: 288, byteLength: 48, target: 34963 },
-    ],
-    accessors: [
-      { bufferView: 0, byteOffset: 0, componentType: 5126, count: 12, type: 'VEC3', max: [1, 1, 1], min: [-1, -1, -1] },
-      { bufferView: 1, byteOffset: 0, componentType: 5126, count: 12, type: 'VEC3' },
-      { bufferView: 2, byteOffset: 0, componentType: 5123, count: 24, type: 'SCALAR' },
-    ],
+  return {
+    verdict: parsed.verdict === 'needs_repair' ? 'needs_repair' : 'pass',
+    score: typeof parsed.score === 'number' ? Math.max(0, Math.min(100, Math.round(parsed.score))) : 0,
+    critique: parsed.critique || 'Visual inspection completed.',
+    failureType: parsed.failureType || 'none',
+    suggestedPromptRefinements: parsed.suggestedPromptRefinements || '',
+    reviewedAt: new Date().toISOString(),
   };
-
-  const jsonText = JSON.stringify(jsonScene);
-  const jsonBuffer = Buffer.from(jsonText, 'utf8');
-  const jsonPadding = (4 - (jsonBuffer.length % 4)) % 4;
-  const totalJsonLength = jsonBuffer.length + jsonPadding;
-
-  const binBuffer = Buffer.alloc(336);
-  const totalBinLength = binBuffer.length;
-
-  const totalLength = 12 + 8 + totalJsonLength + 8 + totalBinLength;
-  const glb = Buffer.alloc(totalLength);
-
-  glb.write('glTF', 0, 4, 'ascii');
-  glb.writeUInt32LE(2, 4); // version
-  glb.writeUInt32LE(totalLength, 8);
-
-  // JSON Chunk
-  glb.writeUInt32LE(totalJsonLength, 12);
-  glb.write('JSON', 16, 4, 'ascii');
-  jsonBuffer.copy(glb, 20);
-  for (let i = 0; i < jsonPadding; i++) {
-    glb[20 + jsonBuffer.length + i] = 0x20;
-  }
-
-  // BIN Chunk
-  const binHeaderOffset = 20 + totalJsonLength;
-  glb.writeUInt32LE(totalBinLength, binHeaderOffset);
-  glb.write('BIN\0', binHeaderOffset + 4, 4, 'ascii');
-  binBuffer.copy(glb, binHeaderOffset + 8);
-
-  return glb;
 }
 
 export async function runForge3DJob(
   prompt: string,
   style = 'stylized',
-  autoReview = true
+  _autoReview = true
 ): Promise<Forge3DAsset> {
   const jobId = randomUUID();
   const job: Forge3DJob = {
@@ -260,8 +206,8 @@ export async function runForge3DJob(
     status: 'queued',
     currentIteration: 1,
     maxIterations: 2,
-    progress: 10,
-    message: 'Probing ComfyUI and LM Studio services...',
+    progress: 5,
+    message: 'Verifying ComfyUI neural 3D engine status...',
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -269,46 +215,33 @@ export async function runForge3DJob(
 
   try {
     const comfy = await getComfyStatus();
+    if (!comfy.available) {
+      throw new Error(`ComfyUI is not reachable at ${comfy.endpoint}. Please ensure ComfyUI is running.`);
+    }
+    if (!comfy.tripoReady) {
+      throw new Error('ComfyUI is reachable but TripoSR nodes (TripoSRModelLoader / TripoSRSampler) are not loaded.');
+    }
+
     job.status = 'generating_concept';
-    job.progress = 30;
-    job.message = comfy.available ? `Connected to ComfyUI (${comfy.devices[0]?.name || 'GPU'})` : 'Operating in direct synthesis mode';
+    job.progress = 25;
+    job.message = `Engine ready on ${comfy.devices[0]?.name || 'GPU'}. Preparing reconstruction pipeline...`;
 
     const assetId = `forge_${Date.now()}_${randomUUID().slice(0, 6)}`;
     const assetTitle = prompt.length > 35 ? prompt.slice(0, 32).trim() + '…' : prompt;
 
     job.status = 'reconstructing_mesh';
-    job.progress = 60;
-    job.message = 'Reconstructing 3D neural mesh with TripoSR...';
+    job.progress = 50;
+    job.message = 'Executing TripoSR neural reconstruction on GPU...';
 
-    let glbBuffer: Buffer;
-    let vertexCount = 144;
-    let triangleCount = 72;
-
-    if (comfy.tripoReady) {
-      try {
-        const tripoResult = await executeTripoSRGeneration('example.png', { geometryResolution: 256 });
-        glbBuffer = tripoResult.glbBuffer;
-        vertexCount = tripoResult.vertexCount;
-        triangleCount = tripoResult.triangleCount;
-      } catch (err) {
-        console.warn('TripoSR inference fallback:', err);
-        glbBuffer = createProceduralPlaceholderGLB(assetTitle);
-      }
-    } else {
-      glbBuffer = createProceduralPlaceholderGLB(assetTitle);
+    // Execute real neural reconstruction
+    const tripoResult = await executeTripoSRGeneration('example.png', { geometryResolution: 256 });
+    if (!tripoResult.glbBuffer || tripoResult.glbBuffer.length === 0) {
+      throw new Error('TripoSR did not produce valid GLB data.');
     }
 
     const glbFileName = `${assetId}.glb`;
     const glbFilePath = join(FORGE_DIR, glbFileName);
-    writeFileSync(glbFilePath, glbBuffer);
-
-    let review: Forge3DReview | undefined;
-    if (autoReview) {
-      job.status = 'vision_review';
-      job.progress = 85;
-      job.message = 'Gemma 12B inspecting visual silhouette and geometry quality...';
-      review = await requestGemmaVisionReview(prompt);
-    }
+    writeFileSync(glbFilePath, tripoResult.glbBuffer);
 
     const asset: Forge3DAsset = {
       id: assetId,
@@ -318,10 +251,9 @@ export async function runForge3DJob(
       modelFormat: 'glb',
       modelPath: glbFilePath,
       modelUrl: `/api/forge3d/assets/${glbFileName}`,
-      vertexCount,
-      triangleCount,
-      fileSizeBytes: glbBuffer.length,
-      review,
+      vertexCount: tripoResult.vertexCount,
+      triangleCount: tripoResult.triangleCount,
+      fileSizeBytes: tripoResult.glbBuffer.length,
       iterations: 1,
       createdAt: new Date().toISOString(),
     };
@@ -330,7 +262,7 @@ export async function runForge3DJob(
 
     job.status = 'completed';
     job.progress = 100;
-    job.message = '3D Asset ready for 3D Viewport & export!';
+    job.message = '3D mesh reconstructed and loaded in viewport!';
     job.asset = asset;
 
     return asset;

@@ -221,19 +221,9 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           currentMeshRef.current = root;
         },
         undefined,
-        () => {
-          // Fallback geometric representation if raw file fails to parse
-          const group = new THREE.Group();
-          const mainGeometry = new THREE.DodecahedronGeometry(1.0, 1);
-          const material = renderMode === 'wireframe'
-            ? new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true })
-            : renderMode === 'clay'
-            ? new THREE.MeshStandardMaterial({ color: 0x94a3b8, roughness: 0.5, metalness: 0.1 })
-            : new THREE.MeshStandardMaterial({ color: 0x0284c7, roughness: 0.3, metalness: 0.7 });
-          const mainMesh = new THREE.Mesh(mainGeometry, material);
-          group.add(mainMesh);
-          scene.add(group);
-          currentMeshRef.current = group;
+        (err) => {
+          console.error('Failed to load GLB mesh in WebGL viewport:', err);
+          setError(`Unable to parse or load 3D GLB model: ${err instanceof Error ? err.message : String(err)}`);
         }
       );
     }
