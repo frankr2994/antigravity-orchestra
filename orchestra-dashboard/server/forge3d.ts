@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlink
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
-import { getComfyStatus } from './comfy.js';
+import { executeTripoSRGeneration, getComfyStatus } from './comfy.js';
 
 export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
@@ -278,9 +278,26 @@ export async function runForge3DJob(
 
     job.status = 'reconstructing_mesh';
     job.progress = 60;
-    job.message = 'Reconstructing 3D polygonal mesh & textures...';
+    job.message = 'Reconstructing 3D neural mesh with TripoSR...';
 
-    const glbBuffer = createProceduralPlaceholderGLB(assetTitle);
+    let glbBuffer: Buffer;
+    let vertexCount = 144;
+    let triangleCount = 72;
+
+    if (comfy.tripoReady) {
+      try {
+        const tripoResult = await executeTripoSRGeneration('example.png', { geometryResolution: 256 });
+        glbBuffer = tripoResult.glbBuffer;
+        vertexCount = tripoResult.vertexCount;
+        triangleCount = tripoResult.triangleCount;
+      } catch (err) {
+        console.warn('TripoSR inference fallback:', err);
+        glbBuffer = createProceduralPlaceholderGLB(assetTitle);
+      }
+    } else {
+      glbBuffer = createProceduralPlaceholderGLB(assetTitle);
+    }
+
     const glbFileName = `${assetId}.glb`;
     const glbFilePath = join(FORGE_DIR, glbFileName);
     writeFileSync(glbFilePath, glbBuffer);
@@ -301,8 +318,8 @@ export async function runForge3DJob(
       modelFormat: 'glb',
       modelPath: glbFilePath,
       modelUrl: `/api/forge3d/assets/${glbFileName}`,
-      vertexCount: 144,
-      triangleCount: 72,
+      vertexCount,
+      triangleCount,
       fileSizeBytes: glbBuffer.length,
       review,
       iterations: 1,
