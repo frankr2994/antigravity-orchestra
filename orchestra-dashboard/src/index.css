@@ -116,13 +116,13 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .tier-badge.tier-critical { background: rgba(249,115,22,.15); color: #fb923c; border: 1px solid rgba(249,115,22,.3); }
 .tier-badge.tier-emergency { background: rgba(239,68,68,.15); color: #f87171; border: 1px solid rgba(239,68,68,.3); }
 .tier-meta small { color: var(--muted); font-size: 10px; }
-.tier-controls { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.tier-controls { display: grid; grid-template-columns: 1.4fr 1.2fr 0.8fr; gap: 10px; }
 .tier-field { display: flex; flex-direction: column; gap: 4px; }
 .tier-field label { font-size: 10px; color: var(--muted); font-weight: 500; }
 .tier-field select { border: 1px solid var(--border); border-radius: 6px; background: rgba(0,0,0,.5); color: var(--text); padding: 6px 8px; font-size: 11px; outline: none; }
 @media (max-width: 960px) {
   .quota-tier-row { grid-template-columns: 1fr; gap: 8px; }
-  .tier-controls { grid-template-columns: 1fr 1fr; }
+  .tier-controls { grid-template-columns: 1fr; }
 }
 .terminal-drawer { margin-top: 14px; padding: 12px; border-radius: 10px; background: rgba(0,0,0,.5); border: 1px solid rgba(148,163,184,.12); font: 10px 'JetBrains Mono', monospace; }
 .terminal-drawer header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; color: var(--muted); }

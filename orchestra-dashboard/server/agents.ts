@@ -436,6 +436,12 @@ export function resolveQuotaTier(policy: QuotaPolicy | undefined, codexRemaining
   return { config: p.tierBelow5, tierName: '<5% quota (Emergency)' };
 }
 
+export function deriveAntigravityEffort(model: string): 'high' | 'medium' | 'low' {
+  if (/-high\b/i.test(model)) return 'high';
+  if (/-low\b/i.test(model)) return 'low';
+  return 'medium';
+}
+
 export function selectModels(classification: TaskClassification, failedAttempts = 0, quotaPolicy?: QuotaPolicy, codexRemaining?: number | null): ModelSelection {
   // Level 1: Lightweight / Read-only questions always use Flash Low with Codex bypassed
   if (classification.codexRole === 'none' && !classification.mutating) {
@@ -447,7 +453,7 @@ export function selectModels(classification: TaskClassification, failedAttempts 
     const tier = resolveQuotaTier(quotaPolicy, codexRemaining);
     return {
       antigravity: tier.config.antigravityModel,
-      antigravityEffort: tier.config.antigravityEffort,
+      antigravityEffort: tier.config.antigravityEffort || deriveAntigravityEffort(tier.config.antigravityModel),
       codex: tier.config.codexModel,
       codexEffort: tier.config.codexEffort,
     };

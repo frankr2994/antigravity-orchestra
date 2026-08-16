@@ -785,13 +785,15 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
   });
 
   const updateTier = (tierKey: keyof QuotaPolicy, field: keyof QuotaTierConfig, value: string | null) => {
-    setPolicy((prev) => ({
-      ...prev,
-      [tierKey]: {
-        ...prev[tierKey],
-        [field]: value === 'none' ? null : value,
-      },
-    }));
+    setPolicy((prev) => {
+      const updatedTier = { ...prev[tierKey], [field]: value === 'none' ? null : value };
+      if (field === 'antigravityModel' && typeof value === 'string') {
+        if (/-high\b/i.test(value)) updatedTier.antigravityEffort = 'high';
+        else if (/-low\b/i.test(value)) updatedTier.antigravityEffort = 'low';
+        else updatedTier.antigravityEffort = 'medium';
+      }
+      return { ...prev, [tierKey]: updatedTier };
+    });
   };
 
   const tiers: Array<{ key: keyof QuotaPolicy; label: string; badge: string; desc: string }> = [
@@ -828,7 +830,7 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
       <div style={{ marginTop: '20px' }}>
         <Card title="Quota-Based Model Routing Policy" icon={<Zap />}>
           <p style={{ color: 'var(--muted)', fontSize: '12px', marginBottom: '14px' }}>
-            Orchestra dynamically shifts model reasoning effort and review profiles as your weekly API quota depletes. Customize the exact models and reasoning effort levels you want running at each remaining quota threshold.
+            Orchestra dynamically shifts model reasoning and review profiles as your weekly API quota depletes. Customize the exact models and reasoning effort levels you want running at each remaining quota threshold.
           </p>
           <div className="quota-tiers-table">
             {tiers.map((t) => {
@@ -851,14 +853,6 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
                         <option value="gemini-3.1-pro-low">Gemini 3.1 Pro (Low)</option>
                         <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (Thinking)</option>
                         <option value="claude-opus-4-6-thinking">Claude Opus 4.6 (Thinking)</option>
-                      </select>
-                    </div>
-                    <div className="tier-field">
-                      <label>Antigravity Effort</label>
-                      <select value={cfg.antigravityEffort} onChange={(e) => updateTier(t.key, 'antigravityEffort', e.target.value)}>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
                       </select>
                     </div>
                     <div className="tier-field">
