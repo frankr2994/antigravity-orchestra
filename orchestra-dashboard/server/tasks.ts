@@ -224,11 +224,13 @@ export class TaskManager {
       if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
       else if (classification.executionMode !== 'direct') this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
 
+      const activeGemmaModel = await getActiveLmStudioModel();
+
       if (classification.executionMode === 'direct') {
         const directAgent = classification.directAgent || 'gemma';
         const directModels: ModelSelection = {
           primary: directAgent,
-          gemma: config.lmStudioModel,
+          gemma: activeGemmaModel,
           antigravity: 'gemini-3.7-flash-high',
           antigravityEffort: 'high',
           codex: directAgent === 'codex' ? 'gpt-5.6-terra' : null,
@@ -242,7 +244,7 @@ export class TaskManager {
         const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
 
         if (directAgent === 'gemma') {
-          const model = await getActiveLmStudioModel();
+          const model = activeGemmaModel;
           this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model });
           const [status, commits, diff] = await Promise.all([
             getGitStatus(project.root),
@@ -301,14 +303,14 @@ export class TaskManager {
       }
 
       if (!recovery && classification.localOperation === 'connect_git_remote') {
-        const localModels: ModelSelection = { ...selectModels(classification), primary: 'gemma', gemma: config.lmStudioModel, codex: null, codexEffort: null };
+        const localModels: ModelSelection = { ...selectModels(classification), primary: 'gemma', gemma: activeGemmaModel, codex: null, codexEffort: null };
         this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(localModels) });
         this.transition(taskId, 'preflight');
         if (project.onboardingStatus === 'scope_warning') throw new Error('The selected directory contains nested Git repositories. Select the specific repository you want to connect.');
         const remoteUrl = findRecentGitHubUrl(this.store, session.id, task.prompt);
         if (!remoteUrl) throw new Error('Gemma identified a Git remote connection request, but no valid HTTPS GitHub repository URL was found in the recent conversation.');
         this.transition(taskId, 'running');
-        this.emit(taskId, 'gemma', 'agent.started', { phase: 'local-operation', operation: 'connect_git_remote', model: config.lmStudioModel });
+        this.emit(taskId, 'gemma', 'agent.started', { phase: 'local-operation', operation: 'connect_git_remote', model: activeGemmaModel });
         const connected = await connectGitHubRemote(project.root, remoteUrl);
         this.store.updateTask(taskId, { commitSha: connected.head, pushStatus: 'pushed' });
         this.store.createGitOperation(project.id, taskId, 'connect_remote', connected.head, connected.branch, 'pushed', null);
@@ -318,7 +320,7 @@ export class TaskManager {
         this.complete(taskId, `Connected this project to ${connected.remote} as \`origin\` and pushed \`${connected.branch}\` at commit \`${connected.head}\`.`, 'gemma');
         return;
       }
-      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: config.lmStudioModel };
+      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: activeGemmaModel };
       const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
       const routingReasons: string[] = [];
       const antigravityRemaining = minimumRemaining(antigravityAccount);

@@ -746,8 +746,9 @@ function SettingsView({ settings, health, onSave }: { settings: SettingsData; he
 
 function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[]; models: Record<string, string> | null }) {
   const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.provider-recovery', 'task.model-takeover', 'task.review-disputed', 'task.steer', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'warning'].includes(event.type)).slice(-8);
-  const primaryModel = models?.primary === 'gemma' ? models.gemma : models?.antigravity;
-  return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
+  const rawPrimary = models?.primary === 'gemma' ? models.gemma : models?.antigravity;
+  const primaryModel = rawPrimary ? (rawPrimary.includes('/') ? rawPrimary.split('/').pop() : rawPrimary) : '';
+  return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small title={rawPrimary}>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
 }
 
 function Metric({ icon, label, value, detail, percent, color }: { icon: React.ReactNode; label: string; value: string; detail: string; percent: number; color: string }) { return <article className="metric-card"><div className={`metric-icon ${color}`}>{icon}</div><div className="metric-label">{label}</div><strong>{value}</strong><div className="meter"><span className={color} style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div><small>{detail}</small></article>; }
