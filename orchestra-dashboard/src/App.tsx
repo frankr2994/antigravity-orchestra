@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, Bookmark, Bot, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
-  Gauge, GitBranch, GitCommit, GitFork, History, Hexagon, MemoryStick, MessageSquare, Plus, RefreshCw,
-  RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles, Square, Terminal, Trash2, UploadCloud, Wrench, Zap,
+  Activity, Bookmark, Bot, Check, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
+  Gauge, GitBranch, GitCommit, GitFork, History, Hexagon, MemoryStick, MessageSquare,
+  Pencil, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
+  Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
 
 type View = 'dashboard' | 'projects' | 'checkpoints' | 'tasks' | 'mcp' | 'settings';
@@ -140,6 +141,8 @@ function App() {
   const [monitorExplanation, setMonitorExplanation] = useState('');
   const [monitorQuestion, setMonitorQuestion] = useState('');
   const [monitorBusy, setMonitorBusy] = useState(false);
+  const [editingSessionTitle, setEditingSessionTitle] = useState(false);
+  const [sessionTitleDraft, setSessionTitleDraft] = useState('');
   const streamRef = useRef<EventSource | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const tokenRef = useRef('');
@@ -301,8 +304,52 @@ function App() {
   }
 
   async function selectSession(next: Session) {
+    setEditingSessionTitle(false);
     await api(`/api/sessions/${next.id}/activate`, { method: 'POST', body: '{}' });
     setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); await restoreProjectTask(next.projectId);
+  }
+
+  async function renameSession(sessionId: string, newTitle: string) {
+    const trimmed = newTitle.trim();
+    if (!trimmed) return;
+    try {
+      setError('');
+      const updated = await api<Session>(`/api/sessions/${sessionId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ title: trimmed }),
+      });
+      setSessions((current) => current.map((s) => (s.id === sessionId ? updated : s)));
+      if (session?.id === sessionId) setSession(updated);
+      setEditingSessionTitle(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  async function deleteCurrentSession(sessionId: string) {
+    if (!project) return;
+    if (sessions.length <= 1) {
+      if (window.confirm('Clear messages and reset this conversation?')) {
+        await renameSession(sessionId, 'New conversation');
+        setMessages([]);
+        setActivity([]);
+      }
+      return;
+    }
+    if (!window.confirm('Are you sure you want to delete this conversation?')) return;
+    try {
+      setError('');
+      await api(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+      const remaining = sessions.filter((s) => s.id !== sessionId);
+      setSessions(remaining);
+      if (remaining.length > 0) {
+        await selectSession(remaining[0]);
+      } else {
+        await newSession();
+      }
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
   }
 
   async function restoreProjectTask(projectId: string) {
@@ -347,6 +394,13 @@ function App() {
       });
       setMessages((current) => [...current, { id: crypto.randomUUID(), taskId: created.id, role: 'user', agent: 'system', content: prompt, createdAt: new Date().toISOString() }]);
       setTasks((current) => [created, ...current]); setActiveTask(created); setActivity([]); watchTask(created.id);
+      if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
+        void api<Session[]>(`/api/projects/${session.projectId}/sessions`).then((updatedSessions) => {
+          setSessions(updatedSessions);
+          const current = updatedSessions.find((s) => s.id === session.id);
+          if (current) setSession(current);
+        }).catch(() => undefined);
+      }
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
 
@@ -499,12 +553,79 @@ function App() {
           <div><span className="eyebrow">Project-scoped workspace</span><strong><MessageSquare size={17} /> Tri-Agent Chat</strong></div>
           <button className="icon-button" title="New conversation" onClick={newSession} disabled={!project}><Plus size={18} /></button>
         </header>
-        <div className="session-row">
-          <select value={session?.id || ''} onChange={(event) => { const next = sessions.find((item) => item.id === event.target.value); if (next) void selectSession(next); }} disabled={!sessions.length}>
-            {!sessions.length && <option>Select a project</option>}
-            {sessions.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
-          </select>
-        </div>
+        {editingSessionTitle && session ? (
+          <div className="session-row editing">
+            <input
+              type="text"
+              className="session-title-input"
+              value={sessionTitleDraft}
+              onChange={(e) => setSessionTitleDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void renameSession(session.id, sessionTitleDraft);
+                if (e.key === 'Escape') setEditingSessionTitle(false);
+              }}
+              placeholder="Conversation title..."
+              autoFocus
+            />
+            <div className="session-actions">
+              <button
+                className="icon-button mini success"
+                title="Save title (Enter)"
+                onClick={() => renameSession(session.id, sessionTitleDraft)}
+              >
+                <Check size={13} />
+              </button>
+              <button
+                className="icon-button mini"
+                title="Cancel (Esc)"
+                onClick={() => setEditingSessionTitle(false)}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="session-row">
+            <div className="session-select-wrapper">
+              <select
+                value={session?.id || ''}
+                onChange={(event) => {
+                  const next = sessions.find((item) => item.id === event.target.value);
+                  if (next) void selectSession(next);
+                }}
+                disabled={!sessions.length}
+              >
+                {!sessions.length && <option>Select a project</option>}
+                {sessions.map((item) => (
+                  <option key={item.id} value={item.id}>
+                    {item.title}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {session && (
+              <div className="session-actions">
+                <button
+                  className="icon-button mini"
+                  title="Rename conversation"
+                  onClick={() => {
+                    setSessionTitleDraft(session.title);
+                    setEditingSessionTitle(true);
+                  }}
+                >
+                  <Pencil size={13} />
+                </button>
+                <button
+                  className="icon-button mini danger"
+                  title="Delete conversation"
+                  onClick={() => deleteCurrentSession(session.id)}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         <div className="messages" ref={messagesRef}>
           {!project && <Empty icon={<FolderOpen />} title="Choose a project" text="Every conversation and agent process is pinned to a selected directory." />}
           {project && messages.length === 0 && <Empty icon={<Bot />} title={`Ready in ${project.name}`} text="Describe what you want done. Model selection and agent delegation are automatic." />}

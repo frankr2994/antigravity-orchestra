@@ -124,7 +124,15 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 
 .chat-panel { min-width: 0; min-height: 0; height: 100%; overflow: hidden; display: flex; flex-direction: column; border-left: 1px solid var(--border); }
 .chat-header { min-height: 76px; display: flex; align-items: center; justify-content: space-between; padding: 17px 20px; border-bottom: 1px solid var(--border); }.chat-header strong { display: flex; align-items: center; gap: 8px; }.chat-header .eyebrow { margin-bottom: 5px; }
-.session-row { padding: 11px 15px; border-bottom: 1px solid var(--border); }.session-row select { width: 100%; font-size: 11px; }
+.session-row { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: rgba(255, 255, 255, 0.015); }
+.session-select-wrapper { flex: 1; min-width: 0; }
+.session-row select { width: 100%; font-size: 11px; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.session-title-input { flex: 1; min-width: 0; padding: 5px 8px; font-size: 11px; font-weight: 500; background: var(--bg); border: 1px solid var(--blue); border-radius: 6px; color: var(--fg); outline: none; }
+.session-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.icon-button.mini { width: 26px; height: 26px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--muted); cursor: pointer; transition: all 0.15s ease; }
+.icon-button.mini:hover { background: rgba(255, 255, 255, 0.08); color: var(--fg); border-color: rgba(255, 255, 255, 0.2); }
+.icon-button.mini.danger:hover { color: var(--red); border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.1); }
+.icon-button.mini.success:hover { color: var(--green); border-color: rgba(34, 197, 94, 0.4); background: rgba(34, 197, 94, 0.1); }
 .messages { flex: 1 1 0; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 18px; display: flex; flex-direction: column; gap: 14px; }
 .messages > .empty { flex: 1; }
 .message { display: flex; flex-direction: column; min-width: 0; max-width: 90%; }.message > span { color: var(--muted); font-size: 9px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase; margin: 0 5px 5px; }.message p { min-width: 0; max-width: 100%; margin: 0; padding: 11px 13px; border: 1px solid var(--border); border-radius: 12px 12px 12px 3px; background: var(--card); font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }.message.user { align-self: flex-end; }.message.user > span { text-align: right; }.message.user p { border: 0; border-radius: 12px 12px 3px 12px; background: linear-gradient(135deg, #0369a1, #0e7490); }

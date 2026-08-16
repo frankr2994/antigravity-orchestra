@@ -82,8 +82,34 @@ app.post('/api/projects/:id/activate', async (req, res, next) => {
 });
 app.delete('/api/projects/:id', (req, res) => { store.forgetProject(req.params.id); res.status(204).end(); });
 
+function generateDynamicSessionTitle(prompt: string): string {
+  const clean = prompt
+    .replace(/^[\s#*`>_~-]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!clean) return 'New conversation';
+  const firstSentence = clean.split(/[.!?\r\n]/)[0]?.trim() || clean;
+  const candidate = firstSentence.length > 50 ? firstSentence.slice(0, 47).trim() + '…' : firstSentence;
+  return candidate || 'New conversation';
+}
+
 app.get('/api/projects/:id/sessions', (req, res) => res.json(store.listSessions(requireProject(req.params.id).id)));
 app.post('/api/projects/:id/sessions', (req, res) => res.status(201).json(store.createSession(requireProject(req.params.id).id, String(req.body?.title || 'New conversation').slice(0, 80))));
+app.patch('/api/sessions/:id', (req, res) => {
+  const session = requireSession(req.params.id);
+  const title = String(req.body?.title || '').trim().slice(0, 80);
+  if (!title) {
+    res.status(400).json({ error: 'Session title cannot be empty.' });
+    return;
+  }
+  const updated = store.updateSessionTitle(session.id, title);
+  res.json(updated || session);
+});
+app.delete('/api/sessions/:id', (req, res) => {
+  const session = requireSession(req.params.id);
+  store.deleteSession(session.id);
+  res.status(204).end();
+});
 app.get('/api/sessions/:id/messages', (req, res) => { requireSession(req.params.id); res.json(store.listMessages(req.params.id)); });
 app.post('/api/sessions/:id/activate', (req, res) => { const session = requireSession(req.params.id); store.activateSession(session.id, session.projectId); res.json(session); });
 
@@ -94,6 +120,12 @@ app.post('/api/sessions/:id/tasks', async (req, res, next) => {
     if (existingTaskId) throw new Error(`This project already has an active or queued task (${existingTaskId}). Open that task instead of creating a duplicate.`);
     const prompt = String(req.body?.prompt || '').trim();
     if (!prompt || prompt.length > 100_000) throw new Error('A prompt between 1 and 100,000 characters is required.');
+    if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
+      const dynamicTitle = generateDynamicSessionTitle(prompt);
+      if (dynamicTitle && dynamicTitle !== 'New conversation') {
+        store.updateSessionTitle(session.id, dynamicTitle);
+      }
+    }
     const sessionTasks = store.listTasks(session.projectId).filter((candidate) => candidate.sessionId === session.id);
     const recoveryTask = findContinuationRecoveryTask(prompt, sessionTasks);
     if (recoveryTask) {

@@ -126,6 +126,16 @@ export class Store {
     this.db.prepare('UPDATE sessions SET updated_at=? WHERE id=?').run(stamp, sessionId);
   }
 
+  updateSessionTitle(sessionId: string, title: string): Session | null {
+    const stamp = now();
+    this.db.prepare('UPDATE sessions SET title=?,updated_at=? WHERE id=?').run(title, stamp, sessionId);
+    return this.getSession(sessionId);
+  }
+
+  deleteSession(sessionId: string) {
+    this.db.prepare('DELETE FROM sessions WHERE id=?').run(sessionId);
+  }
+
   addMessage(input: Omit<ChatMessage, 'id' | 'createdAt'>): ChatMessage {
     const message: ChatMessage = { ...input, id: randomUUID(), createdAt: now() };
     this.db.prepare('INSERT INTO messages (id,session_id,task_id,role,agent,content,created_at) VALUES (?,?,?,?,?,?,?)')
