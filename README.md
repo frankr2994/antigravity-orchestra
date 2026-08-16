@@ -41,6 +41,7 @@ The dashboard tracks local system load, agent availability, provider quota, and 
 - Features **100% Dynamic Real-Time Model Discovery**: Dynamically queries Google Antigravity models (`agy models`) and OpenAI Codex models (`codex debug models` & `~/.codex/config.toml`), adapting to all supported reasoning tiers (`low`, `medium`, `high`, `xhigh`, `max`, `ultra`) without hardcoded model limits.
 - Features **LM Studio Loaded-Model Auto-Detection** with real-time dropdown selection for actively loaded memory-resident models (`state === 'loaded'`).
 - Features **Time-Travel Checkpoints & Safety Rollback**: Interactive commit and task timeline allowing instant rollbacks to any prior checkpoint with automatic uncommitted change stashing, visual diff inspection, and 1-click chat prompt reloading.
+- Features **Dynamic Conversation Auto-Naming & Session Management**: Automatically names new chat sessions based on prompt intent, with inline 1-click renaming (✏️) and deletion (🗑️) directly in the workspace header.
 - Runs bounded project verification before accepting a change set.
 - Slices complex multi-file diffs into atomic semantic conventional commits via Gemma.
 - Creates a handoff entry, commits reviewed files, and pushes through Git.
