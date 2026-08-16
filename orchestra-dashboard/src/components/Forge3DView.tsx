@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
-  Box, CheckCircle2, Download, Layers,
+  Box, CheckCircle2, Download, HardDriveDownload, Layers,
   Loader2, Palette, RefreshCw, RotateCcw,
   Sparkles, Trash2, Wand2
 } from 'lucide-react';
@@ -11,6 +11,7 @@ export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
   score: number;
   critique: string;
+  failureType?: 'concept' | 'geometry' | 'texture' | 'none';
   suggestedPromptRefinements?: string;
   reviewedAt: string;
 }
@@ -25,12 +26,47 @@ export interface Forge3DAsset {
   modelPath: string;
   modelUrl: string;
   previewUrl?: string;
-  vertexCount?: number;
-  triangleCount?: number;
+  vertexCount: number;
+  triangleCount: number;
   fileSizeBytes: number;
   review?: Forge3DReview;
   iterations: number;
   createdAt: string;
+}
+
+interface DependencyStatus {
+  id: string;
+  name: string;
+  category: 'model' | 'node' | 'python_pkg';
+  targetSubdir: string;
+  fileName: string;
+  sizeBytes: number;
+  description: string;
+  required: boolean;
+  installed: boolean;
+  actualSizeBytes?: number;
+  localPath: string;
+}
+
+interface ForgeSetupStatus {
+  comfyFound: boolean;
+  comfyPath: string | null;
+  comfyRunning: boolean;
+  readyFor3D: boolean;
+  items: DependencyStatus[];
+  missingCount: number;
+  missingBytes: number;
+}
+
+interface ActiveDownloadProgress {
+  depId: string;
+  fileName: string;
+  bytesReceived: number;
+  totalBytes: number;
+  percent: number;
+  speedBytesPerSec: number;
+  status: 'downloading' | 'verifying' | 'completed' | 'error';
+  error?: string;
 }
 
 interface ForgeStatus {
@@ -41,6 +77,7 @@ interface ForgeStatus {
     devices: Array<{ name: string; type: string; vramTotal: number; vramFree: number }>;
     queueRemaining: number;
     has3DNodes: boolean;
+    tripoReady: boolean;
     error?: string;
   };
   lmStudio: {
@@ -67,11 +104,14 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const [autoReview, setAutoReview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<ForgeStatus | null>(null);
+  const [setupStatus, setSetupStatus] = useState<ForgeSetupStatus | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState<ActiveDownloadProgress | null>(null);
   const [assets, setAssets] = useState<Forge3DAsset[]>([]);
   const [selectedAsset, setSelectedAsset] = useState<Forge3DAsset | null>(null);
   const [renderMode, setRenderMode] = useState<'shaded' | 'wireframe' | 'clay'>('shaded');
   const [wireframeOverlay, setWireframeOverlay] = useState(false);
   const [error, setError] = useState('');
+  const [installingDepId, setInstallingDepId] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -91,6 +131,15 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   }, [api]);
 
+  const loadSetupStatus = useCallback(async () => {
+    try {
+      const setup = await api<ForgeSetupStatus>('/api/forge3d/setup/status');
+      setSetupStatus(setup);
+    } catch {
+      /* ignore */
+    }
+  }, [api]);
+
   const loadAssets = useCallback(async () => {
     try {
       const list = await api<Forge3DAsset[]>('/api/forge3d/assets');
@@ -103,12 +152,39 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   }, [api, selectedAsset]);
 
+  const pollDownload = useCallback(async () => {
+    try {
+      const data = await api<{ progress: ActiveDownloadProgress | null }>('/api/forge3d/setup/progress');
+      setDownloadProgress(data.progress);
+      if (data.progress?.status === 'completed' || data.progress?.status === 'error') {
+        void loadSetupStatus();
+        void loadStatus();
+        if (data.progress.status === 'completed') {
+          setInstallingDepId(null);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [api, loadSetupStatus, loadStatus]);
+
   useEffect(() => {
     void loadStatus();
+    void loadSetupStatus();
     void loadAssets();
-    const interval = setInterval(loadStatus, 5000);
+    const interval = setInterval(() => {
+      void loadStatus();
+      void loadSetupStatus();
+    }, 5000);
     return () => clearInterval(interval);
-  }, [loadStatus, loadAssets]);
+  }, [loadStatus, loadSetupStatus, loadAssets]);
+
+  useEffect(() => {
+    if (installingDepId || (downloadProgress && downloadProgress.status === 'downloading')) {
+      const progressInterval = setInterval(pollDownload, 1000);
+      return () => clearInterval(progressInterval);
+    }
+  }, [installingDepId, downloadProgress, pollDownload]);
 
   // Setup Three.js WebGL Scene
   useEffect(() => {
@@ -241,11 +317,9 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     const deltaY = e.clientY - prevMousePosRef.current.y;
 
     if (e.buttons === 1) {
-      // Left click rotate
       currentMeshRef.current.rotation.y += deltaX * 0.01;
       currentMeshRef.current.rotation.x += deltaY * 0.01;
     } else if (e.buttons === 2) {
-      // Right click pan
       cameraRef.current.position.x -= deltaX * 0.005;
       cameraRef.current.position.y += deltaY * 0.005;
     }
@@ -266,6 +340,20 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     if (!cameraRef.current || !currentMeshRef.current) return;
     cameraRef.current.position.set(0, 1.5, 4.5);
     currentMeshRef.current.rotation.set(0, 0, 0);
+  };
+
+  const handleInstallDependency = async (depId: string) => {
+    try {
+      setInstallingDepId(depId);
+      setError('');
+      await api('/api/forge3d/setup/install', {
+        method: 'POST',
+        body: JSON.stringify({ depId }),
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setInstallingDepId(null);
+    }
   };
 
   const handleGenerate = async () => {
@@ -313,7 +401,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
             <span className="eyebrow">Neural Asset Studio</span>
             <h2><Box size={20} /> 3D Asset Forge</h2>
           </div>
-          <button className="icon-button mini" onClick={() => { void loadStatus(); void loadAssets(); }} title="Refresh Services">
+          <button className="icon-button mini" onClick={() => { void loadStatus(); void loadSetupStatus(); void loadAssets(); }} title="Refresh Services">
             <RefreshCw size={14} />
           </button>
         </div>
@@ -335,6 +423,48 @@ export function Forge3DView({ api }: Forge3DViewProps) {
             <span>{status?.lmStudio.model ? 'Active & Ready' : 'Port 1234'}</span>
           </div>
         </div>
+
+        {/* Engine Setup & Auto-Downloader Banner if dependencies missing */}
+        {setupStatus && setupStatus.missingCount > 0 && (
+          <div className="forge-setup-banner">
+            <div className="setup-header">
+              <HardDriveDownload size={16} className="accent" />
+              <strong>Engine Setup Required ({setupStatus.missingCount} missing)</strong>
+            </div>
+            <div className="setup-list">
+              {setupStatus.items.map((dep) => (
+                <div key={dep.id} className="setup-row">
+                  <div className="setup-meta">
+                    <span>{dep.name}</span>
+                    <small>{dep.installed ? 'Installed ✓' : `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB missing`}</small>
+                  </div>
+                  {!dep.installed && dep.sizeBytes > 0 && (
+                    <button
+                      className="mini primary"
+                      onClick={() => handleInstallDependency(dep.id)}
+                      disabled={Boolean(installingDepId || (downloadProgress && downloadProgress.status === 'downloading'))}
+                    >
+                      {installingDepId === dep.id ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                      Install
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {downloadProgress && downloadProgress.status === 'downloading' && (
+              <div className="download-progress-bar">
+                <div className="progress-labels">
+                  <span>Downloading {downloadProgress.fileName}</span>
+                  <span>{downloadProgress.percent}% ({(downloadProgress.speedBytesPerSec / (1024 * 1024)).toFixed(1)} MB/s)</span>
+                </div>
+                <div className="progress-track">
+                  <div className="progress-fill" style={{ width: `${downloadProgress.percent}%` }} />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {error && <div className="forge-error-box">{error}</div>}
 
@@ -506,8 +636,8 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
             <div className="mesh-stats-bar">
               <span>Format: <strong>{selectedAsset.modelFormat.toUpperCase()}</strong></span>
-              <span>Vertices: <strong>{selectedAsset.vertexCount || 144}</strong></span>
-              <span>Triangles: <strong>{selectedAsset.triangleCount || 72}</strong></span>
+              <span>Vertices: <strong>{selectedAsset.vertexCount}</strong></span>
+              <span>Triangles: <strong>{selectedAsset.triangleCount}</strong></span>
               <span>Size: <strong>{(selectedAsset.fileSizeBytes / 1024).toFixed(1)} KB</strong></span>
               <a
                 href={selectedAsset.modelUrl}

@@ -14,6 +14,7 @@ import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 import { getComfyStatus } from './comfy.js';
 import { deleteForgeAsset, listForgeAssets, runForge3DJob } from './forge3d.js';
+import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 
 const app = express();
 const store = new Store();
@@ -373,6 +374,29 @@ app.get('/api/forge3d/status', async (_req, res) => {
       model: config.lmStudioModel,
     },
   });
+});
+
+app.get('/api/forge3d/setup/status', async (_req, res, next) => {
+  try {
+    res.json(await checkForgeDependencies());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge3d/setup/install', async (req, res, next) => {
+  try {
+    const depId = String(req.body?.depId || '').trim();
+    if (!depId) throw new Error('Dependency ID is required.');
+    void installForgeDependency(depId).catch((err) => console.error(`Forge install error for ${depId}:`, err));
+    res.json({ started: true, depId });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/forge3d/setup/progress', (_req, res) => {
+  res.json({ progress: getDownloadProgress() });
 });
 
 app.get('/api/forge3d/assets', (_req, res) => {
