@@ -17,7 +17,8 @@ type Health = Record<string, HealthItem>;
 type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'medium' | 'high'; codexModel: string | null; codexEffort: 'low' | 'medium' | 'high' | null };
 type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
 type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string; quotaPolicy: QuotaPolicy };
-type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null }> };
+type ProviderQuotaBucket = { id: string; name?: string; group?: string; window?: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null };
+type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: ProviderQuotaBucket[] };
 type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
 type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
 type McpServerRecord = {
@@ -555,6 +556,22 @@ function App() {
   );
 }
 
+function formatResetTimer(isoDate: string | null | undefined): string | null {
+  if (!isoDate) return null;
+  const target = new Date(isoDate).getTime();
+  if (isNaN(target)) return null;
+  const diffMs = target - Date.now();
+  if (diffMs <= 0) return 'resets soon';
+  const mins = Math.floor(diffMs / 60_000);
+  if (mins < 60) return `resets in ${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const remMins = mins % 60;
+  if (hours < 24) return `resets in ${hours}h ${remMins}m`;
+  const days = Math.floor(hours / 24);
+  const remHours = hours % 24;
+  return `resets in ${days}d ${remHours}h`;
+}
+
 function Dashboard({ stats, health, usage, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed }: { stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
@@ -566,7 +583,61 @@ function Dashboard({ stats, health, usage, mcp, project, tasks, activeTask, moni
     </div>
     <div className="two-column">
       <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}</div></Card>
-      <Card title="Provider usage" icon={<Zap />}><div className="usage-list">{['antigravity', 'codex'].map((name) => { const item = usage[name]; const context = item?.context?.usedPercent; const remaining = item?.quotas?.map((bucket) => bucket.remainingPercent).filter((value): value is number => value !== null).sort((a, b) => a - b)[0]; const signals = [remaining !== undefined ? `${remaining.toFixed(0)}% quota left` : null, context !== null && context !== undefined ? `${context.toFixed(0)}% context` : null].filter(Boolean); return <div key={name}><strong>{name}</strong><span className={item?.available ? '' : 'unavailable'}>{item?.available ? signals.join(' · ') || 'Connected' : 'Unavailable'}</span><small>{item?.available ? `${item.model || item.source || 'Verified provider source'}${item.stale ? ' · stale snapshot' : ''}` : item?.reason || 'Waiting for a trustworthy provider source.'}</small></div>; })}</div></Card>
+      <Card title="Provider usage & Quotas" icon={<Zap />}>
+        <div className="provider-usage-grid">
+          {(['antigravity', 'codex'] as const).map((name) => {
+            const item = usage[name];
+            const displayName = name === 'antigravity' ? 'Antigravity' : 'OpenAI Codex';
+            const quotas = item?.quotas || [];
+            const context = item?.context;
+            return (
+              <div key={name} className="provider-usage-block">
+                <div className="provider-block-header">
+                  <div className="provider-title">
+                    <StatusDot ok={item?.available === true} />
+                    <strong>{displayName}</strong>
+                    {item?.model && <span className="provider-model-badge">{item.model}</span>}
+                  </div>
+                  {context?.usedPercent !== null && context?.usedPercent !== undefined && (
+                    <span className="provider-context-badge">
+                      {context.usedPercent.toFixed(0)}% ctx ({((context.inputTokens ?? 0) / 1000).toFixed(0)}k/{((context.windowTokens ?? 1048576) / 1000).toFixed(0)}k)
+                    </span>
+                  )}
+                </div>
+                {item?.available && quotas.length > 0 ? (
+                  <div className="quota-pill-list">
+                    {quotas.map((q) => {
+                      const rem = q.remainingPercent;
+                      const reset = formatResetTimer(q.resetsAt);
+                      const isGemini = q.id.startsWith('gemini') || q.group?.includes('Gemini');
+                      const is3p = q.id.startsWith('3p') || q.group?.includes('Claude') || q.group?.includes('GPT');
+                      const groupLabel = isGemini ? 'Gemini' : is3p ? 'Claude/GPT' : q.group || 'Codex';
+                      const windowLabel = q.window === '5h' || q.id.includes('5h') ? '5h Limit' : 'Weekly';
+                      const statusClass = rem === null ? 'unknown' : rem > 30 ? 'good' : rem > 10 ? 'warning' : 'critical';
+                      return (
+                        <div key={q.id} className={`quota-pill status-${statusClass}`}>
+                          <div className="quota-pill-header">
+                            <span className="quota-group-tag">{groupLabel}</span>
+                            <span className="quota-window-tag">{windowLabel}</span>
+                          </div>
+                          <div className="quota-pill-body">
+                            <span className="quota-percent">{rem !== null && rem !== undefined ? `${rem.toFixed(1)}% left` : 'Active'}</span>
+                            {reset && <span className="quota-reset-timer">{reset}</span>}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <small className="provider-fallback-msg">
+                    {item?.available ? (item.source || 'Connected') : (item?.reason || 'Waiting for provider source.')}
+                  </small>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </Card>
     </div>
     <div className="mcp-panel"><Card title="Rider MCP" icon={<Terminal />}>
       <div className="mcp-server"><StatusDot ok={mcp?.server.operational === true} /><div><strong>{mcp?.server.name || 'Checking Rider MCP…'}</strong><small>{mcp?.server.operational ? `${mcp.server.toolCount} tools · v${mcp.server.version || 'unknown'} · ${mcp.server.latencyMs ?? '?'} ms` : mcp?.server.reason || 'Waiting for the first protocol check.'}</small><code>{mcp?.server.endpoint || 'No endpoint discovered'}</code></div></div>

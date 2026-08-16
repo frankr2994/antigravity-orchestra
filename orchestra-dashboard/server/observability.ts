@@ -11,6 +11,17 @@ const antigravitySnapshot = join(config.dataDir, 'antigravity-status.json');
 let codexCache: { at: number; value: ProviderUsage } | null = null;
 let antigravityCache: { at: number; value: ProviderUsage } | null = null;
 
+export interface ProviderQuotaBucket {
+  id: string;
+  name?: string;
+  group?: string;
+  window?: string;
+  usedPercent: number | null;
+  remainingPercent: number | null;
+  resetsAt: string | null;
+  windowMinutes: number | null;
+}
+
 export interface ProviderUsage {
   available: boolean;
   source: string;
@@ -18,7 +29,7 @@ export interface ProviderUsage {
   reason?: string;
   model?: string;
   context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens: number | null; outputTokens: number | null };
-  quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null; windowMinutes: number | null }>;
+  quotas?: ProviderQuotaBucket[];
   tokenActivity?: Record<string, number | null>;
   agentState?: string;
   conversationId?: string;
@@ -80,9 +91,18 @@ export async function readCodexUsage(): Promise<ProviderUsage> {
       codexAppServer.request('account/usage/read', {}),
     ]);
     const buckets = rate.rateLimitsByLimitId || (rate.rateLimits ? { [rate.rateLimits.limitId || 'codex']: rate.rateLimits } : {});
-    const quotas = Object.entries(buckets).map(([id, raw]) => {
+    const quotas: ProviderQuotaBucket[] = Object.entries(buckets).map(([id, raw]) => {
       const bucket = raw as Record<string, any>; const primary = bucket.primary || {};
-      return { id, usedPercent: finite(primary.usedPercent), remainingPercent: finite(primary.usedPercent) === null ? null : 100 - Number(primary.usedPercent), resetsAt: primary.resetsAt ? new Date(Number(primary.resetsAt) * 1000).toISOString() : null, windowMinutes: finite(primary.windowDurationMins) };
+      return {
+        id,
+        name: 'Weekly Limit',
+        group: 'OpenAI Codex',
+        window: 'weekly',
+        usedPercent: finite(primary.usedPercent),
+        remainingPercent: finite(primary.usedPercent) === null ? null : 100 - Number(primary.usedPercent),
+        resetsAt: primary.resetsAt ? new Date(Number(primary.resetsAt) * 1000).toISOString() : null,
+        windowMinutes: finite(primary.windowDurationMins),
+      };
     });
     const summary = activity.summary && typeof activity.summary === 'object' ? activity.summary as Record<string, unknown> : {};
     const tokenActivity = Object.fromEntries(Object.entries(summary).map(([key, value]) => [key, finite(value)]));
@@ -126,23 +146,63 @@ async function readAntigravityQuota(): Promise<ProviderUsage> {
 
 export function extractAntigravityQuotas(output: string): NonNullable<ProviderUsage['quotas']> {
   const quotas: NonNullable<ProviderUsage['quotas']> = [];
-  const visit = (value: unknown) => {
-    if (!value || typeof value !== 'object') return;
-    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
-    const record = value as Record<string, unknown>;
-    const remaining = finite(record.remaining_fraction);
-    if (remaining !== null && (typeof record.id === 'string' || typeof record.name === 'string')) {
-      quotas.push({
-        id: String(record.id || record.name),
-        usedPercent: Math.round((1 - remaining) * 10_000) / 100,
-        remainingPercent: Math.round(remaining * 10_000) / 100,
-        resetsAt: stringOrNull(record.reset_time),
-        windowMinutes: null,
-      });
-    }
-    for (const child of Object.values(record)) if (child && typeof child === 'object') visit(child);
-  };
-  for (const line of output.split(/\r?\n/)) try { visit(JSON.parse(line)); } catch { /* Ignore non-JSON diagnostics. */ }
+
+  for (const line of output.split(/\r?\n/)) {
+    try {
+      const parsed = JSON.parse(line) as Record<string, any>;
+      const groups = parsed?.command?.data?.groups || parsed?.data?.groups;
+      if (Array.isArray(groups)) {
+        for (const group of groups) {
+          const groupName = typeof group.name === 'string' ? group.name : undefined;
+          const buckets = group.buckets || [];
+          if (Array.isArray(buckets)) {
+            for (const bucket of buckets) {
+              const remaining = finite(bucket.remaining_fraction);
+              if (remaining !== null && (typeof bucket.id === 'string' || typeof bucket.name === 'string')) {
+                const item: ProviderQuotaBucket = {
+                  id: String(bucket.id || bucket.name),
+                  usedPercent: Math.round((1 - remaining) * 10_000) / 100,
+                  remainingPercent: Math.round(remaining * 10_000) / 100,
+                  resetsAt: stringOrNull(bucket.reset_time),
+                  windowMinutes: null,
+                };
+                if (typeof bucket.name === 'string') item.name = bucket.name;
+                if (groupName) item.group = groupName;
+                if (typeof bucket.window === 'string') item.window = bucket.window;
+                quotas.push(item);
+              }
+            }
+          }
+        }
+      }
+    } catch { /* Ignore */ }
+  }
+
+  if (quotas.length === 0) {
+    const visit = (value: unknown, currentGroup?: string) => {
+      if (!value || typeof value !== 'object') return;
+      if (Array.isArray(value)) { for (const item of value) visit(item, currentGroup); return; }
+      const record = value as Record<string, unknown>;
+      const groupName = typeof record.name === 'string' && Array.isArray(record.buckets) ? record.name : currentGroup;
+      const remaining = finite(record.remaining_fraction);
+      if (remaining !== null && (typeof record.id === 'string' || typeof record.name === 'string')) {
+        const item: ProviderQuotaBucket = {
+          id: String(record.id || record.name),
+          usedPercent: Math.round((1 - remaining) * 10_000) / 100,
+          remainingPercent: Math.round(remaining * 10_000) / 100,
+          resetsAt: stringOrNull(record.reset_time),
+          windowMinutes: null,
+        };
+        if (typeof record.name === 'string') item.name = record.name;
+        if (groupName) item.group = groupName;
+        if (typeof record.window === 'string') item.window = record.window;
+        quotas.push(item);
+      }
+      for (const child of Object.values(record)) if (child && typeof child === 'object') visit(child, groupName);
+    };
+    for (const line of output.split(/\r?\n/)) try { visit(JSON.parse(line)); } catch { /* Ignore non-JSON diagnostics. */ }
+  }
+
   return [...new Map(quotas.map((quota) => [quota.id, quota])).values()];
 }
 

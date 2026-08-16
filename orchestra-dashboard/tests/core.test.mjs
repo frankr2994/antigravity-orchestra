@@ -163,7 +163,7 @@ test('Codex command failures include a safe actionable reason and redact credent
 
 test('Antigravity usage command parsing preserves authoritative quota buckets', () => {
   const output = JSON.stringify({ command: { name: 'usage', data: { groups: [{ name: 'Gemini Models', buckets: [{ id: 'gemini-weekly', remaining_fraction: 0.86539, reset_time: '2026-08-19T13:28:52Z' }] }] } } });
-  assert.deepEqual(extractAntigravityQuotas(output), [{ id: 'gemini-weekly', usedPercent: 13.46, remainingPercent: 86.54, resetsAt: '2026-08-19T13:28:52Z', windowMinutes: null }]);
+  assert.deepEqual(extractAntigravityQuotas(output), [{ id: 'gemini-weekly', group: 'Gemini Models', usedPercent: 13.46, remainingPercent: 86.54, resetsAt: '2026-08-19T13:28:52Z', windowMinutes: null }]);
 });
 
 test('Codex errors retain the actionable parser line instead of the help footer', () => {
