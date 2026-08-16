@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, Bookmark, Bot, Check, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
+  Activity, Bookmark, Bot, Box, Check, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
   Gauge, GitBranch, GitCommit, GitFork, History, Hexagon, MemoryStick, MessageSquare,
   Pencil, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
   Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
+import { Forge3DView } from './components/Forge3DView.js';
 
-type View = 'dashboard' | 'projects' | 'checkpoints' | 'tasks' | 'mcp' | 'settings';
+type View = 'dashboard' | 'projects' | 'checkpoints' | 'tasks' | 'mcp' | 'forge3d' | 'settings';
 type CheckpointFile = { path: string; added: number; deleted: number };
 type CheckpointRecord = {
   sha: string;
@@ -529,6 +530,7 @@ function App() {
           <NavButton active={view === 'projects'} icon={<FolderGit2 />} label="Projects" onClick={() => setView('projects')} />
           <NavButton active={view === 'checkpoints' || view === 'tasks'} icon={<History />} label="Checkpoints" onClick={() => setView('checkpoints')} />
           <NavButton active={view === 'mcp'} icon={<Server />} label="MCP Servers" onClick={() => setView('mcp')} />
+          <NavButton active={view === 'forge3d'} icon={<Box />} label="3D Forge" onClick={() => setView('forge3d')} />
           <NavButton active={view === 'settings'} icon={<Settings />} label="Settings" onClick={() => setView('settings')} />
         </nav>
         <div className="sidebar-project">
@@ -545,6 +547,7 @@ function App() {
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
+        {view === 'forge3d' && <Forge3DView api={api} />}
         {view === 'settings' && settings && <SettingsView settings={settings} health={health} availableModels={availableModels} api={api} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
       </main>
 

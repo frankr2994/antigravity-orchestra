@@ -12,6 +12,8 @@ import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, expla
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
+import { getComfyStatus } from './comfy.js';
+import { deleteForgeAsset, listForgeAssets, runForge3DJob } from './forge3d.js';
 
 const app = express();
 const store = new Store();
@@ -360,6 +362,53 @@ app.patch('/api/settings', (req, res) => {
     store.setSetting('quotaPolicy', JSON.stringify(req.body.quotaPolicy));
   }
   res.json(publicSettings());
+});
+
+app.get('/api/forge3d/status', async (_req, res) => {
+  const comfy = await getComfyStatus();
+  res.json({
+    comfy,
+    lmStudio: {
+      url: config.lmStudioBaseUrl,
+      model: config.lmStudioModel,
+    },
+  });
+});
+
+app.get('/api/forge3d/assets', (_req, res) => {
+  res.json(listForgeAssets());
+});
+
+app.get('/api/forge3d/assets/:filename', (req, res) => {
+  const file = join(config.dataDir, 'forge3d', req.params.filename);
+  if (!existsSync(file)) {
+    res.status(404).json({ error: '3D Asset file not found.' });
+    return;
+  }
+  if (req.params.filename.endsWith('.glb')) {
+    res.setHeader('Content-Type', 'model/gltf-binary');
+  } else if (req.params.filename.endsWith('.png')) {
+    res.setHeader('Content-Type', 'image/png');
+  }
+  res.sendFile(file);
+});
+
+app.delete('/api/forge3d/assets/:id', (req, res) => {
+  const success = deleteForgeAsset(req.params.id);
+  res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge3d/generate', async (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    if (!prompt) throw new Error('Prompt is required.');
+    const style = String(req.body?.style || 'stylized');
+    const autoReview = req.body?.autoReview !== false;
+    const asset = await runForge3DJob(prompt, style, autoReview);
+    res.status(201).json(asset);
+  } catch (error) {
+    next(error);
+  }
 });
 
 const publicDir = join(config.dashboardRoot, 'dist');
