@@ -404,7 +404,7 @@ function App() {
                     className="action-link"
                     onClick={() => {
                       setExecutionMode('orchestra');
-                      setInput(`Implement the following plan / solution:\n\n${message.content.slice(0, 400)}...`);
+                      setInput(`Implement the following plan / feature proposal:\n\n${message.content}`);
                     }}
                     title="Promote this answer into an orchestrated multi-agent task"
                   >
