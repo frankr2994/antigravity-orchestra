@@ -186,7 +186,9 @@ function App() {
       setSession(visibleSession);
       setMessages(await api<Message[]>(`/api/sessions/${visibleSession.id}/messages`, {}, overrideToken));
       setActivity([]);
-      const restored = projectActiveTask || projectTasks.filter((task) => task.sessionId === visibleSession.id && (!terminalStates.has(task.state) || task.state === 'recovery_required')).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] || null;
+      const sessionTasks = projectTasks.filter((task) => task.sessionId === visibleSession.id).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+      const newestTask = sessionTasks[0] || null;
+      const restored = projectActiveTask || (newestTask && !terminalStates.has(newestTask.state) ? newestTask : null);
       setActiveTask(restored);
       if (restored) watchTask(restored.id);
       setView('dashboard');
@@ -220,7 +222,9 @@ function App() {
   async function restoreProjectTask(projectId: string) {
     const running = await api<Task | null>(`/api/projects/${projectId}/active-task`);
     const projectTasks = await api<Task[]>(`/api/tasks?projectId=${projectId}`);
-    const latest = running || projectTasks.filter((task) => !terminalStates.has(task.state) || task.state === 'recovery_required').sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0] || null;
+    const sessionTasks = projectTasks.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    const newestTask = sessionTasks[0] || null;
+    const latest = running || (newestTask && !terminalStates.has(newestTask.state) ? newestTask : null);
     setActiveTask(latest);
     if (latest) watchTask(latest.id);
   }
