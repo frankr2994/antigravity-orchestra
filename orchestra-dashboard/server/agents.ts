@@ -552,9 +552,18 @@ export function buildReviewPacket(input: { request: string; changedFiles: string
   return lines.join('\n').slice(0, 100_000);
 }
 
-export function selectReviewProfile(input: { request: string; cycle: number; changedFileCount: number; triageRisk: ReviewTriage['risk']; repeatedFindings?: boolean }) {
+export function selectReviewProfile(input: { request: string; cycle: number; changedFileCount: number; triageRisk: ReviewTriage['risk']; repeatedFindings?: boolean; codexRemaining?: number | null }) {
   const explicitlySensitive = /\b(?:security|authorization|authentication|credential|secret|payment|production migration|data loss|destructive|encryption|permission)\b/i.test(input.request);
-  
+  const remaining = input.codexRemaining ?? 100;
+
+  // Quota conservation mode: If remaining Codex quota is critically low (<= 15%), cap to Terra/Luna to prevent budget exhaustion
+  if (remaining <= 5) {
+    return { model: 'gpt-5.6-luna', effort: 'low' as const, reason: `critical Codex quota (${remaining.toFixed(1)}% remaining); conserving allowance with Luna Low` };
+  }
+  if (remaining <= 15) {
+    return { model: 'gpt-5.6-terra', effort: 'medium' as const, reason: `low Codex quota (${remaining.toFixed(1)}% remaining); capped to Terra Medium to protect budget` };
+  }
+
   // Tier 5: Critical security, repeated dispute cycles -> Sol High
   if (explicitlySensitive || input.cycle >= 2 || input.repeatedFindings) {
     return { model: 'gpt-5.6-sol', effort: 'high' as const, reason: explicitlySensitive ? 'explicitly sensitive request' : 'repeated repair review' };
