@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -320,19 +320,15 @@ export class TaskManager {
         this.complete(taskId, `Connected this project to ${connected.remote} as \`origin\` and pushed \`${connected.branch}\` at commit \`${connected.head}\`.`, 'gemma');
         return;
       }
-      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: activeGemmaModel };
       const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
       const routingReasons: string[] = [];
       const antigravityRemaining = minimumRemaining(antigravityAccount);
       const codexRemaining = minimumRemaining(codexAccount);
-      if (!recovery && classification.complexity === 'small' && antigravityRemaining !== null && antigravityRemaining <= 10 && models.antigravity === 'gemini-3.7-flash-high') {
-        models = { ...models, antigravity: 'gemini-3.7-flash-medium', antigravityEffort: 'medium' };
-        routingReasons.push(`Antigravity quota is ${antigravityRemaining.toFixed(1)}% remaining, so a small task was moved to Flash Medium.`);
-      }
-      if (!recovery && classification.complexity === 'small' && codexRemaining !== null && codexRemaining <= 10 && models.codex && models.codex !== 'gpt-5.6-luna') {
-        models = { ...models, codex: 'gpt-5.6-luna', codexEffort: 'medium' };
-        routingReasons.push(`Codex quota is ${codexRemaining.toFixed(1)}% remaining, so a small specialist task was moved to Luna.`);
-      }
+      const quotaPolicyJson = this.store.getSetting('quotaPolicy');
+      let quotaPolicy: QuotaPolicy | undefined;
+      try { quotaPolicy = quotaPolicyJson ? JSON.parse(quotaPolicyJson) as QuotaPolicy : undefined; } catch { /* ignore */ }
+
+      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0, quotaPolicy, codexRemaining), primary: 'antigravity', gemma: activeGemmaModel };
       const resolved = resolveAntigravityModel(models.antigravity, this.antigravityModels);
       models = { ...models, antigravity: resolved.model };
       if (resolved.warning) this.emit(taskId, 'antigravity', 'warning', { message: resolved.warning });
@@ -590,7 +586,7 @@ export class TaskManager {
                 this.emit(taskId, 'gemma', 'warning', { message: `Local sanity check noted issues: ${sanity.issues.join('; ')}` });
               }
             } catch { /* non-blocking */ }
-            const profile = selectReviewProfile({ request: task.prompt, cycle, changedFileCount: changedFiles.length, triageRisk: triage.risk, repeatedFindings: cycle > 0 && !previousRepairChanged, codexRemaining });
+            const profile = selectReviewProfile({ request: task.prompt, cycle, changedFileCount: changedFiles.length, triageRisk: triage.risk, repeatedFindings: cycle > 0 && !previousRepairChanged, codexRemaining, quotaPolicy });
             this.emit(taskId, 'system', 'routing.adjustment', { message: `Review cycle ${cycle + 1} uses ${profile.model} (${profile.reason}).`, reviewModel: profile.model, reviewEffort: profile.effort, reason: profile.reason });
             const reviewPacket = buildReviewPacket({ request: task.prompt, changedFiles, diff, implementationSummary: agentResult.text, triage, previousReview });
             this.transition(taskId, 'reviewing');

@@ -14,7 +14,9 @@ type TaskEvent = { id: number; taskId: string; agent: string; type: string; payl
 type Stats = { cpu: { load: number; speed: string | null; name: string }; memory: { used: number; total: number; percent: number }; gpu: { load: number | null; name: string; temp: number | null }; timestamp: string };
 type HealthItem = { available?: boolean; version?: string | null; modelAvailable?: boolean; error?: string };
 type Health = Record<string, HealthItem>;
-type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string };
+type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'medium' | 'high'; codexModel: string | null; codexEffort: 'low' | 'medium' | 'high' | null };
+type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
+type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string; quotaPolicy: QuotaPolicy };
 type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: Array<{ id: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null }> };
 type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
 type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
@@ -62,6 +64,8 @@ function App() {
   const [directAgent, setDirectAgent] = useState<'gemma' | 'antigravity' | 'codex'>('gemma');
   const [steerInput, setSteerInput] = useState('');
   const [steerOpen, setSteerOpen] = useState(false);
+  const [steerSuggestion, setSteerSuggestion] = useState<string | null>(null);
+  const [steerSuggesting, setSteerSuggesting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [scopeWarning, setScopeWarning] = useState('');
@@ -432,8 +436,7 @@ function App() {
               <div className="dispute-actions">
                 <button className="primary" onClick={() => approveDisputed(activeTask)} disabled={busy}>Approve & Commit Diff</button>
                 <button className="secondary" onClick={() => setSteerOpen(!steerOpen)} disabled={busy}>{steerOpen ? 'Close guidance' : 'Provide guidance & retry'}</button>
-              </div>
-              {steerOpen && (
+              </div>               {steerOpen && (
                 <div className="steer-box">
                   {(() => {
                     const lastReviewEvent = activity.findLast((e) => e.type === 'agent.completed' && (e.payload as Record<string, unknown>).role === 'review');
@@ -445,6 +448,34 @@ function App() {
                       </details>
                     ) : null;
                   })()}
+                  {steerSuggestion ? (
+                    <div className="steer-suggestion-box">
+                      <div className="steer-suggestion-header">
+                        <span className="steer-suggestion-title"><Sparkles size={13} /> AI Suggested Next Step:</span>
+                        <button type="button" className="action-link" onClick={() => setSteerInput(steerSuggestion)}>Use This Suggestion</button>
+                      </div>
+                      <p>{steerSuggestion}</p>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      className="secondary compact"
+                      onClick={async () => {
+                        setSteerSuggesting(true);
+                        try {
+                          const res = await api<{ suggestion: string }>(`/api/tasks/${activeTask.id}/suggest-steering`, { method: 'POST' });
+                          if (res?.suggestion) setSteerSuggestion(res.suggestion);
+                        } catch (err) {
+                          console.error(err);
+                        } finally {
+                          setSteerSuggesting(false);
+                        }
+                      }}
+                      disabled={steerSuggesting}
+                    >
+                      <Sparkles size={13} /> {steerSuggesting ? 'Analyzing blockers & drafting tip…' : 'Generate AI Steering Tip'}
+                    </button>
+                  )}
                   <textarea value={steerInput} onChange={(e) => setSteerInput(e.target.value)} placeholder="Specify exact changes or approaches Antigravity should take..." rows={3} autoFocus />
                   <button className="primary compact" onClick={() => steerDisputed(activeTask)} disabled={busy || !steerInput.trim()}><Send size={14} /> Send Guidance & Resume Repairs</button>
                 </div>
@@ -745,13 +776,133 @@ function McpServersView({ servers, busy, onToggle, onRefresh }: { servers: McpSe
 
 function SettingsView({ settings, health, onSave }: { settings: SettingsData; health: Health; onSave: (value: Partial<SettingsData>) => void }) {
   const [interval, setIntervalValue] = useState(settings.telemetryInterval);
-  return <section><PageHeader eyebrow="Local configuration" title="Settings" subtitle="Model selection is automatic; this page shows the fixed policy inputs and service endpoints." />
-    <div className="settings-grid"><Card title="Local model" icon={<Bot />}><Field label="LM Studio URL" value={settings.lmStudioBaseUrl} /><Field label="Model" value={settings.lmStudioModel} /><Field label="Status" value={health.lmStudio?.modelAvailable ? 'Connected and loaded' : 'Unavailable or model not loaded'} /></Card>
-      <Card title="Routing policy" icon={<Zap />}><Field label="Mode" value="Gemma-first automatic" /><Field label="Local questions" value="Gemma with repository evidence" /><Field label="Antigravity" value="Gemini 3.7 Flash (Low → Med → High)" /><Field label="Codex" value="Terra (Med/High) → Sol (Med/High)" /><Field label="Project concurrency" value={String(settings.maxGlobalTasks)} /></Card>
-      <Card title="Telemetry" icon={<Activity />}><label className="form-field"><span>Refresh interval</span><select value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))}><option value={1000}>1 second</option><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option></select></label><button className="primary" onClick={() => onSave({ telemetryInterval: interval })}>Save settings</button></Card>
-      <Card title="CLI diagnostics" icon={<Terminal />}><div className="service-list">{['antigravity', 'codex', 'git', 'nvidia'].map((name) => <div key={name}><StatusDot ok={health[name]?.available !== false} /><span>{name}</span><small>{health[name]?.version || (health[name]?.available === false ? 'Unavailable' : 'Ready')}</small></div>)}</div></Card>
-    </div>
-  </section>;
+  const [policy, setPolicy] = useState<QuotaPolicy>(settings.quotaPolicy || {
+    tierAbove20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-sol', codexEffort: 'high' },
+    tier15to20: { antigravityModel: 'gemini-3.7-flash-high', antigravityEffort: 'high', codexModel: 'gpt-5.6-terra', codexEffort: 'high' },
+    tier10to15: { antigravityModel: 'gemini-3.7-flash-medium', antigravityEffort: 'medium', codexModel: 'gpt-5.6-terra', codexEffort: 'medium' },
+    tier5to10: { antigravityModel: 'gemini-3.7-flash-low', antigravityEffort: 'low', codexModel: 'gpt-5.6-luna', codexEffort: 'low' },
+    tierBelow5: { antigravityModel: 'gemini-3.7-flash-low', antigravityEffort: 'low', codexModel: null, codexEffort: null },
+  });
+
+  const updateTier = (tierKey: keyof QuotaPolicy, field: keyof QuotaTierConfig, value: string | null) => {
+    setPolicy((prev) => ({
+      ...prev,
+      [tierKey]: {
+        ...prev[tierKey],
+        [field]: value === 'none' ? null : value,
+      },
+    }));
+  };
+
+  const tiers: Array<{ key: keyof QuotaPolicy; label: string; badge: string; desc: string }> = [
+    { key: 'tierAbove20', label: '> 20% Quota Remaining', badge: 'Normal', desc: 'Full high-capacity frontier tier' },
+    { key: 'tier15to20', label: '15% – 20% Quota Remaining', badge: 'Moderate', desc: 'Balanced high capability tier' },
+    { key: 'tier10to15', label: '10% – 15% Quota Remaining', badge: 'Conservation', desc: 'Quota preservation with Terra medium' },
+    { key: 'tier5to10', label: '5% – 10% Quota Remaining', badge: 'Critical', desc: 'Lightweight models to prevent quota exhaustion' },
+    { key: 'tierBelow5', label: '< 5% Quota Remaining', badge: 'Emergency', desc: 'Emergency tier: local triage / bypass Codex' },
+  ];
+
+  return (
+    <section>
+      <PageHeader eyebrow="Local configuration & Quota Management" title="Settings" subtitle="Customize real-time telemetry, model routing, and quota tier policies." />
+      <div className="settings-grid">
+        <Card title="Local model" icon={<Bot />}>
+          <Field label="LM Studio URL" value={settings.lmStudioBaseUrl} />
+          <Field label="Model" value={settings.lmStudioModel} />
+          <Field label="Status" value={health.lmStudio?.modelAvailable ? 'Connected and loaded' : 'Unavailable or model not loaded'} />
+        </Card>
+        <Card title="Telemetry" icon={<Activity />}>
+          <label className="form-field">
+            <span>Refresh interval</span>
+            <select value={interval} onChange={(event) => setIntervalValue(Number(event.target.value))}>
+              <option value={1000}>1 second</option>
+              <option value={2000}>2 seconds</option>
+              <option value={5000}>5 seconds</option>
+              <option value={10000}>10 seconds</option>
+            </select>
+          </label>
+          <button className="primary" onClick={() => onSave({ telemetryInterval: interval, quotaPolicy: policy })}>Save settings</button>
+        </Card>
+      </div>
+
+      <div style={{ marginTop: '20px' }}>
+        <Card title="Quota-Based Model Routing Policy" icon={<Zap />}>
+          <p style={{ color: 'var(--muted)', fontSize: '12px', marginBottom: '14px' }}>
+            Orchestra dynamically shifts model reasoning effort and review profiles as your weekly API quota depletes. Customize the exact models and reasoning effort levels you want running at each remaining quota threshold.
+          </p>
+          <div className="quota-tiers-table">
+            {tiers.map((t) => {
+              const cfg = policy[t.key];
+              return (
+                <div key={t.key} className="quota-tier-row">
+                  <div className="tier-meta">
+                    <span className="tier-name">{t.label}</span>
+                    <span className={`tier-badge tier-${t.badge.toLowerCase()}`}>{t.badge}</span>
+                    <small>{t.desc}</small>
+                  </div>
+                  <div className="tier-controls">
+                    <div className="tier-field">
+                      <label>Antigravity Model</label>
+                      <select value={cfg.antigravityModel} onChange={(e) => updateTier(t.key, 'antigravityModel', e.target.value)}>
+                        <option value="gemini-3.7-flash-high">gemini-3.7-flash-high</option>
+                        <option value="gemini-3.7-flash-medium">gemini-3.7-flash-medium</option>
+                        <option value="gemini-3.7-flash-low">gemini-3.7-flash-low</option>
+                        <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                      </select>
+                    </div>
+                    <div className="tier-field">
+                      <label>Antigravity Effort</label>
+                      <select value={cfg.antigravityEffort} onChange={(e) => updateTier(t.key, 'antigravityEffort', e.target.value)}>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+                    <div className="tier-field">
+                      <label>Codex Review Model</label>
+                      <select value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
+                        <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+                        <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+                        <option value="gpt-5.6-luna">gpt-5.6-luna</option>
+                        <option value="gpt-5.1">gpt-5.1</option>
+                        <option value="none">None (Bypass Codex / Gemma Triage)</option>
+                      </select>
+                    </div>
+                    <div className="tier-field">
+                      <label>Codex Effort</label>
+                      <select value={cfg.codexEffort || 'low'} disabled={!cfg.codexModel} onChange={(e) => updateTier(t.key, 'codexEffort', e.target.value)}>
+                        <option value="high">High</option>
+                        <option value="medium">Medium</option>
+                        <option value="low">Low</option>
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
+            <button className="primary" onClick={() => onSave({ quotaPolicy: policy })}>Save Quota Policy</button>
+          </div>
+        </Card>
+      </div>
+
+      <div style={{ marginTop: '20px' }}>
+        <Card title="CLI Diagnostics" icon={<Terminal />}>
+          <div className="service-list">
+            {['antigravity', 'codex', 'git', 'nvidia'].map((name) => (
+              <div key={name}>
+                <StatusDot ok={health[name]?.available !== false} />
+                <span>{name}</span>
+                <small>{health[name]?.version || (health[name]?.available === false ? 'Unavailable' : 'Ready')}</small>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+    </section>
+  );
 }
 
 function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[]; models: Record<string, string> | null }) {

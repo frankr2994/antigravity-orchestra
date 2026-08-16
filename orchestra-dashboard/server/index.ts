@@ -8,7 +8,7 @@ import { canonicalizeDirectory, inspectProjectScope, isOrchestraInternalPath, on
 import { getGitStatus, pushCurrent } from './git.js';
 import { getHealth, getStats, getUsage } from './telemetry.js';
 import { runProcess } from './process.js';
-import { answerRunQuestion, buildContinuationPrompt, explainRunHealth, findContinuationRecoveryTask } from './agents.js';
+import { answerRunQuestion, buildContinuationPrompt, DEFAULT_QUOTA_POLICY, explainRunHealth, findContinuationRecoveryTask, type QuotaPolicy, suggestSteeringGuidance } from './agents.js';
 import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
@@ -221,10 +221,30 @@ app.post('/api/mcp/servers/:name/toggle', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.post('/api/tasks/:id/suggest-steering', async (req, res, next) => {
+  try {
+    const task = requireTask(req.params.id);
+    const project = requireProject(task.projectId);
+    const events = store.listEvents(task.id);
+    const lastReviewEvent = events.findLast((e) => e.type === 'agent.completed' && ((e.payload as Record<string, unknown> | null)?.role === 'review'));
+    const payload = lastReviewEvent?.payload as Record<string, unknown> | undefined;
+    const reviewBlockers = typeof payload?.summary === 'string' ? payload.summary : 'Review was rejected without specific blockers.';
+    const suggestion = await suggestSteeringGuidance({
+      root: project.root,
+      request: task.prompt,
+      reviewBlockers,
+    });
+    res.json({ suggestion });
+  } catch (error) { next(error); }
+});
+
 app.get('/api/settings', (_req, res) => res.json(publicSettings()));
 app.patch('/api/settings', (req, res) => {
   const interval = Number(req.body?.telemetryInterval);
   if (Number.isFinite(interval) && interval >= 1000 && interval <= 60_000) store.setSetting('telemetryInterval', String(interval));
+  if (req.body?.quotaPolicy && typeof req.body.quotaPolicy === 'object') {
+    store.setSetting('quotaPolicy', JSON.stringify(req.body.quotaPolicy));
+  }
   res.json(publicSettings());
 });
 
@@ -270,7 +290,19 @@ async function restoreInterruptedTask(taskId: string) {
   } catch { /* Preserve the ordinary interrupted failure if Git inspection fails. */ }
 }
 function writeEvent(res: Response, event: { id: number; type: string }) { res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`); }
-function publicSettings() { return { lmStudioBaseUrl: config.lmStudioBaseUrl, lmStudioModel: config.lmStudioModel, telemetryInterval: Number(store.getSetting('telemetryInterval') || 2000), maxGlobalTasks: config.maxGlobalTasks, routingMode: 'automatic' }; }
+function publicSettings() {
+  const quotaPolicyJson = store.getSetting('quotaPolicy');
+  let quotaPolicy: QuotaPolicy = DEFAULT_QUOTA_POLICY;
+  try { if (quotaPolicyJson) quotaPolicy = { ...DEFAULT_QUOTA_POLICY, ...JSON.parse(quotaPolicyJson) }; } catch { /* ignore */ }
+  return {
+    lmStudioBaseUrl: config.lmStudioBaseUrl,
+    lmStudioModel: config.lmStudioModel,
+    telemetryInterval: Number(store.getSetting('telemetryInterval') || 2000),
+    maxGlobalTasks: config.maxGlobalTasks,
+    routingMode: 'automatic',
+    quotaPolicy,
+  };
+}
 
 async function pickFolder() {
   if (process.platform !== 'win32') throw new Error('Native folder selection is currently supported on Windows only.');
