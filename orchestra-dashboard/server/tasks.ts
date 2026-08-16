@@ -249,7 +249,7 @@ export class TaskManager {
             getRecentCommits(project.root, 10),
             getDiff(project.root, 20_000),
           ]);
-          const evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff);
+          const evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff, 35_000);
           const answer = await runGemmaDirectChat({
             root: project.root,
             prompt: task.prompt,

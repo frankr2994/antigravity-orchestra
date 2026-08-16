@@ -209,9 +209,14 @@ Instructions:
     });
 
     if (!response.ok) {
-      const fallbackText = await callGemma(messages, 4000, 180_000, undefined, true, input.onToolActivity);
-      input.onOutput?.(fallbackText);
-      return fallbackText;
+      const errorText = await response.text();
+      let detail = errorText.slice(0, 300);
+      try {
+        const errJson = JSON.parse(errorText) as { error?: string | { message?: string } };
+        if (typeof errJson.error === 'string') detail = errJson.error;
+        else if (errJson.error?.message) detail = errJson.error.message;
+      } catch { /* ignore */ }
+      throw new Error(`LM Studio HTTP ${response.status}: ${detail}`);
     }
 
     const reader = response.body?.getReader();
