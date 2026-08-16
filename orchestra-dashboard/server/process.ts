@@ -42,6 +42,7 @@ export function runProcess(command: string, args: string[], options: RunOptions 
       if (timer) clearTimeout(timer);
       if (idleTimer) clearTimeout(idleTimer);
       options.signal?.removeEventListener('abort', abort);
+      terminateTree(child.pid);
       if (error) reject(error); else resolve({ code, stdout, stderr });
     };
     const abort = () => { terminateTree(child.pid); finish(new Error('Process cancelled')); };
