@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -242,7 +242,8 @@ export class TaskManager {
         const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
 
         if (directAgent === 'gemma') {
-          this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model: config.lmStudioModel });
+          const model = await getActiveLmStudioModel();
+          this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model });
           const [status, commits, diff] = await Promise.all([
             getGitStatus(project.root),
             getRecentCommits(project.root, 10),

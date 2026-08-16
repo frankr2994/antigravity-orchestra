@@ -25,13 +25,25 @@ const SEMANTIC_COMMITS_SCHEMA: JsonSchema = { name: 'semantic_commit_slicing', s
 const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
 const GEMMA_MICRO_TASK_SCHEMA: JsonSchema = { name: 'gemma_micro_task_execution', schema: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string', enum: ['overwrite', 'create'] }, content: { type: 'string' } }, required: ['path', 'action', 'content'], additionalProperties: false } }, explanation: { type: 'string' } }, required: ['files', 'explanation'], additionalProperties: false } };
 
+export async function getActiveLmStudioModel(): Promise<string> {
+  try {
+    const response = await fetch(`${config.lmStudioBaseUrl}/models`, { signal: AbortSignal.timeout(3000) });
+    if (response.ok) {
+      const body = await response.json() as { data?: Array<{ id?: string }> };
+      const loaded = body.data?.[0]?.id;
+      if (loaded) return loaded;
+    }
+  } catch { /* fallback to config */ }
+  return config.lmStudioModel;
+}
+
 export async function lmStudioHealth() {
   try {
     const response = await fetch(`${config.lmStudioBaseUrl}/models`, { signal: AbortSignal.timeout(4000) });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const body = await response.json() as { data?: Array<{ id?: string }> };
     const models = body.data?.map((item) => item.id).filter(Boolean) || [];
-    return { available: true, modelAvailable: models.includes(config.lmStudioModel), models };
+    return { available: true, modelAvailable: models.length > 0, models };
   } catch (error) {
     return { available: false, modelAvailable: false, models: [], error: error instanceof Error ? error.message : String(error) };
   }
@@ -73,6 +85,7 @@ export async function triageProviderFailure(input: { stage: string; error: strin
 }
 
 async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false, onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void): Promise<string> {
+  const model = await getActiveLmStudioModel();
   const conversation = [...messages];
   const tools = riderTools ? await getGemmaRiderTools() : [];
   let toolCallsUsed = 0;
@@ -80,11 +93,11 @@ async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 7
     const response = await fetch(`${config.lmStudioBaseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: config.lmStudioModel, messages: conversation, temperature: 0.2, max_tokens: maxTokens, ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { name: jsonSchema.name, strict: true, schema: jsonSchema.schema } } } : {}), ...(tools.length ? { tools, tool_choice: 'auto' } : {}) }),
+      body: JSON.stringify({ model, messages: conversation, temperature: 0.2, max_tokens: maxTokens, ...(jsonSchema ? { response_format: { type: 'json_schema', json_schema: { name: jsonSchema.name, strict: true, schema: jsonSchema.schema } } } : {}), ...(tools.length ? { tools, tool_choice: 'auto' } : {}) }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) throw new Error(`LM Studio returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
+    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
     const message = body.choices?.[0]?.message;
     const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
     if (calls.length) {
@@ -104,7 +117,7 @@ async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 7
       }
       continue;
     }
-    const content = message?.content?.trim();
+    const content = message?.content?.trim() || message?.reasoning_content?.trim();
     if (!content) throw new Error('LM Studio returned an empty response');
     return content;
   }
@@ -128,8 +141,13 @@ export interface GemmaPostflight {
 }
 
 export function shouldAttemptGemmaAnswer(classification: TaskClassification, prompt: string) {
-  if (classification.type !== 'question' || classification.mutating || classification.complexity !== 'small' || classification.codexRole !== 'none' || classification.riskFlags.length) return false;
-  return !/\b(latest|current news|internet|online search|browse|download|install|run|execute|launch|compile|benchmark|deploy|device|adb|screenshot|open the app|commits?|git log|git history|revision history|authors?|who changed)\b/i.test(prompt);
+  if (classification.mutating || classification.complexity !== 'small' || classification.riskFlags.length > 0 || classification.codexRole !== 'none') {
+    return false;
+  }
+  if (!/\b(what|where|how|explain|who|describe|summary|overview|repo|stack|package)\b/i.test(prompt)) {
+    return false;
+  }
+  return !/\b(run|build|test|verify|execute|fix|repair|patch|edit|modify|commit|push|refactor)\b/i.test(prompt);
 }
 
 export function normalizeEvidenceFile(value: string, root: string, availableFiles: string[]) {
@@ -157,6 +175,7 @@ export async function runGemmaDirectChat(input: {
   onOutput?: (chunk: string) => void;
   onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void;
 }): Promise<string> {
+  const model = await getActiveLmStudioModel();
   const system = `You are Gemma, the local AI software engineering assistant in Antigravity Orchestra. You are in a direct 1-on-1 consultation with the developer.
 The authoritative active repository is: ${input.root}.
 
@@ -180,24 +199,24 @@ Instructions:
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: config.lmStudioModel,
+        model,
         messages,
         temperature: 0.7,
-        max_tokens: 3000,
+        max_tokens: 4000,
         stream: true,
       }),
       signal: input.signal || AbortSignal.timeout(180_000),
     });
 
     if (!response.ok) {
-      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      const fallbackText = await callGemma(messages, 4000, 180_000, undefined, true, input.onToolActivity);
       input.onOutput?.(fallbackText);
       return fallbackText;
     }
 
     const reader = response.body?.getReader();
     if (!reader) {
-      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      const fallbackText = await callGemma(messages, 4000, 180_000, undefined, true, input.onToolActivity);
       input.onOutput?.(fallbackText);
       return fallbackText;
     }
@@ -219,8 +238,8 @@ Instructions:
         if (!trimmed || trimmed === 'data: [DONE]') continue;
         if (trimmed.startsWith('data: ')) {
           try {
-            const data = JSON.parse(trimmed.slice(6)) as { choices?: Array<{ delta?: { content?: string } }> };
-            const delta = data.choices?.[0]?.delta?.content;
+            const data = JSON.parse(trimmed.slice(6)) as { choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null; thought?: string | null } }> };
+            const delta = data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.delta?.reasoning_content ?? data.choices?.[0]?.delta?.thought ?? null;
             if (delta) {
               accumulated += delta;
               textBuffer += delta;
@@ -243,7 +262,7 @@ Instructions:
     return accumulated.trim() || 'Gemma completed without response text.';
   } catch (error) {
     try {
-      const fallbackText = await callGemma(messages, 3000, 180_000, undefined, true, input.onToolActivity);
+      const fallbackText = await callGemma(messages, 4000, 180_000, undefined, true, input.onToolActivity);
       input.onOutput?.(fallbackText);
       return fallbackText;
     } catch {
