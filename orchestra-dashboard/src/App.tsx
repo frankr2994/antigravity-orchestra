@@ -994,13 +994,27 @@ function SettingsView({ settings, health, api, onSave }: { settings: SettingsDat
                   setLocalModel(val);
                 }}
                 disabled={modelActionBusy}
+                style={{ width: '100%', maxWidth: '100%', textOverflow: 'ellipsis' }}
               >
-                {installedModels.map((m) => (
-                  <option key={m.id} value={m.id}>
-                    {m.state === 'loaded' ? '🟢 [LOADED] ' : '⚪ [ON DISK] '}
-                    {m.displayName || m.id} {m.quantization ? `(${m.quantization})` : ''}
-                  </option>
-                ))}
+                {installedModels.map((m) => {
+                  const status = m.state === 'loaded' ? '🟢 [LOADED] ' : '⚪ ';
+                  let friendly = m.displayName || m.id;
+                  if (m.id.includes('gemma-4-12b') || m.id.includes('gemma4-v2')) {
+                    friendly = 'Gemma 4 12B (Agentic Composer)';
+                  } else if (m.id.includes('gemma-4-e2b-it-qat') || m.id.includes('gemma-4-E2B_q4_0')) {
+                    friendly = 'Gemma 4 E2B Instruct';
+                  } else if (m.id.includes('gemma-4-e2b-it')) {
+                    friendly = 'Gemma 4 E2B Vision';
+                  } else if (m.id.includes('phi-3.5-mini')) {
+                    friendly = 'Phi 3.5 Mini Instruct';
+                  }
+                  const quant = m.quantization ? ` · ${m.quantization}` : '';
+                  return (
+                    <option key={m.id} value={m.id} title={m.id}>
+                      {status}{friendly}{quant}
+                    </option>
+                  );
+                })}
               </select>
             ) : (
               <input
@@ -1016,8 +1030,16 @@ function SettingsView({ settings, health, api, onSave }: { settings: SettingsDat
                   color: 'var(--text)',
                   padding: '7px 9px',
                   fontSize: '11px',
+                  width: '100%',
+                  maxWidth: '100%',
+                  boxSizing: 'border-box',
                 }}
               />
+            )}
+            {localModel && (
+              <small style={{ color: 'var(--muted)', fontSize: '10px', marginTop: '4px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block', fontFamily: 'JetBrains Mono, monospace' }} title={localModel}>
+                Target: {localModel}
+              </small>
             )}
           </div>
 
