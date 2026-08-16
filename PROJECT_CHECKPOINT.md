@@ -77,6 +77,12 @@ User Request (Project-scoped)
 * **Inline Rename (✏️)**: Inline text editor to rename any conversation (`Enter` to save, `Esc` to cancel).
 * **Delete / Reset (🗑️)**: 1-click deletion with confirmation or reset for single sessions.
 
+### 🧊 3D Neural Asset Forge & Vision Inspection Loop
+* **Direct ComfyUI + TripoSR Integration**: Native neural mesh reconstruction executed directly on local GPU (RTX 2080 Ti) in ~20 seconds.
+* **Embedded Trimesh Converter**: Automatically extracts high-density 3D models with vertex colors and converts `.obj` meshes into optimized `.glb` binaries.
+* **Gemma 12B Vision Quality Review**: Autonomous multimodal inspection via LM Studio (`gemma-4-12b-it-qat`) providing instant score cards (0-100), topological critiques, and prompt repair tips with $0 cloud token cost.
+* **Interactive Three.js WebGL Viewport**: Full Orbit controls (rotate, pan, zoom), PBR Shaded / Clay Matcap / Wireframe render modes, real-time vertex & face count meters, and 1-click `.GLB` export.
+
 ---
 
 ## 3. Repository Structure & Key Components
