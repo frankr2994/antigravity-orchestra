@@ -40,6 +40,43 @@ export async function getHealth() {
   return { backend: { available: true, version: '1.0.0' }, antigravity: agy, codex, git, lmStudio, nvidia: { available: nvidia } };
 }
 
+let cachedAgyModels: { at: number; models: Array<{ id: string; name: string }> } | null = null;
+
+export async function getAntigravityModels(): Promise<Array<{ id: string; name: string }>> {
+  if (cachedAgyModels && Date.now() - cachedAgyModels.at < 60_000) {
+    return cachedAgyModels.models;
+  }
+  try {
+    const result = await runProcess('agy.exe', ['models'], { timeoutMs: 5000 });
+    if (result.stdout) {
+      const lines = result.stdout.split(/\r?\n/);
+      const models: Array<{ id: string; name: string }> = [];
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('Fetching')) continue;
+        const [id, ...rest] = trimmed.split(/\t+/);
+        if (id && rest.length > 0) {
+          models.push({ id: id.trim(), name: rest.join(' ').trim() });
+        } else if (id && !id.includes(' ')) {
+          models.push({ id: id.trim(), name: id.trim() });
+        }
+      }
+      if (models.length > 0) {
+        cachedAgyModels = { at: Date.now(), models };
+        return models;
+      }
+    }
+  } catch { /* ignore */ }
+  return [
+    { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+    { id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
+    { id: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' },
+    { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
+    { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)' },
+    { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
+  ];
+}
+
 export async function getUsage() {
   return {
     antigravity: await readAntigravityUsage(),

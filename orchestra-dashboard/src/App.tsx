@@ -37,6 +37,12 @@ type Health = Record<string, HealthItem>;
 type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'medium' | 'high'; codexModel: string | null; codexEffort: 'low' | 'medium' | 'high' | null };
 type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
 type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string; quotaPolicy: QuotaPolicy };
+type ModelDescriptor = { id: string; name: string };
+type AvailableModels = {
+  antigravity: ModelDescriptor[];
+  codex: ModelDescriptor[];
+  lmStudio?: InstalledLmStudioModel[];
+};
 type ProviderQuotaBucket = { id: string; name?: string; group?: string; window?: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null };
 type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: ProviderQuotaBucket[] };
 type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
@@ -96,6 +102,22 @@ function App() {
   const [input, setInput] = useState('');
   const [executionMode, setExecutionMode] = useState<'orchestra' | 'direct'>('orchestra');
   const [directAgent, setDirectAgent] = useState<'gemma' | 'antigravity' | 'codex'>('gemma');
+  const [availableModels, setAvailableModels] = useState<AvailableModels>({
+    antigravity: [
+      { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+      { id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
+      { id: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' },
+      { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
+    ],
+    codex: [
+      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Deep Reasoning & Architecture)' },
+      { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Implementation & Debug)' },
+      { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast Budget Saver)' },
+      { id: 'gpt-5.1-codex-max', name: 'GPT-5.1 Codex Max' },
+    ],
+    lmStudio: [],
+  });
   const [soloAntigravityModel, setSoloAntigravityModel] = useState<string>('gemini-3.7-flash-high');
   const [soloAntigravityEffort, setSoloAntigravityEffort] = useState<'low' | 'medium' | 'high'>('high');
   const [soloCodexModel, setSoloCodexModel] = useState<string>('gpt-5.6-sol');
@@ -162,10 +184,17 @@ function App() {
     } catch { /* ignore */ }
   }, [api]);
 
-  const fetchLmStudioModels = useCallback(async () => {
+  const fetchAvailableModels = useCallback(async () => {
     try {
-      const data = await api<{ models: InstalledLmStudioModel[] }>('/api/lmstudio/models');
-      if (data?.models) setInstalledLmStudioModels(data.models);
+      const data = await api<AvailableModels>('/api/models');
+      if (data) {
+        setAvailableModels((prev) => ({
+          antigravity: data.antigravity && data.antigravity.length > 0 ? data.antigravity : prev.antigravity,
+          codex: data.codex && data.codex.length > 0 ? data.codex : prev.codex,
+          lmStudio: data.lmStudio || prev.lmStudio,
+        }));
+        if (data.lmStudio && data.lmStudio.length > 0) setInstalledLmStudioModels(data.lmStudio);
+      }
     } catch { /* ignore */ }
   }, [api]);
 
@@ -195,22 +224,22 @@ function App() {
       setToken(data.token); setProjects(data.projects); setTasks(data.tasks); setHealth(data.health); setSettings(data.settings);
       if (data.projects[0]) await activateProject(data.projects[0], data.token);
       void fetchMcpServers();
-      void fetchLmStudioModels();
+      void fetchAvailableModels();
     }).catch((reason) => setError(reason.message));
     return () => streamRef.current?.close();
     // Initial bootstrap must run only once.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fetchMcpServers, fetchLmStudioModels]);
+  }, [fetchMcpServers, fetchAvailableModels]);
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers(), fetchLmStudioModels()])
+    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers(), fetchAvailableModels()])
       .then(([nextStats, nextHealth, nextUsage, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); setMcp(nextMcp); })
       .catch((reason) => setError(reason.message));
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
     return () => clearInterval(timer);
-  }, [api, fetchMcpServers, fetchLmStudioModels, settings, token]);
+  }, [api, fetchMcpServers, fetchAvailableModels, settings, token]);
 
   useEffect(() => {
     if (!monitoredTaskId) { setMonitor(null); setMonitorExplanation(''); return; }
@@ -453,7 +482,7 @@ function App() {
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
-        {view === 'settings' && settings && <SettingsView settings={settings} health={health} api={api} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
+        {view === 'settings' && settings && <SettingsView settings={settings} health={health} availableModels={availableModels} api={api} onSave={async (value) => setSettings(await api<SettingsData>('/api/settings', { method: 'PATCH', body: JSON.stringify(value) }))} />}
       </main>
 
       <aside className="chat-panel">
@@ -590,11 +619,9 @@ function App() {
             <div className="solo-model-picker">
               <span>Model:</span>
               <select value={soloAntigravityModel} onChange={(e) => setSoloAntigravityModel(e.target.value)}>
-                <option value="gemini-3.7-flash-high">Gemini 3.7 Flash (High Reasoning)</option>
-                <option value="gemini-3.7-flash-medium">Gemini 3.7 Flash (Medium Reasoning)</option>
-                <option value="gemini-3.7-flash-low">Gemini 3.7 Flash (Low Reasoning)</option>
-                <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                {availableModels.antigravity.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                ))}
               </select>
               <span>Effort:</span>
               <select value={soloAntigravityEffort} onChange={(e) => setSoloAntigravityEffort(e.target.value as 'low' | 'medium' | 'high')}>
@@ -609,10 +636,9 @@ function App() {
             <div className="solo-model-picker">
               <span>Model:</span>
               <select value={soloCodexModel} onChange={(e) => setSoloCodexModel(e.target.value)}>
-                <option value="gpt-5.6-sol">GPT-5.6 Sol (Deep Reasoning & Architecture)</option>
-                <option value="gpt-5.6-terra">GPT-5.6 Terra (Implementation & Debug)</option>
-                <option value="gpt-5.6-luna">GPT-5.6 Luna (Fast Budget Saver)</option>
-                <option value="gpt-5.1-codex-max">GPT-5.1 Codex Max</option>
+                {availableModels.codex.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                ))}
               </select>
               <span>Effort:</span>
               <select value={soloCodexEffort} onChange={(e) => setSoloCodexEffort(e.target.value as 'low' | 'medium' | 'high')}>
@@ -1362,7 +1388,19 @@ type InstalledLmStudioModel = {
   type?: string;
 };
 
-function SettingsView({ settings, health, api, onSave }: { settings: SettingsData; health: Health; api: <T>(path: string, options?: RequestInit) => Promise<T>; onSave: (value: Partial<SettingsData>) => void }) {
+function SettingsView({
+  settings,
+  health,
+  availableModels,
+  api,
+  onSave,
+}: {
+  settings: SettingsData;
+  health: Health;
+  availableModels?: AvailableModels;
+  api: <T>(path: string, options?: RequestInit) => Promise<T>;
+  onSave: (value: Partial<SettingsData>) => void;
+}) {
   const [interval, setIntervalValue] = useState(settings.telemetryInterval);
   const [localModel, setLocalModel] = useState(settings.lmStudioModel);
   const [installedModels, setInstalledModels] = useState<InstalledLmStudioModel[]>([]);
@@ -1596,22 +1634,29 @@ function SettingsView({ settings, health, api, onSave }: { settings: SettingsDat
                     <div className="tier-field">
                       <label>Antigravity Model</label>
                       <select value={cfg.antigravityModel} onChange={(e) => updateTier(t.key, 'antigravityModel', e.target.value)}>
-                        <option value="gemini-3.7-flash-high">Gemini 3.7 Flash (High)</option>
-                        <option value="gemini-3.7-flash-medium">Gemini 3.7 Flash (Medium)</option>
-                        <option value="gemini-3.7-flash-low">Gemini 3.7 Flash (Low)</option>
-                        <option value="gemini-3.1-pro-high">Gemini 3.1 Pro (High)</option>
-                        <option value="gemini-3.1-pro-low">Gemini 3.1 Pro (Low)</option>
-                        <option value="claude-sonnet-4-6">Claude Sonnet 4.6 (Thinking)</option>
-                        <option value="claude-opus-4-6-thinking">Claude Opus 4.6 (Thinking)</option>
+                        {(availableModels?.antigravity || [
+                          { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
+                          { id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
+                          { id: 'gemini-3.7-flash-low', name: 'Gemini 3.7 Flash (Low)' },
+                          { id: 'gemini-3.1-pro-high', name: 'Gemini 3.1 Pro (High)' },
+                          { id: 'gemini-3.1-pro-low', name: 'Gemini 3.1 Pro (Low)' },
+                          { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (Thinking)' },
+                        ]).map((m) => (
+                          <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                        ))}
                       </select>
                     </div>
                     <div className="tier-field">
                       <label>Codex Review Model</label>
                       <select value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
-                        <option value="gpt-5.6-sol">gpt-5.6-sol</option>
-                        <option value="gpt-5.6-terra">gpt-5.6-terra</option>
-                        <option value="gpt-5.6-luna">gpt-5.6-luna</option>
-                        <option value="gpt-5.1">gpt-5.1</option>
+                        {(availableModels?.codex || [
+                          { id: 'gpt-5.6-sol', name: 'gpt-5.6-sol' },
+                          { id: 'gpt-5.6-terra', name: 'gpt-5.6-terra' },
+                          { id: 'gpt-5.6-luna', name: 'gpt-5.6-luna' },
+                          { id: 'gpt-5.1-codex-max', name: 'gpt-5.1-codex-max' },
+                        ]).map((m) => (
+                          <option key={m.id} value={m.id}>{m.name || m.id}</option>
+                        ))}
                         <option value="none">None (Bypass Codex / Gemma Triage)</option>
                       </select>
                     </div>
