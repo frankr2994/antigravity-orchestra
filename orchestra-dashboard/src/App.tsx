@@ -38,9 +38,16 @@ type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'm
 type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
 type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string; quotaPolicy: QuotaPolicy };
 type ModelDescriptor = { id: string; name: string };
+type CodexModelDescriptor = {
+  id: string;
+  name: string;
+  description?: string;
+  defaultEffort?: string;
+  supportedEfforts?: Array<{ effort: string; description?: string }>;
+};
 type AvailableModels = {
   antigravity: ModelDescriptor[];
-  codex: ModelDescriptor[];
+  codex: CodexModelDescriptor[];
   lmStudio?: InstalledLmStudioModel[];
 };
 type ProviderQuotaBucket = { id: string; name?: string; group?: string; window?: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null };
@@ -119,7 +126,7 @@ function App() {
   });
   const [soloAntigravityModel, setSoloAntigravityModel] = useState<string>('gemini-3.7-flash-high');
   const [soloCodexModel, setSoloCodexModel] = useState<string>('gpt-5.6-sol');
-  const [soloCodexEffort, setSoloCodexEffort] = useState<'low' | 'medium' | 'high'>('high');
+  const [soloCodexEffort, setSoloCodexEffort] = useState<string>('high');
   const [soloGemmaModel, setSoloGemmaModel] = useState<string>('');
   const [installedLmStudioModels, setInstalledLmStudioModels] = useState<InstalledLmStudioModel[]>([]);
   const [steerInput, setSteerInput] = useState('');
@@ -631,16 +638,38 @@ function App() {
           {executionMode === 'direct' && directAgent === 'codex' && (
             <div className="solo-model-picker">
               <span>Model:</span>
-              <select value={soloCodexModel} onChange={(e) => setSoloCodexModel(e.target.value)}>
+              <select
+                value={soloCodexModel}
+                onChange={(e) => {
+                  const newModelId = e.target.value;
+                  setSoloCodexModel(newModelId);
+                  const descriptor = availableModels.codex.find((m) => m.id === newModelId);
+                  if (descriptor?.supportedEfforts && !descriptor.supportedEfforts.some((eff) => eff.effort === soloCodexEffort)) {
+                    setSoloCodexEffort(descriptor.defaultEffort || descriptor.supportedEfforts[0]?.effort || 'medium');
+                  }
+                }}
+              >
                 {availableModels.codex.map((m) => (
                   <option key={m.id} value={m.id}>{m.name || m.id}</option>
                 ))}
               </select>
               <span>Effort:</span>
-              <select value={soloCodexEffort} onChange={(e) => setSoloCodexEffort(e.target.value as 'low' | 'medium' | 'high')}>
-                <option value="high">High</option>
-                <option value="medium">Medium</option>
-                <option value="low">Low</option>
+              <select value={soloCodexEffort} onChange={(e) => setSoloCodexEffort(e.target.value)}>
+                {(() => {
+                  const currentDescriptor = availableModels.codex.find((m) => m.id === soloCodexModel);
+                  const efforts = currentDescriptor?.supportedEfforts && currentDescriptor.supportedEfforts.length > 0
+                    ? currentDescriptor.supportedEfforts
+                    : [
+                        { effort: 'low', description: 'Low' },
+                        { effort: 'medium', description: 'Medium' },
+                        { effort: 'high', description: 'High' },
+                      ];
+                  return efforts.map((eff) => (
+                    <option key={eff.effort} value={eff.effort}>
+                      {eff.effort.charAt(0).toUpperCase() + eff.effort.slice(1)}
+                    </option>
+                  ));
+                })()}
               </select>
             </div>
           )}
@@ -1646,9 +1675,12 @@ function SettingsView({
                       <label>Codex Review Model</label>
                       <select value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
                         {(availableModels?.codex || [
-                          { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol' },
-                          { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra' },
-                          { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna' },
+                          { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
+                          { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
+                          { id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna' },
+                          { id: 'gpt-5.5', name: 'GPT-5.5' },
+                          { id: 'gpt-5.4', name: 'GPT-5.4' },
+                          { id: 'gpt-5.4-mini', name: 'GPT-5.4-Mini' },
                         ]).map((m) => (
                           <option key={m.id} value={m.id}>{m.name || m.id}</option>
                         ))}
@@ -1657,10 +1689,26 @@ function SettingsView({
                     </div>
                     <div className="tier-field">
                       <label>Codex Effort</label>
-                      <select value={cfg.codexEffort || 'low'} disabled={!cfg.codexModel} onChange={(e) => updateTier(t.key, 'codexEffort', e.target.value)}>
-                        <option value="high">High</option>
-                        <option value="medium">Medium</option>
-                        <option value="low">Low</option>
+                      <select
+                        value={cfg.codexEffort || 'low'}
+                        disabled={!cfg.codexModel || cfg.codexModel === 'none'}
+                        onChange={(e) => updateTier(t.key, 'codexEffort', e.target.value)}
+                      >
+                        {(() => {
+                          const selectedModel = availableModels?.codex?.find((m) => m.id === cfg.codexModel);
+                          const efforts = selectedModel?.supportedEfforts && selectedModel.supportedEfforts.length > 0
+                            ? selectedModel.supportedEfforts
+                            : [
+                                { effort: 'low', description: 'Low' },
+                                { effort: 'medium', description: 'Medium' },
+                                { effort: 'high', description: 'High' },
+                              ];
+                          return efforts.map((eff) => (
+                            <option key={eff.effort} value={eff.effort}>
+                              {eff.effort.charAt(0).toUpperCase() + eff.effort.slice(1)}
+                            </option>
+                          ));
+                        })()}
                       </select>
                     </div>
                   </div>

@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import si from 'systeminformation';
 import { runProcess, commandAvailable } from './process.js';
 import { lmStudioHealth } from './agents.js';
@@ -79,29 +77,126 @@ export async function getAntigravityModels(): Promise<Array<{ id: string; name: 
   ];
 }
 
-export async function getCodexModels(): Promise<Array<{ id: string; name: string }>> {
-  const models: Array<{ id: string; name: string }> = [
-    { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol (Flagship Deep Reasoning)' },
-    { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra (Balanced Quality & Implementation)' },
-    { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna (Fast / Budget Saver)' },
-  ];
+export interface CodexModelDescriptor {
+  id: string;
+  name: string;
+  description?: string;
+  defaultEffort?: string;
+  supportedEfforts?: Array<{ effort: string; description?: string }>;
+}
 
+let cachedCodexModels: { at: number; models: CodexModelDescriptor[] } | null = null;
+
+export async function getCodexModels(): Promise<CodexModelDescriptor[]> {
+  if (cachedCodexModels && Date.now() - cachedCodexModels.at < 60_000) {
+    return cachedCodexModels.models;
+  }
   try {
-    const home = process.env.USERPROFILE || process.env.HOME || '';
-    const configPath = join(home, '.codex', 'config.toml');
-    if (existsSync(configPath)) {
-      const content = readFileSync(configPath, 'utf8');
-      const match = content.match(/^model\s*=\s*["']([^"']+)["']/m);
-      if (match && match[1]) {
-        const configuredModel = match[1].trim();
-        if (!models.some((m) => m.id === configuredModel)) {
-          models.unshift({ id: configuredModel, name: `${configuredModel} (Configured Default)` });
+    const result = await runProcess('codex.exe', ['debug', 'models'], { timeoutMs: 5000 });
+    if (result.stdout) {
+      const parsed = JSON.parse(result.stdout);
+      if (Array.isArray(parsed.models)) {
+        const models: CodexModelDescriptor[] = parsed.models
+          .filter((m: any) => m && m.visibility !== 'hide' && m.slug)
+          .map((m: any) => ({
+            id: String(m.slug),
+            name: String(m.display_name || m.slug),
+            description: m.description ? String(m.description) : undefined,
+            defaultEffort: m.default_reasoning_level ? String(m.default_reasoning_level) : undefined,
+            supportedEfforts: Array.isArray(m.supported_reasoning_levels)
+              ? m.supported_reasoning_levels.map((lvl: any) => ({
+                  effort: String(lvl.effort),
+                  description: lvl.description ? String(lvl.description) : undefined,
+                }))
+              : undefined,
+          }));
+        if (models.length > 0) {
+          cachedCodexModels = { at: Date.now(), models };
+          return models;
         }
       }
     }
-  } catch { /* ignore */ }
+  } catch { /* ignore fallback */ }
 
-  return models;
+  return [
+    {
+      id: 'gpt-5.6-sol',
+      name: 'GPT-5.6-Sol',
+      description: 'Latest frontier agentic coding model.',
+      defaultEffort: 'low',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+        { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+        { effort: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
+      ],
+    },
+    {
+      id: 'gpt-5.6-terra',
+      name: 'GPT-5.6-Terra',
+      description: 'Balanced agentic coding model for everyday work.',
+      defaultEffort: 'medium',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+        { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+        { effort: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
+      ],
+    },
+    {
+      id: 'gpt-5.6-luna',
+      name: 'GPT-5.6-Luna',
+      description: 'Fast and affordable agentic coding model.',
+      defaultEffort: 'medium',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+        { effort: 'max', description: 'Maximum reasoning depth for the hardest problems' },
+      ],
+    },
+    {
+      id: 'gpt-5.5',
+      name: 'GPT-5.5',
+      description: 'Frontier model for complex coding, research, and real-world work.',
+      defaultEffort: 'medium',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+      ],
+    },
+    {
+      id: 'gpt-5.4',
+      name: 'GPT-5.4',
+      description: 'Strong model for everyday coding.',
+      defaultEffort: 'medium',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+      ],
+    },
+    {
+      id: 'gpt-5.4-mini',
+      name: 'GPT-5.4-Mini',
+      description: 'Small, fast, and cost-efficient model for simpler coding tasks.',
+      defaultEffort: 'medium',
+      supportedEfforts: [
+        { effort: 'low', description: 'Fast responses with lighter reasoning' },
+        { effort: 'medium', description: 'Balances speed and reasoning depth for everyday tasks' },
+        { effort: 'high', description: 'Greater reasoning depth for complex problems' },
+        { effort: 'xhigh', description: 'Extra high reasoning depth for complex problems' },
+      ],
+    },
+  ];
 }
 
 export async function getUsage() {
