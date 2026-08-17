@@ -52,10 +52,17 @@ try:
         print(json.dumps({'valid': False, 'error': 'Mesh contains NaN or Infinite vertex coordinates'}))
         sys.exit(1)
 
-    # 2. Cleanup & sanitization
-    mesh.remove_degenerate_faces()
-    mesh.remove_duplicate_faces()
-    mesh.remove_unreferenced_vertices()
+    # 2. Cleanup & sanitization (Trimesh 4.x / 5.x compatible)
+    if hasattr(mesh, 'nondegenerate_faces'):
+        mesh.update_faces(mesh.nondegenerate_faces())
+    elif hasattr(mesh, 'remove_degenerate_faces'):
+        mesh.remove_degenerate_faces()
+    if hasattr(mesh, 'unique_faces'):
+        mesh.update_faces(mesh.unique_faces())
+    elif hasattr(mesh, 'remove_duplicate_faces'):
+        mesh.remove_duplicate_faces()
+    if hasattr(mesh, 'remove_unreferenced_vertices'):
+        mesh.remove_unreferenced_vertices()
     mesh.process(validate=True)
     mesh.fix_normals()
 
