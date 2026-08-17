@@ -1632,6 +1632,27 @@ function SettingsView({
     }
   };
 
+  const handleUnloadSpecificModel = async (modelId: string) => {
+    setModelActionBusy(true);
+    setActionStatus({ text: `Unloading ${modelId} from VRAM…`, isError: false });
+    try {
+      const res = await api<{ ok: boolean; message: string }>('/api/lmstudio/unload', {
+        method: 'POST',
+        body: JSON.stringify({ modelId }),
+      });
+      if (res?.ok) {
+        setActionStatus({ text: `✓ Unloaded ${modelId}!`, isError: false });
+        await fetchInstalledModels();
+      } else {
+        setActionStatus({ text: `Failed: ${res?.message || 'Error unloading model.'}`, isError: true });
+      }
+    } catch (err) {
+      setActionStatus({ text: `Error: ${err instanceof Error ? err.message : String(err)}`, isError: true });
+    } finally {
+      setModelActionBusy(false);
+    }
+  };
+
   const loadedModelCount = installedModels.filter((m) => m.state === 'loaded').length;
   const activeLoadedModel = installedModels.find((m) => m.state === 'loaded');
 
@@ -1740,9 +1761,36 @@ function SettingsView({
               disabled={modelActionBusy || loadedModelCount === 0}
               title="Unload all models to free 100% GPU VRAM"
             >
-              <Square size={12} /> Free VRAM
+              <Square size={12} /> Free All VRAM
             </button>
           </div>
+
+          {installedModels.filter((m) => m.state === 'loaded').length > 0 && (
+            <div style={{ marginTop: '12px', padding: '8px 10px', background: 'rgba(255,255,255,0.03)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text)', marginBottom: '6px' }}>
+                Currently Loaded in GPU VRAM ({installedModels.filter((m) => m.state === 'loaded').length}):
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {installedModels.filter((m) => m.state === 'loaded').map((m) => (
+                  <div key={m.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', fontSize: '11px' }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--green)' }} title={m.id}>
+                      🟢 {formatGenericModelName(m)}
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost mini"
+                      onClick={() => handleUnloadSpecificModel(m.id)}
+                      disabled={modelActionBusy}
+                      style={{ color: '#f87171', padding: '2px 8px', fontSize: '10px', whiteSpace: 'nowrap', border: '1px solid rgba(248,113,113,0.3)', borderRadius: '4px' }}
+                      title={`Unload ${m.id} from VRAM`}
+                    >
+                      Unload
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {actionStatus && (
             <div style={{ marginTop: '8px', fontSize: '11px', color: actionStatus.isError ? 'var(--red)' : 'var(--cyan)' }}>
