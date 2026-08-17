@@ -553,3 +553,53 @@ After a task entered `recovery_required`, the user submitted the one-word prompt
 - `continue` cannot be downgraded to an isolated repository question while a session has preserved task changes.
 - An erroneous newer summary cannot hide the true recovery owner.
 - Explicit deferral is treated as incomplete work regardless of model confidence.
+
+## 2026-08-17: Forge Visual Pipeline — Generation, Revision, Persistence, Continuity
+
+### Background
+
+Orchestra's initial Forge effort targeted 3D neural mesh synthesis via Stable Diffusion 1.5 + TripoSR. However, single-view 3D neural reconstruction is fundamentally brittle and isolated. The user redirected Forge toward a comprehensive 2D image and video production suite supporting targeted revisions ("preserve everything, change only what was requested"), persistent entities (characters, vehicles, environments), multi-shot video continuity, and non-destructive versioning on local consumer hardware (RTX 2080 Ti 11 GB).
+
+### Decision
+
+Pivot Forge from 3D mesh synthesis to a multi-tiered 2D image, inpainting revision, video generation, and visual continuity pipeline with strict VRAM-staged execution:
+
+1. **Primary Image Ecosystem (SDXL Adaptive Precision)**:
+   - SDXL is the primary image generation backbone at 1024×1024.
+   - Precision (FP16 vs. FP8 vs. GGUF) is determined adaptively by a startup VRAM benchmark rather than hard-coded.
+   - SD 1.5 remains available as a fast/lightweight fallback.
+
+2. **Targeted Image Revision Architecture**:
+   - **Primary inpainting engine**: SDXL + Fooocus Inpaint Patch (`inpaint_v26.fooocus.patch`), adding only ~500 MB overhead to any SDXL checkpoint and leaving VRAM headroom for simultaneous ControlNet + IP-Adapter conditioning.
+   - **Revision principle**: Regenerate the minimum necessary area/information rather than the entire asset.
+   - **Escalation hierarchy**: Localized masked inpainting (SAM3 / manual brush) → Regional expanded masked inpainting → Structural img2img (fixed seed + ControlNet Depth/Canny) → Full regeneration (last resort).
+   - **Secondary quality modes**: Flux.1 Fill Dev and instruction-edit models (Qwen, Bernini-R) available as optional standalone modes.
+
+3. **Persistent Entity Library**:
+   - Reusable entities (characters, vehicles, props, environments, costumes) store curated approved reference images, face crops, and InsightFace embeddings.
+   - IP-Adapter FaceID Plus v2 + ControlNet are the default identity-locking mechanism across separate scenes.
+   - Automated per-character LoRA training is an optional escalation for critical recurring characters when reference conditioning alone is insufficient.
+
+4. **Multi-Model Video Tier (RTX 2080 Ti 11 GB)**:
+   - **LTX-Video 2B distilled**: Primary low-VRAM image-to-video / continuity model (~20–40s per clip).
+   - **Wan 2.1 (1.3B)**: Fast text-to-video (~60–90s per clip).
+   - **Wan 2.1 (14B) GGUF Q4**: Optional higher-quality / slower tier via CPU offloading.
+   - **AnimateDiff (SD 1.5)**: Stylized video with ControlNet choreography.
+
+5. **Multi-Shot Continuity & Shot Planning**:
+   - Projects maintain structured continuity state (entity appearances, clothing, props, damage, environment, time-of-day).
+   - Sequences are decomposed into structured shots with forward-chaining last-frame reference conditioning.
+
+6. **Two-Tier Visual Review (Gemma 12B Vision)**:
+   - **Creation Review**: Prompt fidelity, anatomical correctness, artifacts, composition, style.
+   - **Revision Review**: Separately evaluates requested-change success vs. unwanted drift (identity, composition, background, style, temporal consistency).
+
+7. **Non-Destructive Versioned History**:
+   - All operations produce immutable version records (`v1`, `v2`, `v3`) in an asset version tree supporting compare, revert, and branch.
+
+### Impact
+
+- 3D-specific modules (`mesh-qa.ts`, TripoSR workflows, Three.js WebGL viewport) are refactored into a unified 2D/video Forge architecture.
+- Frontend transitions from 3D WebGL orbit controls to a high-fidelity 2D/video studio (pan/zoom, version comparison, brush masking, entity selector, video timeline player).
+- Dependencies and workflows are managed modularly in `server/workflows/` and `server/forge-manifest.ts`.
+
