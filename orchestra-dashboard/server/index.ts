@@ -37,6 +37,20 @@ import {
   saveAssetVersionAsEntity,
   FORGE_ENTITIES_DIR,
 } from './forge-entities.js';
+import {
+  listStoryboards,
+  getStoryboard,
+  createStoryboard,
+  updateStoryboard,
+  deleteStoryboard,
+  addShotToStoryboard,
+  updateShot,
+  deleteShot,
+  reorderShots,
+  renderStoryboardShot,
+  renderFullStoryboardSequence,
+  FORGE_STORYBOARDS_DIR,
+} from './forge-storyboard.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 import { exportModelFormat } from './mesh-qa.js';
 
@@ -788,6 +802,126 @@ app.get('/api/forge/entities/:id/:filename', (req, res) => {
   }
   res.sendFile(file);
 });
+
+// ─── Multi-Shot Storyboard & Video Continuity Sequences (Phase 4) ────────────────
+
+app.get('/api/forge/storyboards', (_req, res) => {
+  res.json(listStoryboards());
+});
+
+app.get('/api/forge/storyboards/:id', (req, res) => {
+  const seq = getStoryboard(req.params.id);
+  if (!seq) return res.status(404).json({ error: 'Storyboard not found' });
+  res.json(seq);
+});
+
+app.post('/api/forge/storyboards', (req, res, next) => {
+  try {
+    const title = String(req.body?.title || '').trim();
+    if (!title) throw new Error('Storyboard title is required.');
+    const seq = createStoryboard({
+      title,
+      description: req.body?.description,
+      defaultFps: req.body?.defaultFps,
+      videoModel: req.body?.videoModel,
+    });
+    res.status(201).json(seq);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/forge/storyboards/:id', (req, res, next) => {
+  try {
+    const seq = updateStoryboard(req.params.id, req.body || {});
+    res.json(seq);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/forge/storyboards/:id', (req, res) => {
+  const success = deleteStoryboard(req.params.id);
+  res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge/storyboards/:id/shots', (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    if (!prompt) throw new Error('Shot prompt is required.');
+    const shot = addShotToStoryboard(req.params.id, {
+      title: req.body?.title,
+      shotType: req.body?.shotType,
+      cameraMovement: req.body?.cameraMovement,
+      prompt,
+      negativePrompt: req.body?.negativePrompt,
+      durationSeconds: req.body?.durationSeconds,
+      fps: req.body?.fps,
+      entityRefs: req.body?.entityRefs,
+    });
+    res.status(201).json(shot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/forge/storyboards/:id/shots/:shotId', (req, res, next) => {
+  try {
+    const shot = updateShot(req.params.id, req.params.shotId, req.body || {});
+    res.json(shot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/forge/storyboards/:id/shots/:shotId', (req, res) => {
+  const success = deleteShot(req.params.id, req.params.shotId);
+  res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge/storyboards/:id/reorder', (req, res, next) => {
+  try {
+    const shotIds = Array.isArray(req.body?.shotIds) ? req.body.shotIds : [];
+    const seq = reorderShots(req.params.id, shotIds);
+    res.json(seq);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/storyboards/:id/shots/:shotId/render', async (req, res, next) => {
+  try {
+    const shot = await renderStoryboardShot(req.params.id, req.params.shotId);
+    res.json(shot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/storyboards/:id/render', async (req, res, next) => {
+  try {
+    const seq = await renderFullStoryboardSequence(req.params.id);
+    res.json(seq);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/forge/storyboards/:id/shots/:shotId/:filename', (req, res) => {
+  const file = join(FORGE_STORYBOARDS_DIR, req.params.id, 'shots', req.params.shotId, req.params.filename);
+  if (!existsSync(file)) {
+    return res.status(404).json({ error: 'Shot asset not found' });
+  }
+  if (req.params.filename.endsWith('.png')) {
+    res.setHeader('Content-Type', 'image/png');
+  } else if (req.params.filename.endsWith('.webp')) {
+    res.setHeader('Content-Type', 'image/webp');
+  } else if (req.params.filename.endsWith('.mp4')) {
+    res.setHeader('Content-Type', 'video/mp4');
+  }
+  res.sendFile(file);
+});
+
 
 
 

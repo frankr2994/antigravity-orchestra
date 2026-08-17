@@ -200,3 +200,58 @@ export interface ForgeAnimateOptions {
   denoise?: number;
   autoReview?: boolean;
 }
+
+// ─── Phase 4: Multi-Shot Storyboard & Video Continuity Sequences ─────────────────
+
+export type ShotType =
+  | 'establishing'
+  | 'wide'
+  | 'medium'
+  | 'close_up'
+  | 'over_the_shoulder'
+  | 'action';
+
+export type CameraMovement =
+  | 'static'
+  | 'pan_right'
+  | 'pan_left'
+  | 'tilt_up'
+  | 'tilt_down'
+  | 'zoom_in'
+  | 'zoom_out'
+  | 'tracking';
+
+export interface StoryboardShot {
+  id: string;
+  orderIndex: number;
+  title: string;
+  shotType: ShotType;
+  cameraMovement: CameraMovement;
+  prompt: string;
+  negativePrompt?: string;
+  durationSeconds: number;
+  fps: number;
+  entityRefs?: string[];
+  sourceStillUrl?: string;
+  sourceStillPath?: string;
+  videoUrl?: string;
+  videoPath?: string;
+  handoffFrameUrl?: string;
+  handoffFramePath?: string;
+  status: 'draft' | 'staged' | 'generating_still' | 'generating_video' | 'completed' | 'failed';
+  error?: string;
+  review?: VisualReview;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoryboardSequence {
+  id: string;
+  title: string;
+  description: string;
+  shots: StoryboardShot[];
+  defaultFps: number;
+  videoModel: 'ltx-video' | 'wan2.1-1.3b' | 'wan2.1-14b';
+  createdAt: string;
+  updatedAt: string;
+}
