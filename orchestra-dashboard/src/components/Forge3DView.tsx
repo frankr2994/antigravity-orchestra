@@ -388,17 +388,21 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     grid.position.y = -1.2;
     scene.add(grid);
 
-    // Interactive Viewport Lights (Cyan & Red)
-    const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
+    // Interactive Viewport Lights: Neutral Studio 3-Point Illumination
+    const ambientLight = new THREE.AmbientLight(0xffffff, 1.2);
     scene.add(ambientLight);
 
-    const dirLight1 = new THREE.DirectionalLight(0x38bdf8, 1.5);
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 1.8);
     dirLight1.position.set(5, 10, 7);
     scene.add(dirLight1);
 
-    const dirLight2 = new THREE.DirectionalLight(0xf43f5e, 0.8);
-    dirLight2.position.set(-5, -2, -5);
+    const dirLight2 = new THREE.DirectionalLight(0xe0f2fe, 0.9);
+    dirLight2.position.set(-5, 4, -5);
     scene.add(dirLight2);
+
+    const dirLight3 = new THREE.DirectionalLight(0xffffff, 0.7);
+    dirLight3.position.set(0, -6, 4);
+    scene.add(dirLight3);
 
     // Diagnostic 3-Point White Inspection Lights (Hidden during interactive viewing)
     const diagGroup = new THREE.Group();

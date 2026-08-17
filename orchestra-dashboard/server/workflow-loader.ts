@@ -45,7 +45,11 @@ export function buildConceptGenerationWorkflow(params: ConceptGenParams): Record
   // Node 6: Positive prompt
   if (workflow['6']?.inputs) {
     const basePrompt = params.prompt.trim();
-    workflow['6'].inputs.text = `a high quality 3D asset of ${basePrompt}, full view, centered, clean white background, soft studio lighting, sharp details`;
+    if (/isometric|3\/4|white background|3d asset|game prop/i.test(basePrompt)) {
+      workflow['6'].inputs.text = basePrompt;
+    } else {
+      workflow['6'].inputs.text = `high detail 3D game prop of ${basePrompt}, elevated 3/4 view, studio lighting, plain white background, isolated, sharp focus`;
+    }
   }
 
   // Node 7: Negative prompt
