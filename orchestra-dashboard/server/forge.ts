@@ -7,12 +7,14 @@ import {
   executeSdxlTxt2Img,
   executeSdxlImg2Img,
   executeSdxlInpaint,
+  executeSdxlIpAdapter,
   executeLtxImg2Vid,
   executeWanImg2Vid,
   findComfyInstallation,
   getComfyStatus,
 } from './comfy.js';
 import { stageGpuForStep } from './gpu-manager.js';
+import { getForgeEntity } from './forge-entities.js';
 import {
   type AssetVersion,
   type ForgeAsset,
@@ -378,27 +380,39 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
     const assetDir = join(FORGE_ASSETS_DIR, assetId);
     mkdirSync(assetDir, { recursive: true });
 
-    job.status = 'staging_gpu';
-    job.progress = 25;
-    job.message = 'Staging GPU for SDXL generation...';
-    await stageGpuForStep('txt2img');
-
-    job.status = 'generating';
-    job.progress = 50;
-    job.message = 'Executing neural image synthesis...';
+    const boundEntity = options.entityId ? getForgeEntity(options.entityId) : null;
+    let promptWithEntity = options.prompt;
+    if (boundEntity?.triggerWord && !promptWithEntity.includes(boundEntity.triggerWord)) {
+      promptWithEntity = `${boundEntity.triggerWord}, ${promptWithEntity}`;
+    }
 
     const seed = options.seed ?? Math.floor(Math.random() * 1000000000000);
     const steps = options.steps || 25;
     const cfg = options.cfg || 7.0;
 
     let resultBuffer: Buffer;
-    // Check if SDXL checkpoint is installed or fallback to base concept checkpoint
     const sdxlPath = join(installation.comfyCoreDir, 'models', 'checkpoints', 'juggernautXL_v9.safetensors');
     const useSdxl = existsSync(sdxlPath);
+    let workflowType = 'sdxl-txt2img';
 
-    if (useSdxl) {
-      const gen = await executeSdxlTxt2Img({
-        prompt: options.prompt,
+    if (boundEntity && boundEntity.referenceImages.length > 0) {
+      job.status = 'staging_gpu';
+      job.progress = 25;
+      job.message = `Staging GPU for IP-Adapter character conditioning (${boundEntity.name})...`;
+      await stageGpuForStep('ipadapter');
+
+      job.status = 'generating';
+      job.progress = 50;
+      job.message = `Synthesizing scene with character identity lock (${boundEntity.name})...`;
+
+      const primaryRef = boundEntity.referenceImages[0];
+      const refFilename = `${assetId}_entity_ref.png`;
+      copyFileSync(primaryRef.imagePath, join(installation.inputDir, refFilename));
+
+      const gen = await executeSdxlIpAdapter({
+        referenceImage: refFilename,
+        ipAdapterWeight: options.entityWeight ?? boundEntity.ipAdapterWeight ?? 0.8,
+        prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
         ckptName: 'juggernautXL_v9.safetensors',
         width: options.width || 1024,
@@ -408,9 +422,41 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
         seed,
       });
       resultBuffer = gen.buffer;
+      workflowType = 'sdxl-ipadapter';
+    } else if (useSdxl) {
+      job.status = 'staging_gpu';
+      job.progress = 25;
+      job.message = 'Staging GPU for SDXL generation...';
+      await stageGpuForStep('txt2img');
+
+      job.status = 'generating';
+      job.progress = 50;
+      job.message = 'Executing neural image synthesis...';
+
+      const gen = await executeSdxlTxt2Img({
+        prompt: promptWithEntity,
+        negativePrompt: options.negativePrompt,
+        ckptName: 'juggernautXL_v9.safetensors',
+        width: options.width || 1024,
+        height: options.height || 1024,
+        steps,
+        cfg,
+        seed,
+      });
+      resultBuffer = gen.buffer;
+      workflowType = 'sdxl-txt2img';
     } else {
+      job.status = 'staging_gpu';
+      job.progress = 25;
+      job.message = 'Staging GPU for concept generation...';
+      await stageGpuForStep('txt2img');
+
+      job.status = 'generating';
+      job.progress = 50;
+      job.message = 'Executing neural image synthesis...';
+
       const gen = await executeConceptGeneration({
-        prompt: options.prompt,
+        prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
         width: options.width || 512,
         height: options.height || 512,
@@ -419,6 +465,7 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
         seed,
       });
       resultBuffer = gen.buffer;
+      workflowType = 'concept-gen';
     }
 
     const v1Path = join(assetDir, 'v1.png');
@@ -428,9 +475,9 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       versionId: 'v1',
       parentVersionId: null,
       operationType: 'create',
-      changeDescription: 'Initial generation',
+      changeDescription: boundEntity ? `Generated with ${boundEntity.name}` : 'Initial generation',
       params: {
-        workflow: useSdxl ? 'sdxl-txt2img' : 'concept-gen',
+        workflow: workflowType,
         checkpoint: useSdxl ? 'juggernautXL_v9.safetensors' : 'v1-5-pruned-emaonly.safetensors',
         seed,
         steps,
@@ -440,8 +487,9 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
         scheduler: 'normal',
         width: options.width || (useSdxl ? 1024 : 512),
         height: options.height || (useSdxl ? 1024 : 512),
-        prompt: options.prompt,
+        prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
+        entityId: options.entityId,
       },
       outputPath: v1Path,
       outputUrl: `/api/forge/assets/${assetId}/v1.png`,
@@ -455,6 +503,7 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       originalPrompt: options.prompt,
       activeVersionId: 'v1',
       versions: [v1],
+      entityRefs: options.entityId ? [options.entityId] : undefined,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };

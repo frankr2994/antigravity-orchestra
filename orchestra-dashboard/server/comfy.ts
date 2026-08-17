@@ -6,6 +6,7 @@ import {
   buildSdxlTxt2ImgWorkflow,
   buildSdxlImg2ImgWorkflow,
   buildSdxlInpaintWorkflow,
+  buildSdxlIpAdapterWorkflow,
   buildLtxImg2VidWorkflow,
   buildWanTxt2VidWorkflow,
   buildWanImg2VidWorkflow,
@@ -13,6 +14,7 @@ import {
   type SdxlTxt2ImgParams,
   type SdxlImg2ImgParams,
   type SdxlInpaintParams,
+  type SdxlIpAdapterParams,
   type LtxImg2VidParams,
   type WanTxt2VidParams,
   type WanImg2VidParams,
@@ -496,5 +498,36 @@ export async function executeWanImg2Vid(
   const buffer = readFileSync(localPath);
   return { filename, localPath, buffer };
 }
+
+export async function executeSdxlIpAdapter(
+  params: SdxlIpAdapterParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildSdxlIpAdapterWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
+
+  const images = history.outputs?.['11']?.images;
+  if (!images || !images.length) {
+    throw new Error('SDXL IP-Adapter generation completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`IP-Adapter output image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
 
 

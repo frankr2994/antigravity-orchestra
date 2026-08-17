@@ -56,6 +56,13 @@ export interface SdxlInpaintParams extends SdxlTxt2ImgParams {
   denoise?: number;
 }
 
+export interface SdxlIpAdapterParams extends SdxlTxt2ImgParams {
+  referenceImage: string;
+  ipAdapterWeight?: number;
+  clipVisionModel?: string;
+  ipAdapterModel?: string;
+}
+
 export interface LtxImg2VidParams {
   sourceImage: string;
   prompt?: string;
@@ -364,3 +371,53 @@ export function buildWanImg2VidWorkflow(params: WanImg2VidParams): Record<string
 
   return workflow;
 }
+
+export function buildSdxlIpAdapterWorkflow(params: SdxlIpAdapterParams): Record<string, any> {
+  const workflow = loadWorkflowJson('sdxl-ipadapter.json');
+
+  if (workflow['1']?.inputs) {
+    workflow['1'].inputs.image = params.referenceImage;
+  }
+
+  if (workflow['2']?.inputs && params.clipVisionModel) {
+    workflow['2'].inputs.clip_name = params.clipVisionModel;
+  }
+
+  if (workflow['3']?.inputs && params.ipAdapterModel) {
+    workflow['3'].inputs.ipadapter_file = params.ipAdapterModel;
+  }
+
+  if (workflow['4']?.inputs && params.ckptName) {
+    workflow['4'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['5']?.inputs && typeof params.ipAdapterWeight === 'number') {
+    workflow['5'].inputs.weight = params.ipAdapterWeight;
+  }
+
+  if (workflow['6']?.inputs) {
+    if (params.width) workflow['6'].inputs.width = params.width;
+    if (params.height) workflow['6'].inputs.height = params.height;
+  }
+
+  if (workflow['7']?.inputs) {
+    workflow['7'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['8']?.inputs) {
+    const defaultNegative = 'blurry, low quality, distorted, bad anatomy, extra limbs, watermark';
+    workflow['8'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
+  }
+
+  if (workflow['9']?.inputs) {
+    workflow['9'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['9'].inputs.steps = params.steps;
+    if (params.cfg) workflow['9'].inputs.cfg = params.cfg;
+    if (params.samplerName) workflow['9'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['9'].inputs.scheduler = params.scheduler;
+    if (typeof params.denoise === 'number') workflow['9'].inputs.denoise = params.denoise;
+  }
+
+  return workflow;
+}
+

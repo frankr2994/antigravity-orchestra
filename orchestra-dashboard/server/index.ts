@@ -27,6 +27,16 @@ import {
   runForgeAnimateVersion,
   FORGE_ASSETS_DIR,
 } from './forge.js';
+import {
+  listForgeEntities,
+  getForgeEntity,
+  createForgeEntity,
+  updateForgeEntity,
+  deleteForgeEntity,
+  addReferenceImageToEntity,
+  saveAssetVersionAsEntity,
+  FORGE_ENTITIES_DIR,
+} from './forge-entities.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 import { exportModelFormat } from './mesh-qa.js';
 
@@ -685,6 +695,100 @@ app.post('/api/forge/review/video', async (req, res, next) => {
     next(error);
   }
 });
+
+// ─── Entity & Character Reference Roster ─────────────────────────────────────────
+
+app.get('/api/forge/entities', (_req, res) => {
+  res.json(listForgeEntities());
+});
+
+app.get('/api/forge/entities/:id', (req, res) => {
+  const entity = getForgeEntity(req.params.id);
+  if (!entity) {
+    return res.status(404).json({ error: 'Entity not found' });
+  }
+  res.json(entity);
+});
+
+app.post('/api/forge/entities', (req, res, next) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) throw new Error('Entity name is required.');
+    const entity = createForgeEntity({
+      name,
+      category: req.body?.category,
+      description: req.body?.description,
+      triggerWord: req.body?.triggerWord,
+      ipAdapterWeight: req.body?.ipAdapterWeight,
+    });
+    res.status(201).json(entity);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.patch('/api/forge/entities/:id', (req, res, next) => {
+  try {
+    const entity = updateForgeEntity(req.params.id, req.body || {});
+    res.json(entity);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/forge/entities/:id', (req, res) => {
+  const success = deleteForgeEntity(req.params.id);
+  res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge/entities/:id/reference', (req, res, next) => {
+  try {
+    const imageBase64 = String(req.body?.imageBase64 || '').trim();
+    if (!imageBase64) throw new Error('imageBase64 is required.');
+    const buffer = Buffer.from(imageBase64.replace(/^data:image\/\w+;base64,/, ''), 'base64');
+    const ref = addReferenceImageToEntity(req.params.id, buffer, req.body?.label, req.body?.filename);
+    res.status(201).json(ref);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/entities/from-asset', (req, res, next) => {
+  try {
+    const assetId = String(req.body?.assetId || '').trim();
+    const versionId = String(req.body?.versionId || '').trim();
+    const entityName = String(req.body?.name || '').trim();
+    if (!assetId || !versionId || !entityName) {
+      throw new Error('assetId, versionId, and name are required.');
+    }
+    const entity = saveAssetVersionAsEntity(
+      assetId,
+      versionId,
+      entityName,
+      req.body?.category,
+      req.body?.description
+    );
+    res.status(201).json(entity);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/forge/entities/:id/:filename', (req, res) => {
+  const file = join(FORGE_ENTITIES_DIR, req.params.id, req.params.filename);
+  if (!existsSync(file)) {
+    return res.status(404).json({ error: 'Reference image not found' });
+  }
+  if (req.params.filename.endsWith('.png')) {
+    res.setHeader('Content-Type', 'image/png');
+  } else if (req.params.filename.endsWith('.jpg') || req.params.filename.endsWith('.jpeg')) {
+    res.setHeader('Content-Type', 'image/jpeg');
+  } else if (req.params.filename.endsWith('.webp')) {
+    res.setHeader('Content-Type', 'image/webp');
+  }
+  res.sendFile(file);
+});
+
 
 
 const publicDir = join(config.dashboardRoot, 'dist');

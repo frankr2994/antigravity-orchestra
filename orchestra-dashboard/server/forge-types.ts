@@ -14,6 +14,34 @@ export type EditScope =
   | 'structural'
   | 'full';
 
+export type EntityCategory =
+  | 'character'
+  | 'vehicle'
+  | 'prop'
+  | 'environment';
+
+export interface ReferenceImage {
+  id: string;
+  label?: string;
+  imagePath: string;
+  imageUrl: string;
+  uploadedAt: string;
+}
+
+export interface ForgeEntity {
+  id: string;
+  name: string;
+  category: EntityCategory;
+  description: string;
+  triggerWord?: string;
+  referenceImages: ReferenceImage[];
+  loraPath?: string;
+  loraWeight?: number;
+  ipAdapterWeight?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ControlNetConfig {
   model: string;
   type: 'depth' | 'canny' | 'openpose' | 'softedge' | 'lineart';
@@ -50,6 +78,8 @@ export interface GenerationParams {
   maskPath?: string;
   sourceImagePath?: string;
   referenceImages?: string[];
+  entityId?: string;
+  entityWeight?: number;
   fps?: number;
   durationSeconds?: number;
   frameCount?: number;
@@ -137,6 +167,8 @@ export interface ForgeGenerateOptions {
   scheduler?: string;
   checkpoint?: string;
   type?: AssetType;
+  entityId?: string;
+  entityWeight?: number;
   videoModel?: 'ltx-video' | 'wan2.1-1.3b' | 'wan2.1-14b';
   durationSeconds?: number;
   fps?: number;
@@ -150,6 +182,8 @@ export interface ForgeRevisionOptions {
   scope?: EditScope;
   maskBase64?: string;
   denoise?: number;
+  entityId?: string;
+  entityWeight?: number;
   autoReview?: boolean;
 }
 

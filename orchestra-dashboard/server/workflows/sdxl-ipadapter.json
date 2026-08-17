@@ -1,0 +1,92 @@
+{
+  "1": {
+    "inputs": {
+      "image": "reference_entity.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage"
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "clip_vision_vit_h.safetensors"
+    },
+    "class_type": "CLIPVisionLoader"
+  },
+  "3": {
+    "inputs": {
+      "ipadapter_file": "ip-adapter-plus_sdxl_vit-h.safetensors"
+    },
+    "class_type": "IPAdapterModelLoader"
+  },
+  "4": {
+    "inputs": {
+      "ckpt_name": "juggernautXL_v9.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "5": {
+    "inputs": {
+      "weight": 0.8,
+      "noise": 0.0,
+      "weight_type": "standard",
+      "start_at": 0.0,
+      "end_at": 1.0,
+      "model": ["4", 0],
+      "ipadapter": ["3", 0],
+      "image": ["1", 0],
+      "clip_vision": ["2", 0]
+    },
+    "class_type": "IPAdapterApply"
+  },
+  "6": {
+    "inputs": {
+      "width": 1024,
+      "height": 1024,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage"
+  },
+  "7": {
+    "inputs": {
+      "text": "character portrait, cinematic lighting, sharp details, master quality",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "8": {
+    "inputs": {
+      "text": "blurry, low quality, distorted, bad anatomy, deformed limbs",
+      "clip": ["4", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "9": {
+    "inputs": {
+      "seed": 42,
+      "steps": 25,
+      "cfg": 6.5,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["5", 0],
+      "positive": ["7", 0],
+      "negative": ["8", 0],
+      "latent_image": ["6", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "10": {
+    "inputs": {
+      "samples": ["9", 0],
+      "vae": ["4", 2]
+    },
+    "class_type": "VAEDecode"
+  },
+  "11": {
+    "inputs": {
+      "filename_prefix": "Forge_SDXL_IPAdapter",
+      "images": ["10", 0]
+    },
+    "class_type": "SaveImage"
+  }
+}

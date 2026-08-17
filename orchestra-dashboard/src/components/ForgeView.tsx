@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  BookmarkPlus,
   Eye,
   Film,
   Paintbrush,
@@ -10,13 +11,17 @@ import {
   Sparkles,
   Trash2,
   Undo,
+  UserPlus,
+  Users,
   Wand2,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 import type {
   EditScope,
+  EntityCategory,
   ForgeAsset,
+  ForgeEntity,
   VisualReview,
 } from '../../server/forge-types.js';
 
@@ -64,8 +69,18 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [selectedAsset, setSelectedAsset] = useState<ForgeAsset | null>(null);
   const [activeVersionId, setActiveVersionId] = useState<string>('v1');
 
-  // Mode: Create | Revise | Animate
-  const [mode, setMode] = useState<'create' | 'revise' | 'animate'>('create');
+  // Entities & Cast State (Phase 3)
+  const [entities, setEntities] = useState<ForgeEntity[]>([]);
+  const [selectedEntityId, setSelectedEntityId] = useState<string>('');
+  const [entityWeight, setEntityWeight] = useState<number>(0.8);
+  const [showNewEntityModal, setShowNewEntityModal] = useState(false);
+  const [newEntityName, setNewEntityName] = useState('');
+  const [newEntityCategory, setNewEntityCategory] = useState<EntityCategory>('character');
+  const [newEntityTrigger, setNewEntityTrigger] = useState('');
+  const [newEntityDesc, setNewEntityDesc] = useState('');
+
+  // Mode: Create | Revise | Animate | Entities
+  const [mode, setMode] = useState<'create' | 'revise' | 'animate' | 'entities'>('create');
 
   // Generation State
   const [prompt, setPrompt] = useState('');
@@ -101,7 +116,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState('');
 
-  // 1. Fetch Engine Status & Assets
+  // 1. Fetch Engine Status, Assets & Entities
   const fetchStatus = useCallback(async () => {
     try {
       const st = await api<ForgeStatus>('/api/forge3d/status');
@@ -126,14 +141,24 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   }, [api, selectedAsset]);
 
+  const fetchEntities = useCallback(async () => {
+    try {
+      const list = await api<ForgeEntity[]>('/api/forge/entities');
+      setEntities(list);
+    } catch (err) {
+      console.warn('Failed to load entities:', err);
+    }
+  }, [api]);
+
   useEffect(() => {
     void fetchStatus();
     void fetchAssets();
+    void fetchEntities();
     const timer = setInterval(() => {
       void fetchStatus();
     }, 10000);
     return () => clearInterval(timer);
-  }, [fetchStatus, fetchAssets]);
+  }, [fetchStatus, fetchAssets, fetchEntities]);
 
   // Active version resolution
   const activeVersion = selectedAsset?.versions.find((v) => v.versionId === activeVersionId) || selectedAsset?.versions[0];
@@ -161,7 +186,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 3. New Generation Handler
+  // 3. New Generation Handler (with Optional Entity Binding)
   const handleGenerate = async () => {
     if (!prompt.trim() || generating) return;
     try {
@@ -173,6 +198,8 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           prompt: prompt.trim(),
           negativePrompt: negativePrompt.trim() || undefined,
           style: stylePreset,
+          entityId: selectedEntityId || undefined,
+          entityWeight: selectedEntityId ? entityWeight : undefined,
         }),
       });
       setAssets((prev) => [asset, ...prev]);
@@ -223,7 +250,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 5. Video Animation Handler (Phase 2 Image-to-Video)
+  // 5. Video Animation Handler
   const handleAnimate = async () => {
     if (!selectedAsset || animating) return;
     try {
@@ -251,7 +278,54 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 6. Version Revert Handler
+  // 6. Save Active Version Directly as a Persistent Entity (Phase 3)
+  const handleSaveAsEntity = async () => {
+    if (!selectedAsset || !activeVersion) return;
+    const name = window.prompt('Enter Character / Prop Name:', selectedAsset.title.slice(0, 20));
+    if (!name?.trim()) return;
+
+    try {
+      const entity = await api<ForgeEntity>('/api/forge/entities/from-asset', {
+        method: 'POST',
+        body: JSON.stringify({
+          assetId: selectedAsset.id,
+          versionId: activeVersionId,
+          name: name.trim(),
+          category: 'character',
+        }),
+      });
+      setEntities((prev) => [entity, ...prev]);
+      setSelectedEntityId(entity.id);
+      window.alert(`Successfully saved "${entity.name}" to your Cast & Props Roster!`);
+    } catch (err) {
+      setError(`Failed to save entity: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // 7. Create New Custom Entity
+  const handleCreateEntity = async () => {
+    if (!newEntityName.trim()) return;
+    try {
+      const entity = await api<ForgeEntity>('/api/forge/entities', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: newEntityName.trim(),
+          category: newEntityCategory,
+          description: newEntityDesc.trim(),
+          triggerWord: newEntityTrigger.trim() || undefined,
+        }),
+      });
+      setEntities((prev) => [entity, ...prev]);
+      setShowNewEntityModal(false);
+      setNewEntityName('');
+      setNewEntityTrigger('');
+      setNewEntityDesc('');
+    } catch (err) {
+      setError(`Failed to create entity: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // 8. Version Revert Handler
   const handleRevert = async (versionId: string) => {
     if (!selectedAsset) return;
     try {
@@ -267,7 +341,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 7. Gemma 12B Vision Review
+  // 9. Gemma 12B Vision Review
   const triggerCreationReview = async () => {
     if (!selectedAsset || !activeVersion || reviewing) return;
     try {
@@ -304,7 +378,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 8. Canvas Mask Drawing Helpers
+  // 10. Canvas Mask Drawing Helpers
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isBrushActive) return;
     setIsDrawing(true);
@@ -347,7 +421,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <Sparkles className="h-5 w-5 text-indigo-400" />
-            <h1 className="text-base font-semibold tracking-wide text-white">Forge Studio (2D & Video)</h1>
+            <h1 className="text-base font-semibold tracking-wide text-white">Forge Studio</h1>
           </div>
 
           <div className="flex items-center gap-4 text-xs">
@@ -399,6 +473,15 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           >
             <Film className="h-3.5 w-3.5" />
             Animate (I2V)
+          </button>
+          <button
+            onClick={() => { setMode('entities'); }}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+              mode === 'entities' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+            }`}
+          >
+            <Users className="h-3.5 w-3.5" />
+            Cast & Props ({entities.length})
           </button>
         </div>
       </div>
@@ -561,6 +644,16 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                     </button>
                   </>
                 )}
+                <div className="h-4 w-px bg-slate-800" />
+                <button
+                  onClick={handleSaveAsEntity}
+                  disabled={!selectedAsset}
+                  className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-amber-300 hover:bg-amber-950/40 hover:text-amber-200 transition"
+                  title="Save this version into Cast & Props Reference Roster"
+                >
+                  <BookmarkPlus className="h-3.5 w-3.5" />
+                  <span>Save as Character</span>
+                </button>
               </>
             )}
           </div>
@@ -648,14 +741,121 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           )}
         </div>
 
-        {/* ─── Right Sidebar: Controls, Revisions & Animations ───────────────── */}
+        {/* ─── Right Sidebar: Controls, Revisions, Animations & Cast ───────── */}
         <div className="flex w-96 flex-col border-l border-slate-800 bg-slate-900/60 overflow-y-auto">
-          {mode === 'create' ? (
+          {mode === 'entities' ? (
+            /* ─── Phase 3: Cast & Props Roster ──────────────────────────────── */
+            <div className="p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h2 className="text-sm font-semibold text-slate-200">Cast & Props Roster</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">Recurring characters & items locked across scenes.</p>
+                </div>
+                <button
+                  onClick={() => setShowNewEntityModal(true)}
+                  className="flex items-center gap-1 rounded bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white shadow hover:bg-indigo-500 transition"
+                >
+                  <UserPlus className="h-3.5 w-3.5" />
+                  New
+                </button>
+              </div>
+
+              {/* Entity List */}
+              <div className="space-y-3">
+                {entities.map((ent) => (
+                  <div
+                    key={ent.id}
+                    className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-2"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-900">
+                          {ent.referenceImages[0] ? (
+                            <img src={ent.referenceImages[0].imageUrl} alt={ent.name} className="h-full w-full object-cover" />
+                          ) : (
+                            <Users className="h-4 w-4 m-2 text-slate-500" />
+                          )}
+                        </div>
+                        <div>
+                          <h3 className="text-xs font-semibold text-slate-200">{ent.name}</h3>
+                          <span className="rounded bg-indigo-950 px-1.5 py-0.2 text-[10px] font-medium text-indigo-300 border border-indigo-800/50">
+                            {ent.category}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => {
+                          setSelectedEntityId(selectedEntityId === ent.id ? '' : ent.id);
+                          setMode('create');
+                        }}
+                        className={`rounded px-2 py-0.5 text-xs font-medium transition ${
+                          selectedEntityId === ent.id
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
+                        }`}
+                      >
+                        {selectedEntityId === ent.id ? 'Attached' : 'Use in Scene'}
+                      </button>
+                    </div>
+
+                    {ent.description && <p className="text-[11px] text-slate-400">{ent.description}</p>}
+                    {ent.triggerWord && (
+                      <div className="text-[10px] text-slate-500">
+                        Trigger: <code className="text-indigo-300">{ent.triggerWord}</code>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {entities.length === 0 && (
+                  <div className="py-8 text-center text-xs text-slate-500">
+                    No characters or props saved yet.<br />Generate a character and click "Save as Character" above.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : mode === 'create' ? (
             /* ─── Create Form ──────────────────────────────────────────────── */
             <div className="p-4 space-y-4">
               <div>
                 <h2 className="text-sm font-semibold text-slate-200">Create New Asset</h2>
                 <p className="text-xs text-slate-400 mt-0.5">Generate a high-fidelity image from a text prompt.</p>
+              </div>
+
+              {/* Character Reference Attachment (Phase 3) */}
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                  Attach Character / Prop (IP-Adapter)
+                </label>
+                <select
+                  value={selectedEntityId}
+                  onChange={(e) => setSelectedEntityId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="">None (Standard Generation)</option>
+                  {entities.map((ent) => (
+                    <option key={ent.id} value={ent.id}>
+                      {ent.name} ({ent.category}) {ent.referenceImages.length > 0 ? '✓' : '(No Image)'}
+                    </option>
+                  ))}
+                </select>
+
+                {selectedEntityId && (
+                  <div className="mt-2 space-y-1">
+                    <div className="flex justify-between text-[11px] text-slate-400">
+                      <span>Identity Lock Weight</span>
+                      <span className="text-indigo-400">{entityWeight.toFixed(2)}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0.2"
+                      max="1.0"
+                      step="0.05"
+                      value={entityWeight}
+                      onChange={(e) => setEntityWeight(Number(e.target.value))}
+                      className="w-full h-1 bg-slate-800 rounded cursor-pointer accent-indigo-500"
+                    />
+                  </div>
+                )}
               </div>
 
               <div>
@@ -699,7 +899,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                 className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
               >
                 {generating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {generating ? 'Generating Asset...' : 'Generate Asset'}
+                {generating ? 'Generating Asset...' : selectedEntityId ? 'Generate with Character Lock' : 'Generate Asset'}
               </button>
             </div>
           ) : mode === 'animate' ? (
@@ -975,6 +1175,77 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           )}
         </div>
       </div>
+
+      {/* ─── Modal: New Custom Entity ──────────────────────────────────────── */}
+      {showNewEntityModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-2xl space-y-4">
+            <h2 className="text-sm font-semibold text-white">Add Entity to Cast & Props Roster</h2>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Name</label>
+              <input
+                type="text"
+                value={newEntityName}
+                onChange={(e) => setNewEntityName(e.target.value)}
+                placeholder="e.g. Captain Marcus, Cyberpunk Hovercar"
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Category</label>
+              <select
+                value={newEntityCategory}
+                onChange={(e) => setNewEntityCategory(e.target.value as any)}
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              >
+                <option value="character">Character</option>
+                <option value="vehicle">Vehicle</option>
+                <option value="prop">Prop</option>
+                <option value="environment">Environment / Location</option>
+              </select>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Trigger Word (Optional)</label>
+              <input
+                type="text"
+                value={newEntityTrigger}
+                onChange={(e) => setNewEntityTrigger(e.target.value)}
+                placeholder="e.g. cmarcus_man, neon_hovercar_99"
+                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-300 mb-1">Description</label>
+              <textarea
+                value={newEntityDesc}
+                onChange={(e) => setNewEntityDesc(e.target.value)}
+                placeholder="Distinct visual traits, clothing, hair color, markings..."
+                className="w-full h-20 rounded-lg border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowNewEntityModal(false)}
+                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateEntity}
+                disabled={!newEntityName.trim()}
+                className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white shadow hover:bg-indigo-500 disabled:opacity-50"
+              >
+                Save Entity
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
