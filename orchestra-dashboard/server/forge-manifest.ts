@@ -97,8 +97,9 @@ export const FORGE_DEPENDENCIES: ForgeDependencyItem[] = [
 
 export async function probePythonPackages(pythonPath: string, packages: string[]): Promise<boolean> {
   try {
-    const script = `import sys; ${packages.map((p) => `import ${p}`).join('; ')}; print("OK")`;
-    const { stdout } = await execFileAsync(pythonPath, ['-c', script], { timeout: 5000 });
+    const pkgListJson = JSON.stringify(packages);
+    const script = `import importlib.util; pkgs = ${pkgListJson}; ok = all(importlib.util.find_spec(p) is not None for p in pkgs); print("OK" if ok else "MISSING")`;
+    const { stdout } = await execFileAsync(pythonPath, ['-c', script], { timeout: 15000 });
     return stdout.trim().endsWith('OK');
   } catch {
     return false;
