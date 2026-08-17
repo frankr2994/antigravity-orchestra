@@ -68,18 +68,24 @@ try:
 
     # 3. Disconnected Component Filtering: Prune floating satellite voxel noise
     try:
-        components = mesh.split(only_watertight=False)
-        if len(components) > 1:
-            components = sorted(components, key=lambda c: len(c.faces), reverse=True)
-            max_faces = len(components[0].faces)
-            # Keep only components that are at least 15% the size of the primary body
-            valid_components = [c for c in components if len(c.faces) >= max(300, int(max_faces * 0.15))]
-            if len(valid_components) > 1:
-                mesh = trimesh.util.concatenate(valid_components)
-            elif len(valid_components) == 1:
-                mesh = valid_components[0]
-            mesh.remove_unreferenced_vertices()
-            mesh.fix_normals()
+        if len(mesh.faces) > 250000 and hasattr(mesh, 'simplify_quadric_decimation'):
+            try:
+                mesh = mesh.simplify_quadric_decimation(150000)
+            except Exception:
+                pass
+        if len(mesh.faces) <= 300000:
+            components = mesh.split(only_watertight=False)
+            if len(components) > 1:
+                components = sorted(components, key=lambda c: len(c.faces), reverse=True)
+                max_faces = len(components[0].faces)
+                # Keep only components that are at least 15% the size of the primary body
+                valid_components = [c for c in components if len(c.faces) >= max(300, int(max_faces * 0.15))]
+                if len(valid_components) > 1:
+                    mesh = trimesh.util.concatenate(valid_components)
+                elif len(valid_components) == 1:
+                    mesh = valid_components[0]
+                mesh.remove_unreferenced_vertices()
+                mesh.fix_normals()
     except Exception:
         pass
 
