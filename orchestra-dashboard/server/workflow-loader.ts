@@ -54,7 +54,7 @@ export function buildConceptGenerationWorkflow(params: ConceptGenParams): Record
 
   // Node 7: Negative prompt
   if (workflow['7']?.inputs) {
-    const defaultNegative = 'table, desk, surface, floor, shadow on ground, flat 2d, illustration, room, background clutter, multiple objects, human hands, cropped, blurry, cut off, transparency grid, watermark, text, logo';
+    const defaultNegative = 'extra handles, multiple handles, deformed handle, two handles, floating artifacts, mutated, deformed, table, desk, surface, floor, shadow on ground, flat 2d, illustration, room, background clutter, multiple objects, human hands, cropped, blurry, cut off, transparency grid, watermark, text, logo';
     workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
   }
 

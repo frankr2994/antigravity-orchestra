@@ -229,25 +229,25 @@ export function Forge3DView({ api }: Forge3DViewProps) {
       }
     });
 
-    // 3. Set neutral 50% gray diagnostic background & hide grid
-    scene.background = new THREE.Color(0x808080);
+    // 3. Set crisp high-contrast dark studio backdrop & hide grid
+    scene.background = new THREE.Color(0x0f172a);
     const gridChild = scene.children.find((c) => c instanceof THREE.GridHelper);
     if (gridChild) gridChild.visible = false;
 
-    // 4. Create dedicated pure white 3-point diagnostic lighting setup
-    const diagKeyLight = new THREE.DirectionalLight(0xffffff, 1.3);
-    diagKeyLight.position.set(4, 5, 5);
+    // 4. Create dedicated high-contrast pure white 3-point diagnostic lighting setup
+    const diagKeyLight = new THREE.DirectionalLight(0xffffff, 2.0);
+    diagKeyLight.position.set(4, 6, 5);
     scene.add(diagKeyLight);
 
-    const diagFillLight = new THREE.DirectionalLight(0xffffff, 0.6);
-    diagFillLight.position.set(-5, 2, 4);
+    const diagFillLight = new THREE.DirectionalLight(0xe2e8f0, 1.2);
+    diagFillLight.position.set(-5, 3, 4);
     scene.add(diagFillLight);
 
-    const diagRimLight = new THREE.DirectionalLight(0xffffff, 0.8);
-    diagRimLight.position.set(0, -3, -5);
+    const diagRimLight = new THREE.DirectionalLight(0xffffff, 1.4);
+    diagRimLight.position.set(0, -4, -5);
     scene.add(diagRimLight);
 
-    const diagAmbientLight = new THREE.AmbientLight(0xffffff, 0.45);
+    const diagAmbientLight = new THREE.AmbientLight(0xffffff, 0.8);
     scene.add(diagAmbientLight);
 
     // 5. Cache original mesh materials
@@ -260,17 +260,13 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     });
 
     const clayMaterial = new THREE.MeshStandardMaterial({
-      color: 0xb0b0b0,
-      roughness: 0.45,
+      color: 0xf8fafc,
+      roughness: 0.35,
       metalness: 0.05,
-    });
-    const wireMaterial = new THREE.MeshBasicMaterial({
-      color: 0x0284c7,
-      wireframe: true,
     });
 
     const snapshots: string[] = [];
-    camera.position.set(0, 1.0, 3.8);
+    camera.position.set(0, 0.8, 3.6);
     camera.lookAt(0, 0, 0);
 
     // Pass 1: Front Shaded (0°)
@@ -279,7 +275,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
     // Pass 2: 3/4 Iso Shaded (45°)
-    mesh.rotation.set(0.12, Math.PI / 4, 0);
+    mesh.rotation.set(0.18, Math.PI / 4, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
@@ -297,14 +293,12 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     mesh.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = clayMaterial;
     });
-    mesh.rotation.set(0.12, Math.PI / 4, 0);
+    mesh.rotation.set(0.18, Math.PI / 4, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // Pass 6: 3/4 Iso Wireframe (45°)
-    mesh.traverse((child) => {
-      if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = wireMaterial;
-    });
+    // Pass 6: Top-Down 3/4 Perspective Clay (60° elevation)
+    mesh.rotation.set(0.5, Math.PI / 3, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
