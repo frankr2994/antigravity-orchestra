@@ -597,9 +597,22 @@ Pivot Forge from 3D mesh synthesis to a multi-tiered 2D image, inpainting revisi
 7. **Non-Destructive Versioned History**:
    - All operations produce immutable version records (`v1`, `v2`, `v3`) in an asset version tree supporting compare, revert, and branch.
 
+8. **Multi-Shot Storyboard Sequencing & Video Continuity (Phase 4)**:
+   - Storyboard sequences structure cinematic storytelling into discrete, ordered shots (`establishing`, `medium`, `close_up`, `action`).
+   - Camera movements (`pan_right`, `tilt_up`, `zoom_in`, `tracking`) are explicitly parameterized into video prompts.
+   - Continuous visual handoff passes the ending frame of Shot $N$ as composition context for Shot $N+1$, while maintaining character identity via IP-Adapter.
+
 ### Impact
 
-- 3D-specific modules (`mesh-qa.ts`, TripoSR workflows, Three.js WebGL viewport) are refactored into a unified 2D/video Forge architecture.
-- Frontend transitions from 3D WebGL orbit controls to a high-fidelity 2D/video studio (pan/zoom, version comparison, brush masking, entity selector, video timeline player).
-- Dependencies and workflows are managed modularly in `server/workflows/` and `server/forge-manifest.ts`.
+- 3D-specific modules (`mesh-qa.ts`, TripoSR workflows, Three.js WebGL viewport) are preserved as legacy optional tools while Forge Studio is centered on 2D image synthesis, surgical inpainting, video animation, and multi-shot storyboard direction.
+- Frontend transitions to a high-fidelity studio containing:
+  - 2D Canvas viewport with pan/zoom and inpaint mask drawing brush.
+  - Video animation engine (LTX-Video 2B distilled / Wan 2.1) with playback preview.
+  - Cast & Props Reference Roster with 1-click "Save as Character" and IP-Adapter identity locking.
+  - Storyboard Director with visual shot sequence strip and handoff indicators.
+- Backend modules:
+  - `server/workflows/`: Parameterized ComfyUI JSON templates (`sdxl-txt2img.json`, `sdxl-img2img.json`, `sdxl-inpaint.json`, `sdxl-ipadapter.json`, `ltx-img2vid.json`, `wan21-txt2vid.json`, `wan21-img2vid.json`).
+  - `server/forge-types.ts`, `server/forge.ts`, `server/forge-entities.ts`, `server/forge-storyboard.ts`.
+  - Comprehensive unit test suites (96 unit tests covering visual, video, entity, and storyboard subsystems).
+
 
