@@ -1,10 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow, type ConceptGenParams } from './workflow-loader.js';
-
-const execFileAsync = promisify(execFile);
+import { sanitizeAndExportGlb, type MeshQAStats } from './mesh-qa.js';
 
 export interface ComfySystemDevice {
   name: string;
@@ -228,54 +225,8 @@ export async function pollComfyHistory(
 export async function convertObjToGlb(
   objPath: string,
   outputGlbPath: string
-): Promise<{ vertexCount: number; triangleCount: number; sizeBytes: number }> {
-  if (!existsSync(objPath)) {
-    throw new Error(`Cannot convert OBJ to GLB: OBJ file does not exist at ${objPath}`);
-  }
-
-  const installation = findComfyInstallation();
-  const pythonPath = installation?.pythonPath || (process.platform === 'win32' ? 'python.exe' : 'python3');
-
-  const pyScript = `
-import trimesh
-import json
-import sys
-
-try:
-    m = trimesh.load(${JSON.stringify(objPath)})
-    if hasattr(m, 'is_empty') and m.is_empty:
-        print(json.dumps({'error': 'Reconstructed mesh is empty (0 vertices/faces)'}))
-        sys.exit(1)
-    m.export(${JSON.stringify(outputGlbPath)})
-    print(json.dumps({'vertices': len(m.vertices), 'faces': len(m.faces)}))
-except Exception as e:
-    print(json.dumps({'error': str(e)}))
-    sys.exit(1)
-`;
-
-  const { stdout, stderr } = await execFileAsync(pythonPath, ['-c', pyScript]);
-  const lastLine = stdout.trim().split('\n').pop() || '{}';
-  let parsed: any = {};
-  try {
-    parsed = JSON.parse(lastLine);
-  } catch {
-    throw new Error(`Failed to parse Trimesh export output: ${stdout || stderr}`);
-  }
-
-  if (parsed.error) {
-    throw new Error(`Mesh conversion failed: ${parsed.error}`);
-  }
-
-  if (!existsSync(outputGlbPath)) {
-    throw new Error(`Mesh export failed to create GLB at ${outputGlbPath}`);
-  }
-
-  const glbBuffer = readFileSync(outputGlbPath);
-  return {
-    vertexCount: parsed.vertices,
-    triangleCount: parsed.faces,
-    sizeBytes: glbBuffer.length,
-  };
+): Promise<MeshQAStats> {
+  return sanitizeAndExportGlb(objPath, outputGlbPath);
 }
 
 export async function executeConceptGeneration(
@@ -316,7 +267,7 @@ export async function executeTripoSRGeneration(
   imageName: string,
   options: { geometryResolution?: number; threshold?: number } = {},
   endpoint = getComfyUrl()
-): Promise<{ glbBuffer: Buffer; vertexCount: number; triangleCount: number; objFilename: string }> {
+): Promise<{ glbBuffer: Buffer; stats: MeshQAStats; objFilename: string }> {
   const installation = findComfyInstallation();
   if (!installation) {
     throw new Error('ComfyUI installation directory could not be located on this system.');
@@ -345,8 +296,7 @@ export async function executeTripoSRGeneration(
 
   return {
     glbBuffer,
-    vertexCount: stats.vertexCount,
-    triangleCount: stats.triangleCount,
+    stats,
     objFilename,
   };
 }

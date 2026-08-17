@@ -29,6 +29,10 @@ export interface Forge3DAsset {
   previewUrl?: string;
   vertexCount: number;
   triangleCount: number;
+  isWatertight?: boolean;
+  surfaceArea?: number;
+  eulerNumber?: number;
+  boundingBox?: { min: [number, number, number]; max: [number, number, number]; extents: [number, number, number] };
   fileSizeBytes: number;
   review?: Forge3DReview;
   iterations: number;
@@ -735,8 +739,13 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
             <div className="mesh-stats-bar">
               <span>Format: <strong>{selectedAsset.modelFormat.toUpperCase()}</strong></span>
-              <span>Vertices: <strong>{selectedAsset.vertexCount}</strong></span>
-              <span>Triangles: <strong>{selectedAsset.triangleCount}</strong></span>
+              <span>Vertices: <strong>{selectedAsset.vertexCount.toLocaleString()}</strong></span>
+              <span>Faces: <strong>{selectedAsset.triangleCount.toLocaleString()}</strong></span>
+              {selectedAsset.isWatertight !== undefined && (
+                <span className={`review-tag ${selectedAsset.isWatertight ? 'pass' : 'needs_repair'}`}>
+                  {selectedAsset.isWatertight ? '✓ Watertight' : 'Open Mesh'}
+                </span>
+              )}
               <span>Size: <strong>{(selectedAsset.fileSizeBytes / 1024).toFixed(1)} KB</strong></span>
               <a
                 href={selectedAsset.modelUrl}

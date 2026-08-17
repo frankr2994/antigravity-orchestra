@@ -5,6 +5,7 @@ import { requestGemmaVisionReview, runForge3DJob } from '../dist-server/forge3d.
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
+import { sanitizeAndExportGlb } from '../dist-server/mesh-qa.js';
 
 test('ComfyUI installation discovery resolves candidate directories dynamically', () => {
   const installation = findComfyInstallation();
@@ -99,4 +100,15 @@ test('buildTripoSRWorkflow injects image name and geometry resolution', () => {
 test('freeComfyMemory handles unreachable endpoint gracefully', async () => {
   const result = await freeComfyMemory('http://127.0.0.1:59999');
   assert.equal(result, false);
+});
+
+test('sanitizeAndExportGlb throws an error if input file does not exist', async () => {
+  await assert.rejects(
+    async () => {
+      await sanitizeAndExportGlb('F:/non_existent_file.obj', 'F:/output.glb');
+    },
+    {
+      message: /does not exist/i,
+    }
+  );
 });

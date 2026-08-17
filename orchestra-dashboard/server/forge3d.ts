@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from './config.js';
 import { executeConceptGeneration, executeTripoSRGeneration, findComfyInstallation, getComfyStatus } from './comfy.js';
 import { stageGpuForStep } from './gpu-manager.js';
+import type { MeshBoundingBox } from './mesh-qa.js';
 
 export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
@@ -27,6 +28,10 @@ export interface Forge3DAsset {
   previewUrl?: string;
   vertexCount: number;
   triangleCount: number;
+  isWatertight?: boolean;
+  surfaceArea?: number;
+  eulerNumber?: number;
+  boundingBox?: MeshBoundingBox;
   fileSizeBytes: number;
   review?: Forge3DReview;
   iterations: number;
@@ -321,8 +326,12 @@ export async function runForge3DJob(
       modelPath: glbFilePath,
       modelUrl: `/api/forge3d/assets/${glbFileName}`,
       previewUrl,
-      vertexCount: tripoResult.vertexCount,
-      triangleCount: tripoResult.triangleCount,
+      vertexCount: tripoResult.stats.vertexCount,
+      triangleCount: tripoResult.stats.triangleCount,
+      isWatertight: tripoResult.stats.isWatertight,
+      surfaceArea: tripoResult.stats.surfaceArea,
+      eulerNumber: tripoResult.stats.eulerNumber,
+      boundingBox: tripoResult.stats.boundingBox,
       fileSizeBytes: tripoResult.glbBuffer.length,
       iterations: 1,
       createdAt: new Date().toISOString(),
