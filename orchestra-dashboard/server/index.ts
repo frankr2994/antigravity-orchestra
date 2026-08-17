@@ -13,8 +13,9 @@ import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 import { getComfyStatus } from './comfy.js';
-import { deleteForgeAsset, listForgeAssets, reviewForgeAsset, runForge3DJob } from './forge3d.js';
+import { deleteForgeAsset, getForgeAsset, listForgeAssets, repairForgeAsset, reviewForgeAsset, runForge3DJob } from './forge3d.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
+import { exportModelFormat } from './mesh-qa.js';
 
 const app = express();
 const store = new Store();
@@ -430,6 +431,41 @@ app.post('/api/forge3d/assets/:id/review', async (req, res, next) => {
     }
     const review = await reviewForgeAsset(req.params.id, imagesBase64);
     res.json(review);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge3d/assets/:id/repair', async (req, res, next) => {
+  try {
+    const repaired = await repairForgeAsset(req.params.id);
+    res.json(repaired);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/forge3d/assets/:id/export', async (req, res, next) => {
+  try {
+    const asset = getForgeAsset(req.params.id);
+    if (!asset) {
+      return res.status(404).json({ error: 'Asset not found' });
+    }
+
+    const format = String(req.query.format || 'glb').toLowerCase() as 'glb' | 'obj' | 'stl';
+    if (format === 'glb') {
+      res.setHeader('Content-Disposition', `attachment; filename="${asset.id}.glb"`);
+      return res.sendFile(asset.modelPath);
+    }
+
+    if (format === 'obj' || format === 'stl') {
+      const exportPath = asset.modelPath.replace(/\.glb$/i, `.${format}`);
+      await exportModelFormat(asset.modelPath, format, exportPath);
+      res.setHeader('Content-Disposition', `attachment; filename="${asset.id}.${format}"`);
+      return res.sendFile(exportPath);
+    }
+
+    res.status(400).json({ error: `Unsupported export format: ${format}. Supported: glb, obj, stl.` });
   } catch (error) {
     next(error);
   }

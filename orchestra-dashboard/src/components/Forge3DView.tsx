@@ -4,7 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   Box, CheckCircle2, Download, HardDriveDownload, Image as ImageIcon,
   Layers, Loader2, Palette, RefreshCw, RotateCcw,
-  Sparkles, Trash2, Upload, Wand2
+  Sparkles, Trash2, Upload, Wand2, Wrench
 } from 'lucide-react';
 
 export interface Forge3DReview {
@@ -110,6 +110,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const [autoReview, setAutoReview] = useState(true);
   const [busy, setBusy] = useState(false);
   const [reviewing, setReviewing] = useState(false);
+  const [repairing, setRepairing] = useState(false);
   const [status, setStatus] = useState<ForgeStatus | null>(null);
   const [setupStatus, setSetupStatus] = useState<ForgeSetupStatus | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<ActiveDownloadProgress | null>(null);
@@ -511,6 +512,23 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   };
 
+  const handleRepair = async (asset: Forge3DAsset) => {
+    if (!asset || repairing) return;
+    try {
+      setRepairing(true);
+      setError('');
+      const repaired = await api<Forge3DAsset>(`/api/forge3d/assets/${asset.id}/repair`, {
+        method: 'POST',
+      });
+      setAssets((prev) => prev.map((a) => (a.id === repaired.id ? repaired : a)));
+      setSelectedAsset(repaired);
+    } catch (err) {
+      setError(`Repair failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRepairing(false);
+    }
+  };
+
   return (
     <div className="forge-container">
       <div className="forge-sidebar">
@@ -808,12 +826,26 @@ export function Forge3DView({ api }: Forge3DViewProps) {
                 <div className="critique-header">
                   <Sparkles size={14} className="accent" />
                   <strong>Gemma 12B Vision Inspection:</strong>
-                  <span className="critique-verdict">{selectedAsset.review.verdict.toUpperCase()}</span>
+                  <span className={`critique-verdict ${selectedAsset.review.verdict}`}>
+                    {selectedAsset.review.verdict.toUpperCase()} ({selectedAsset.review.score}/100)
+                  </span>
                 </div>
                 <p>{selectedAsset.review.critique}</p>
                 {selectedAsset.review.suggestedPromptRefinements && (
                   <div className="refinement-tip">
-                    <small>Suggested prompt adjustment: {selectedAsset.review.suggestedPromptRefinements}</small>
+                    <small>Suggested refinement: {selectedAsset.review.suggestedPromptRefinements}</small>
+                  </div>
+                )}
+                {selectedAsset.review.verdict === 'needs_repair' && (
+                  <div className="repair-action-row" style={{ marginTop: '8px', display: 'flex', gap: '8px' }}>
+                    <button
+                      className="primary mini-btn"
+                      onClick={() => handleRepair(selectedAsset)}
+                      disabled={repairing || selectedAsset.iterations >= 3}
+                    >
+                      {repairing ? <Loader2 size={12} className="spin" /> : <Wrench size={12} />}
+                      {repairing ? 'Repairing Mesh on GPU...' : `Auto-Repair Defect (Iter ${selectedAsset.iterations}/3)`}
+                    </button>
                   </div>
                 )}
               </div>
@@ -829,13 +861,32 @@ export function Forge3DView({ api }: Forge3DViewProps) {
                 </span>
               )}
               <span>Size: <strong>{(selectedAsset.fileSizeBytes / 1024).toFixed(1)} KB</strong></span>
-              <a
-                href={selectedAsset.modelUrl}
-                download={`${selectedAsset.id}.glb`}
-                className="secondary mini-btn"
-              >
-                <Download size={13} /> Export .GLB
-              </a>
+              <div className="export-btn-group" style={{ display: 'flex', gap: '4px', marginLeft: 'auto' }}>
+                <a
+                  href={`/api/forge3d/assets/${selectedAsset.id}/export?format=glb`}
+                  download={`${selectedAsset.id}.glb`}
+                  className="secondary mini-btn"
+                  title="Download binary glTF (.glb)"
+                >
+                  <Download size={12} /> .GLB
+                </a>
+                <a
+                  href={`/api/forge3d/assets/${selectedAsset.id}/export?format=obj`}
+                  download={`${selectedAsset.id}.obj`}
+                  className="secondary mini-btn"
+                  title="Download Wavefront OBJ"
+                >
+                  <Download size={12} /> .OBJ
+                </a>
+                <a
+                  href={`/api/forge3d/assets/${selectedAsset.id}/export?format=stl`}
+                  download={`${selectedAsset.id}.stl`}
+                  className="secondary mini-btn"
+                  title="Download 3D Printable STL"
+                >
+                  <Download size={12} /> .STL
+                </a>
+              </div>
             </div>
           </div>
         )}

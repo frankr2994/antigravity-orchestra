@@ -228,6 +228,96 @@ export async function reviewForgeAsset(
   return review;
 }
 
+export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
+  const asset = getForgeAsset(id);
+  if (!asset) {
+    throw new Error(`Asset not found with ID ${id}`);
+  }
+
+  if (asset.iterations >= 3) {
+    throw new Error(`Asset ${id} has reached maximum repair limit of 3 iterations.`);
+  }
+
+  const failureType = asset.review?.failureType || 'geometry';
+  const refinement = asset.review?.suggestedPromptRefinements || '';
+
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory not found.');
+  }
+
+  let repairedAsset: Forge3DAsset;
+
+  if (failureType === 'concept' || asset.mode === 'text_to_3d') {
+    const updatedPrompt = refinement ? `${asset.prompt}, ${refinement}` : `${asset.prompt}, clean sharp edges, high contrast`;
+    await stageGpuForStep('concept');
+
+    const concept = await executeConceptGeneration({
+      prompt: updatedPrompt,
+      steps: 25,
+      cfg: 8.0,
+      width: 512,
+      height: 512,
+    });
+
+    const previewFileName = `${asset.id}.png`;
+    const previewFilePath = join(FORGE_DIR, previewFileName);
+    writeFileSync(previewFilePath, concept.buffer);
+
+    await stageGpuForStep('reconstruction');
+    const tripoResult = await executeTripoSRGeneration(concept.filename, {
+      geometryResolution: 384,
+    });
+
+    const glbFileName = `${asset.id}.glb`;
+    const glbFilePath = join(FORGE_DIR, glbFileName);
+    writeFileSync(glbFilePath, tripoResult.glbBuffer);
+
+    repairedAsset = {
+      ...asset,
+      refinedPrompt: updatedPrompt,
+      previewUrl: `/api/forge3d/assets/${previewFileName}`,
+      vertexCount: tripoResult.stats.vertexCount,
+      triangleCount: tripoResult.stats.triangleCount,
+      isWatertight: tripoResult.stats.isWatertight,
+      surfaceArea: tripoResult.stats.surfaceArea,
+      eulerNumber: tripoResult.stats.eulerNumber,
+      boundingBox: tripoResult.stats.boundingBox,
+      fileSizeBytes: tripoResult.glbBuffer.length,
+      iterations: asset.iterations + 1,
+      review: undefined,
+    };
+  } else {
+    await stageGpuForStep('reconstruction');
+    const tripoResult = await executeTripoSRGeneration(`${asset.id}.png`, {
+      geometryResolution: 384,
+      threshold: 28.0,
+    });
+
+    const glbFileName = `${asset.id}.glb`;
+    const glbFilePath = join(FORGE_DIR, glbFileName);
+    writeFileSync(glbFilePath, tripoResult.glbBuffer);
+
+    repairedAsset = {
+      ...asset,
+      vertexCount: tripoResult.stats.vertexCount,
+      triangleCount: tripoResult.stats.triangleCount,
+      isWatertight: tripoResult.stats.isWatertight,
+      surfaceArea: tripoResult.stats.surfaceArea,
+      eulerNumber: tripoResult.stats.eulerNumber,
+      boundingBox: tripoResult.stats.boundingBox,
+      fileSizeBytes: tripoResult.glbBuffer.length,
+      iterations: asset.iterations + 1,
+      review: undefined,
+    };
+  }
+
+  const metaPath = join(FORGE_DIR, `${id}.meta.json`);
+  writeFileSync(metaPath, JSON.stringify(repairedAsset, null, 2));
+
+  return repairedAsset;
+}
+
 export async function runForge3DJob(
   input: string | Forge3DGenerateOptions,
   styleArg = 'stylized',

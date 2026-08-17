@@ -129,3 +129,36 @@ except Exception as e:
     throw new Error(`Trimesh QA execution error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
+
+export async function exportModelFormat(
+  inputModelPath: string,
+  targetFormat: 'obj' | 'stl',
+  outputPath: string
+): Promise<string> {
+  if (!existsSync(inputModelPath)) {
+    throw new Error(`Input model file does not exist at ${inputModelPath}`);
+  }
+
+  const installation = findComfyInstallation();
+  const pythonPath = installation?.pythonPath || (process.platform === 'win32' ? 'python.exe' : 'python3');
+
+  const pyScript = `
+import trimesh
+import sys
+
+try:
+    mesh = trimesh.load(${JSON.stringify(inputModelPath)}, force='mesh')
+    mesh.export(${JSON.stringify(outputPath)})
+    print("SUCCESS")
+except Exception as e:
+    print(f"ERROR: {e}")
+    sys.exit(1)
+`;
+
+  const { stdout } = await execFileAsync(pythonPath, ['-c', pyScript]);
+  if (!stdout.includes('SUCCESS') || !existsSync(outputPath)) {
+    throw new Error(`Failed to export ${targetFormat.toUpperCase()}: ${stdout}`);
+  }
+
+  return outputPath;
+}

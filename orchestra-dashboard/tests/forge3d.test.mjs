@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
-import { requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
+import { repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
-import { sanitizeAndExportGlb } from '../dist-server/mesh-qa.js';
+import { exportModelFormat, sanitizeAndExportGlb } from '../dist-server/mesh-qa.js';
 
 test('ComfyUI installation discovery resolves candidate directories dynamically', () => {
   const installation = findComfyInstallation();
@@ -41,6 +41,28 @@ test('reviewForgeAsset throws error if asset does not exist', async () => {
     },
     {
       message: /Asset not found with ID/i,
+    }
+  );
+});
+
+test('repairForgeAsset throws error if asset does not exist', async () => {
+  await assert.rejects(
+    async () => {
+      await repairForgeAsset('non_existent_id');
+    },
+    {
+      message: /Asset not found with ID/i,
+    }
+  );
+});
+
+test('exportModelFormat throws error if input model does not exist', async () => {
+  await assert.rejects(
+    async () => {
+      await exportModelFormat('F:/non_existent.glb', 'obj', 'F:/output.obj');
+    },
+    {
+      message: /does not exist/i,
     }
   );
 });
