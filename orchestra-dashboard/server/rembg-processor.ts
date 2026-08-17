@@ -77,8 +77,11 @@ try:
         w, h = cropped.size
         scale = target_size / max(w, h)
         new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
-        resized = cropped.resize((new_w, new_h), Image.Resampling.LANCZOS)
-        
+        # Clean alpha mask: threshold soft alpha fringes to prevent TripoSR volumetric fog
+        alpha_arr = np.array(resized)[:, :, 3]
+        clean_alpha = np.where(alpha_arr > 110, 255, 0).astype(np.uint8)
+        resized.putalpha(Image.fromarray(clean_alpha))
+
         # Paste centered
         offset_x = (canvas_size - new_w) // 2
         offset_y = (canvas_size - new_h) // 2

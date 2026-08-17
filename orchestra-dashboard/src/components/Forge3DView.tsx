@@ -343,6 +343,11 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     try {
       setReviewing(true);
       setError('');
+      // Wait for GLB mesh to finish loading into the Three.js viewport
+      const startWait = Date.now();
+      while (!currentMeshRef.current && Date.now() - startWait < 6000) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
       await new Promise((r) => setTimeout(r, 200));
       const snapshots = await captureSnapshots();
       if (snapshots.length === 0) {
