@@ -853,14 +853,19 @@ export function responseIdentifiesProject(response: string, root: string) {
 
 export async function summarizeChanges(diff: string, request: string) {
   const redacted = redactSecrets(diff).slice(0, 90_000);
-  const text = await callGemma([
-    { role: 'system', content: 'You are a technical scribe. Return JSON only: {"title":"conventional commit title <=72 chars","summary":"2-6 concise Markdown bullets describing what changed and verification, without secrets"}.' },
-    { role: 'user', content: `Request:\n${request}\n\nDiff:\n${redacted}` },
-  ], 900, 60_000, CHANGE_SUMMARY_SCHEMA);
-  const parsed = parseJson(text) as Record<string, unknown>;
-  const title = String(parsed.title || 'Update project').replace(/[\r\n]/g, ' ').slice(0, 72);
-  const summary = String(parsed.summary || '- Updated project files.').trim();
-  return { title, summary };
+  try {
+    const text = await callGemma([
+      { role: 'system', content: 'You are a technical scribe. Return JSON only: {"title":"conventional commit title <=72 chars","summary":"2-6 concise Markdown bullets describing what changed and verification, without secrets"}.' },
+      { role: 'user', content: `Request:\n${request}\n\nDiff:\n${redacted}` },
+    ], 900, 30_000, CHANGE_SUMMARY_SCHEMA);
+    const parsed = parseJson(text) as Record<string, unknown>;
+    const title = String(parsed.title || 'Update project').replace(/[\r\n]/g, ' ').slice(0, 72);
+    const summary = String(parsed.summary || '- Updated project files.').trim();
+    return { title, summary };
+  } catch {
+    const fallbackTitle = request ? `chore: ${request.slice(0, 60)}` : 'chore: update project files';
+    return { title: fallbackTitle, summary: '- Updated project files based on task request.' };
+  }
 }
 
 export function redactSecrets(value: string) {
@@ -1197,7 +1202,7 @@ export async function sliceSemanticCommits(diffText: string, changedFiles: strin
         role: 'user',
         content: `Task Request:\n${taskRequest}\n\nChanged Files:\n${changedFiles.map((f) => `- ${f}`).join('\n')}\n\nDiff:\n${sanitizedDiff}`,
       },
-    ], 1_200, 60_000, SEMANTIC_COMMITS_SCHEMA);
+    ], 1_200, 30_000, SEMANTIC_COMMITS_SCHEMA);
     const parsed = parseJson(text) as Record<string, unknown>;
     const rawSlices = Array.isArray(parsed.slices) ? parsed.slices : [];
     const validSlices: SemanticCommitSlice[] = [];
