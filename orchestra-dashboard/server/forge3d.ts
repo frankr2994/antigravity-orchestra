@@ -198,7 +198,7 @@ export async function probeLmStudioStatus(): Promise<{
           isMultimodal = true;
         } else {
           isMultimodal = false;
-          probeError = `Model did not visually identify the red test image (responded: "${text.trim()}"). Ensure a vision model is active.`;
+          probeError = `Model did not visually identify the red test image (responded: "${text.trim()}").`;
         }
       } else {
         const errText = await chatRes.text();
@@ -309,6 +309,9 @@ Respond strictly in valid JSON format:
 
   if (!res.ok) {
     const errorText = await res.text();
+    if (res.status === 400 && (errorText.includes('image_url') || errorText.includes('chat completion content parts'))) {
+      throw new Error(`The model currently loaded in LM Studio (${model}) is text-only and does not support image inputs. To enable vision review, load a multimodal model (e.g. gemma-3-12b-it-qat with vision or llava).`);
+    }
     throw new Error(`LM Studio vision review rejected request (HTTP ${res.status}): ${errorText}`);
   }
 

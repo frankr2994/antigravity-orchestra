@@ -4,7 +4,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
   AlertTriangle, Box, CheckCircle2, Download, HardDriveDownload, Image as ImageIcon,
   Layers, Loader2, Palette, RefreshCw, RotateCcw,
-  Sparkles, Trash2, Upload, Wand2, Wrench
+  Sparkles, Trash2, Upload, Wand2, Wrench, X
 } from 'lucide-react';
 
 export interface Forge3DReview {
@@ -134,10 +134,12 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const currentMeshRef = useRef<THREE.Group | THREE.Mesh | null>(null);
+  const diagnosticLightsRef = useRef<THREE.Group | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const prevMousePosRef = useRef({ x: 0, y: 0 });
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const reviewedAttemptsRef = useRef<Set<string>>(new Set());
 
   const loadStatus = useCallback(async () => {
     try {
@@ -337,6 +339,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
   const triggerVisualReview = useCallback(async (targetAsset: Forge3DAsset) => {
     if (!targetAsset || reviewing) return;
+    reviewedAttemptsRef.current.add(targetAsset.id);
     try {
       setReviewing(true);
       setError('');
@@ -392,28 +395,51 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     dirLight2.position.set(-5, -2, -5);
     scene.add(dirLight2);
 
+    // Diagnostic 3-Point White Inspection Lights (Hidden during interactive viewing)
+    const diagGroup = new THREE.Group();
+    diagGroup.visible = false;
+    diagnosticLightsRef.current = diagGroup;
+
+    const diagKey = new THREE.DirectionalLight(0xffffff, 1.8);
+    diagKey.position.set(5, 8, 6);
+    diagGroup.add(diagKey);
+
+    const diagFill = new THREE.DirectionalLight(0xffffff, 1.0);
+    diagFill.position.set(-5, 3, -4);
+    diagGroup.add(diagFill);
+
+    const diagRim = new THREE.DirectionalLight(0xffffff, 0.6);
+    diagRim.position.set(0, -6, -5);
+    diagGroup.add(diagRim);
+
+    const diagAmb = new THREE.AmbientLight(0xffffff, 1.2);
+    diagGroup.add(diagAmb);
+
+    scene.add(diagGroup);
+
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 100);
-    camera.position.set(0, 1.5, 4.5);
+    camera.position.set(0, 0.5, 3.5);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    container.replaceChildren(renderer.domElement);
+    renderer.setPixelRatio(window.devicePixelRatio);
     rendererRef.current = renderer;
+
+    container.innerHTML = '';
+    container.appendChild(renderer.domElement);
 
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
       if (!isDraggingRef.current && currentMeshRef.current && !reviewing) {
-        currentMeshRef.current.rotation.y += 0.004;
+        currentMeshRef.current.rotation.y += 0.003;
       }
       renderer.render(scene, camera);
     };
     animate();
 
     const handleResize = () => {
-      if (!container || !camera || !renderer) return;
+      if (!container || !renderer || !camera) return;
       const w = container.clientWidth;
       const h = container.clientHeight;
       camera.aspect = w / h;
@@ -473,8 +499,9 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           sceneRef.current.add(root);
           currentMeshRef.current = root;
 
-          // If autoReview is on and asset does not yet have a review, trigger visual inspection
-          if (autoReview && !selectedAsset.review) {
+          // If autoReview is on, asset does not yet have a review, vision is active, and hasn't been attempted yet this session:
+          if (autoReview && !selectedAsset.review && status?.lmStudio?.isMultimodal && !reviewedAttemptsRef.current.has(selectedAsset.id)) {
+            reviewedAttemptsRef.current.add(selectedAsset.id);
             void triggerVisualReview(selectedAsset);
           }
         },
@@ -485,7 +512,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
         }
       );
     }
-  }, [selectedAsset, renderMode, wireframeOverlay, autoReview, triggerVisualReview]);
+  }, [selectedAsset, renderMode, wireframeOverlay, autoReview, status?.lmStudio?.isMultimodal, triggerVisualReview]);
 
   // Mouse Orbit Controls
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -718,7 +745,19 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           </div>
         )}
 
-        {error && <div className="forge-error-box">{error}</div>}
+        {error && (
+          <div className="forge-error-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+            <div style={{ flex: 1 }}>{error}</div>
+            <button
+              type="button"
+              onClick={() => setError('')}
+              style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer', padding: 0, opacity: 0.8 }}
+              title="Dismiss error"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
 
         {/* Mode Selector Tabs */}
         <div className="forge-tabs">
@@ -795,13 +834,16 @@ export function Forge3DView({ api }: Forge3DViewProps) {
             </>
           )}
 
-          <label className="checkbox-row">
+          <label className={`checkbox-row ${!status?.lmStudio?.isMultimodal ? 'disabled' : ''}`}>
             <input
               type="checkbox"
-              checked={autoReview}
+              checked={autoReview && Boolean(status?.lmStudio?.isMultimodal)}
               onChange={(e) => setAutoReview(e.target.checked)}
+              disabled={!status?.lmStudio?.isMultimodal}
             />
-            <span>Gemma 12B Multi-Angle Vision Review ($0 local cost)</span>
+            <span>
+              Gemma Vision QA Review {status?.lmStudio?.isMultimodal ? '($0 local GPU)' : '(Requires Multimodal Model in LM Studio)'}
+            </span>
           </label>
 
           <button
