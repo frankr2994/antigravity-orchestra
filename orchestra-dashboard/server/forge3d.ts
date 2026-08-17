@@ -400,7 +400,7 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
 
   // Progressive Resolution Escalation: 256 (initial) -> 384 (Repair #1) -> 512 (Repair #2)
   const targetResolution = nextIteration >= 3 ? 512 : 384;
-  const targetThreshold = nextIteration >= 3 ? 30.0 : 28.0;
+  const targetThreshold = nextIteration >= 3 ? 24.0 : 20.0;
 
   if (failureType === 'concept' && asset.mode === 'text_to_3d') {
     // 1. Text-to-3D Concept failure: Regenerate 2D concept with refined prompt

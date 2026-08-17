@@ -45,12 +45,13 @@ export function buildConceptGenerationWorkflow(params: ConceptGenParams): Record
   // Node 6: Positive prompt
   if (workflow['6']?.inputs) {
     const basePrompt = params.prompt.trim();
-    workflow['6'].inputs.text = `${basePrompt}, isolated subject on plain neutral grey studio background, single centered prop, clean sharp edges, full view, award winning product render, diffuse studio lighting`;
+    workflow['6'].inputs.text = `isolated 3D model render of ${basePrompt}, single solid continuous 3D prop, 3/4 isometric perspective, clean silhouette, sharp focus, neutral solid grey background, studio lighting, award winning product asset`;
   }
 
   // Node 7: Negative prompt
-  if (workflow['7']?.inputs && params.negativePrompt) {
-    workflow['7'].inputs.text = params.negativePrompt;
+  if (workflow['7']?.inputs) {
+    const defaultNegative = 'table, desk, floor, ground, shadows on floor, flat 2d, illustration, room, background clutter, multiple items, human hands, text, watermark, cropped, blurry, cut off, transparency grid';
+    workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
   }
 
   // Node 4: Checkpoint

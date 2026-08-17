@@ -17,7 +17,7 @@
       "model": ["14", 0],
       "reference_image": ["15", 0],
       "geometry_resolution": 256,
-      "threshold": 25.0
+      "threshold": 20.0
     },
     "class_type": "TripoSRSampler"
   },
