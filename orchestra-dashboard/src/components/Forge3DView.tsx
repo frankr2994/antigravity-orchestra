@@ -807,10 +807,10 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           <button
             className="primary forge-btn"
             onClick={handleGenerate}
-            disabled={busy || (inputMode === 'text_to_3d' && !prompt.trim()) || (inputMode === 'image_to_3d' && !uploadedImageBase64)}
+            disabled={busy || (setupStatus !== null && !setupStatus.readyFor3D) || (inputMode === 'text_to_3d' && !prompt.trim()) || (inputMode === 'image_to_3d' && !uploadedImageBase64)}
           >
             {busy ? <Loader2 size={16} className="spin" /> : <Wand2 size={16} />}
-            {busy ? 'Reconstructing 3D Mesh on GPU...' : (inputMode === 'text_to_3d' ? 'Forge 3D Asset' : 'Reconstruct from Image')}
+            {busy ? 'Reconstructing 3D Mesh on GPU...' : (setupStatus && !setupStatus.readyFor3D ? 'Engine Setup Required' : (inputMode === 'text_to_3d' ? 'Forge 3D Asset' : 'Reconstruct from Image'))}
           </button>
         </div>
 

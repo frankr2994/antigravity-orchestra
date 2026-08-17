@@ -111,11 +111,16 @@ test('runForge3DJob fails truthfully and does not fabricate placeholder geometry
   }
 });
 
-test('FORGE_DEPENDENCIES manifest defines complete download metadata and marks rembg as required', () => {
-  assert.ok(FORGE_DEPENDENCIES.length >= 3, 'Manifest must contain core models and rembg');
+test('FORGE_DEPENDENCIES manifest defines complete download metadata and marks rembg & u2net.onnx as required', () => {
+  assert.ok(FORGE_DEPENDENCIES.length >= 4, 'Manifest must contain core models, rembg package, and u2net.onnx model');
   const rembgDep = FORGE_DEPENDENCIES.find((d) => d.id === 'rembg-pkg');
   assert.ok(rembgDep, 'Manifest must include rembg-pkg');
-  assert.equal(rembgDep?.required, true, 'rembg must be marked as a required dependency');
+  assert.equal(rembgDep?.required, true, 'rembg-pkg must be marked as a required dependency');
+
+  const u2netDep = FORGE_DEPENDENCIES.find((d) => d.id === 'rembg-model');
+  assert.ok(u2netDep, 'Manifest must include rembg-model');
+  assert.equal(u2netDep?.required, true, 'rembg-model must be marked as a required dependency');
+  assert.equal(u2netDep?.fileName, 'u2net.onnx');
 
   for (const dep of FORGE_DEPENDENCIES) {
     assert.ok(dep.id, 'Must have id');
@@ -125,13 +130,13 @@ test('FORGE_DEPENDENCIES manifest defines complete download metadata and marks r
   }
 });
 
-test('checkForgeDependencies returns structured readiness and dependency statuses', async () => {
+test('checkForgeDependencies returns structured readiness and dependency statuses with dynamic non-sticky restart', async () => {
   const setup = await checkForgeDependencies();
   assert.equal(typeof setup.comfyFound, 'boolean');
   assert.equal(typeof setup.missingCount, 'number');
   assert.equal(typeof setup.restartRequired, 'boolean');
   assert.ok(Array.isArray(setup.items));
-  assert.ok(setup.items.length >= 3);
+  assert.ok(setup.items.length >= 4);
 });
 
 test('getDownloadProgress returns null when idle', () => {

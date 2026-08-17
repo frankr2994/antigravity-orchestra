@@ -6,6 +6,7 @@ import { executeConceptGeneration, executeTripoSRGeneration, findComfyInstallati
 import { stageGpuForStep } from './gpu-manager.js';
 import type { MeshBoundingBox } from './mesh-qa.js';
 import { preprocessImageForTripo } from './rembg-processor.js';
+import { checkForgeDependencies } from './forge-manifest.js';
 
 export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
@@ -152,9 +153,9 @@ export async function probeLmStudioStatus(): Promise<{
     const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
     const loadedModel = models.find((m: string) => m.toLowerCase().includes('gemma') || m === expectedModel) || models[0] || expectedModel;
 
-    // Genuine Multimodal Capability Probe: Send a 1x1 base64 transparent PNG to test vision support
+    // Genuine Semantic Visual Recognition Probe: Send a 4x4 pure red image and ask for color identification
     const probeController = new AbortController();
-    const probeTimeout = setTimeout(() => probeController.abort(), 3500);
+    const probeTimeout = setTimeout(() => probeController.abort(), 4000);
 
     let isMultimodal = false;
     let probeError: string | undefined;
@@ -169,31 +170,39 @@ export async function probeLmStudioStatus(): Promise<{
             {
               role: 'user',
               content: [
-                { type: 'text', text: 'Diagnostic vision probe. Reply with "OK".' },
+                { type: 'text', text: 'What color is this image? Reply with only the single color name (e.g. red, blue, green).' },
                 {
                   type: 'image_url',
-                  image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' },
+                  image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAD0lEQVR42mP8z8AARAwMAGsgBP7qZ7vUAAAAAElFTkSuQmCC' },
                 },
               ],
             },
           ],
-          max_tokens: 2,
+          max_tokens: 5,
+          temperature: 0.0,
         }),
         signal: probeController.signal,
       });
 
       clearTimeout(probeTimeout);
       if (chatRes.ok) {
-        isMultimodal = true;
+        const chatData = (await chatRes.json()) as any;
+        const text = chatData.choices?.[0]?.message?.content || '';
+        if (/red/i.test(text)) {
+          isMultimodal = true;
+        } else {
+          isMultimodal = false;
+          probeError = `Model did not visually identify red image (replied: "${text.trim()}"). Ensure a vision model is active.`;
+        }
       } else {
         const errText = await chatRes.text();
         isMultimodal = false;
-        probeError = `Loaded model does not support image inputs: ${errText.slice(0, 100)}`;
+        probeError = `Loaded model rejected vision input: ${errText.slice(0, 100)}`;
       }
     } catch (chatErr) {
       clearTimeout(probeTimeout);
       isMultimodal = false;
-      probeError = `Vision test timed out or rejected: ${chatErr instanceof Error ? chatErr.message : String(chatErr)}`;
+      probeError = `Vision interpretation probe timed out or failed: ${chatErr instanceof Error ? chatErr.message : String(chatErr)}`;
     }
 
     const result = {
@@ -378,7 +387,10 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
     writeFileSync(rawConceptPath, concept.buffer);
 
     const processedPath = join(FORGE_DIR, `${asset.id}.png`);
-    await preprocessImageForTripo(rawConceptPath, processedPath);
+    const prep = await preprocessImageForTripo(rawConceptPath, processedPath);
+    if (!prep.success) {
+      throw new Error(`TripoSR repair concept preprocessing failed: ${prep.error || 'Foreground segmentation failed'}`);
+    }
 
     const inputFilename = `${asset.id}_iter${nextIteration}.png`;
     const comfyInputTarget = join(installation.inputDir, inputFilename);
@@ -494,6 +506,13 @@ export async function runForge3DJob(
       throw new Error('ComfyUI is reachable but TripoSR nodes (TripoSRModelLoader / TripoSRSampler) are not loaded.');
     }
 
+    // Server-Side Readiness Check: Verify all required dependencies exist
+    const setup = await checkForgeDependencies();
+    if (!setup.readyFor3D) {
+      const missingNames = setup.items.filter((i) => i.required && !i.installed).map((i) => i.name).join(', ');
+      throw new Error(`Neural 3D Engine is not ready (${setup.missingCount} required dependencies missing: ${missingNames}). Use Engine Setup to install them.`);
+    }
+
     const assetId = `forge_${Date.now()}_${randomUUID().slice(0, 6)}`;
     const assetTitle = prompt.length > 35 ? prompt.slice(0, 32).trim() + '…' : (prompt || 'Reconstructed Mesh');
     let inputImageForTripo: string;
@@ -519,7 +538,10 @@ export async function runForge3DJob(
 
       // Preprocess image with rembg background removal & composite on 50% neutral gray canvas
       const processedConceptPath = join(FORGE_DIR, `${assetId}.png`);
-      await preprocessImageForTripo(rawConceptPath, processedConceptPath);
+      const prep = await preprocessImageForTripo(rawConceptPath, processedConceptPath);
+      if (!prep.success) {
+        throw new Error(`TripoSR concept image preprocessing failed: ${prep.error || 'Foreground segmentation failed'}`);
+      }
       previewUrl = `/api/forge3d/assets/${assetId}.png`;
 
       // Copy processed image to ComfyUI input folder
@@ -542,7 +564,10 @@ export async function runForge3DJob(
         writeFileSync(rawUploadPath, options.imageBuffer);
 
         const processedPath = join(FORGE_DIR, `${assetId}.png`);
-        await preprocessImageForTripo(rawUploadPath, processedPath);
+        const prep = await preprocessImageForTripo(rawUploadPath, processedPath);
+        if (!prep.success) {
+          throw new Error(`TripoSR uploaded image preprocessing failed: ${prep.error || 'Foreground segmentation failed'}`);
+        }
         previewUrl = `/api/forge3d/assets/${assetId}.png`;
 
         const comfyInputFilename = `${assetId}.png`;

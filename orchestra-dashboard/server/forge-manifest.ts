@@ -1,5 +1,6 @@
 import { existsSync, statSync, createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findComfyInstallation, getComfyStatus } from './comfy.js';
@@ -71,7 +72,7 @@ export const FORGE_DEPENDENCIES: ForgeDependencyItem[] = [
   },
   {
     id: 'rembg-pkg',
-    name: 'Neural Background Remover (rembg)',
+    name: 'Neural Background Remover Packages (rembg)',
     category: 'python_pkg',
     targetSubdir: '',
     fileName: 'rembg',
@@ -80,13 +81,18 @@ export const FORGE_DEPENDENCIES: ForgeDependencyItem[] = [
     description: 'Background removal and alpha masking engine for isolated silhouette synthesis.',
     required: true,
   },
+  {
+    id: 'rembg-model',
+    name: 'rembg Segmentation Model (u2net.onnx)',
+    category: 'model',
+    targetSubdir: '.u2net',
+    fileName: 'u2net.onnx',
+    downloadUrl: 'https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx',
+    sizeBytes: 176296316,
+    description: 'Official U2-Net 176 MB ONNX neural weights for foreground subject segmentation.',
+    required: true,
+  },
 ];
-
-let needsComfyRestart = false;
-
-export function setRestartRequired(required = true): void {
-  needsComfyRestart = required;
-}
 
 export async function probePythonPackages(pythonPath: string, packages: string[]): Promise<boolean> {
   try {
@@ -127,7 +133,12 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
     let actualSizeBytes: number | undefined;
 
     if (dep.category === 'model') {
-      localPath = join(installation.comfyCoreDir, dep.targetSubdir, dep.fileName);
+      if (dep.id === 'rembg-model') {
+        localPath = join(homedir(), '.u2net', dep.fileName);
+      } else {
+        localPath = join(installation.comfyCoreDir, dep.targetSubdir, dep.fileName);
+      }
+
       if (existsSync(localPath)) {
         try {
           const st = statSync(localPath);
@@ -158,9 +169,9 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
   const missing = items.filter((i) => i.required && !i.installed);
   const missingBytes = missing.reduce((acc, i) => acc + (i.sizeBytes || 0), 0);
 
-  // If nodes are installed on disk but ComfyUI hasn't loaded them, signal restart requirement
+  // Dynamic restart requirement check: If Flowty custom node is installed on disk but ComfyUI process hasn't loaded it
   const flowtyInstalled = items.find((i) => i.id === 'flowty-triposr-node')?.installed;
-  const restartRequired = needsComfyRestart || Boolean(comfyStatus.available && flowtyInstalled && !comfyStatus.tripoReady);
+  const restartRequired = Boolean(comfyStatus.available && flowtyInstalled && !comfyStatus.tripoReady);
 
   const readyFor3D = Boolean(comfyStatus.available && comfyStatus.tripoReady && missing.length === 0 && !restartRequired);
 
@@ -227,7 +238,6 @@ export async function installForgeDependency(depId: string): Promise<void> {
         await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', '-r', reqFile]);
       }
 
-      setRestartRequired(true);
       activeDownload.percent = 100;
       activeDownload.status = 'completed';
     } catch (err) {
@@ -243,7 +253,6 @@ export async function installForgeDependency(depId: string): Promise<void> {
       activeDownload.percent = 30;
       const pkgs = dep.downloadUrl.split(' ');
       await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', ...pkgs]);
-      setRestartRequired(true);
       activeDownload.percent = 100;
       activeDownload.status = 'completed';
     } catch (err) {
@@ -255,7 +264,12 @@ export async function installForgeDependency(depId: string): Promise<void> {
   }
 
   if (dep.category === 'model') {
-    const targetDir = join(installation.comfyCoreDir, dep.targetSubdir);
+    let targetDir: string;
+    if (dep.id === 'rembg-model') {
+      targetDir = join(homedir(), '.u2net');
+    } else {
+      targetDir = join(installation.comfyCoreDir, dep.targetSubdir);
+    }
     if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
 
     const targetPath = join(targetDir, dep.fileName);
