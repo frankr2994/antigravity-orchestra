@@ -29,6 +29,7 @@ export interface ForgeSetupStatus {
   comfyPath: string | null;
   comfyRunning: boolean;
   readyFor3D: boolean;
+  restartRequired: boolean;
   items: DependencyStatus[];
   missingCount: number;
   missingBytes: number;
@@ -77,9 +78,25 @@ export const FORGE_DEPENDENCIES: ForgeDependencyItem[] = [
     downloadUrl: 'rembg onnxruntime trimesh[easy]',
     sizeBytes: 0,
     description: 'Background removal and alpha masking engine for isolated silhouette synthesis.',
-    required: false,
+    required: true,
   },
 ];
+
+let needsComfyRestart = false;
+
+export function setRestartRequired(required = true): void {
+  needsComfyRestart = required;
+}
+
+export async function probePythonPackages(pythonPath: string, packages: string[]): Promise<boolean> {
+  try {
+    const script = `import sys; ${packages.map((p) => `import ${p}`).join('; ')}; print("OK")`;
+    const { stdout } = await execFileAsync(pythonPath, ['-c', script], { timeout: 5000 });
+    return stdout.trim().endsWith('OK');
+  } catch {
+    return false;
+  }
+}
 
 export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
   const installation = findComfyInstallation();
@@ -91,6 +108,7 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
       comfyPath: null,
       comfyRunning: comfyStatus.available,
       readyFor3D: false,
+      restartRequired: false,
       items: FORGE_DEPENDENCIES.map((dep) => ({
         ...dep,
         installed: false,
@@ -101,7 +119,9 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
     };
   }
 
-  const items: DependencyStatus[] = FORGE_DEPENDENCIES.map((dep) => {
+  const items: DependencyStatus[] = [];
+
+  for (const dep of FORGE_DEPENDENCIES) {
     let localPath = '';
     let installed = false;
     let actualSizeBytes: number | undefined;
@@ -123,29 +143,33 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
       installed = existsSync(initPy);
     } else if (dep.category === 'python_pkg') {
       localPath = 'Python environment';
-      // If tripo is ready or rembg import check passes
-      installed = true;
+      const pkgsToCheck = dep.id === 'rembg-pkg' ? ['rembg', 'onnxruntime', 'trimesh', 'PIL', 'numpy'] : ['trimesh'];
+      installed = await probePythonPackages(installation.pythonPath, pkgsToCheck);
     }
 
-    return {
+    items.push({
       ...dep,
       installed,
       actualSizeBytes,
       localPath,
-    };
-  });
+    });
+  }
 
   const missing = items.filter((i) => i.required && !i.installed);
   const missingBytes = missing.reduce((acc, i) => acc + (i.sizeBytes || 0), 0);
 
-  // Strict check: ComfyUI running, TripoSR custom nodes loaded, and all required files present
-  const readyFor3D = Boolean(comfyStatus.available && comfyStatus.tripoReady && missing.length === 0);
+  // If nodes are installed on disk but ComfyUI hasn't loaded them, signal restart requirement
+  const flowtyInstalled = items.find((i) => i.id === 'flowty-triposr-node')?.installed;
+  const restartRequired = needsComfyRestart || Boolean(comfyStatus.available && flowtyInstalled && !comfyStatus.tripoReady);
+
+  const readyFor3D = Boolean(comfyStatus.available && comfyStatus.tripoReady && missing.length === 0 && !restartRequired);
 
   return {
     comfyFound: true,
     comfyPath: installation.rootPath,
     comfyRunning: comfyStatus.available,
     readyFor3D,
+    restartRequired,
     items,
     missingCount: missing.length,
     missingBytes,
@@ -203,6 +227,7 @@ export async function installForgeDependency(depId: string): Promise<void> {
         await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', '-r', reqFile]);
       }
 
+      setRestartRequired(true);
       activeDownload.percent = 100;
       activeDownload.status = 'completed';
     } catch (err) {
@@ -218,6 +243,7 @@ export async function installForgeDependency(depId: string): Promise<void> {
       activeDownload.percent = 30;
       const pkgs = dep.downloadUrl.split(' ');
       await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', ...pkgs]);
+      setRestartRequired(true);
       activeDownload.percent = 100;
       activeDownload.status = 'completed';
     } catch (err) {

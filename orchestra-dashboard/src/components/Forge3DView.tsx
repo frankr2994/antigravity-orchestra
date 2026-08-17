@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import {
-  Box, CheckCircle2, Download, HardDriveDownload, Image as ImageIcon,
+  AlertTriangle, Box, CheckCircle2, Download, HardDriveDownload, Image as ImageIcon,
   Layers, Loader2, Palette, RefreshCw, RotateCcw,
   Sparkles, Trash2, Upload, Wand2, Wrench
 } from 'lucide-react';
@@ -58,6 +58,7 @@ interface ForgeSetupStatus {
   comfyPath: string | null;
   comfyRunning: boolean;
   readyFor3D: boolean;
+  restartRequired: boolean;
   items: DependencyStatus[];
   missingCount: number;
   missingBytes: number;
@@ -202,7 +203,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   }, [installingDepId, downloadProgress, pollDownload]);
 
-  // Capture 6 Standardized Deterministic Diagnostic Snapshots for Gemma Vision Review
+  // Capture 6 Standardized Deterministic Diagnostic Snapshots with Dedicated White 3-Point Lighting
   const captureSnapshots = useCallback(async (): Promise<string[]> => {
     const renderer = rendererRef.current;
     const scene = sceneRef.current;
@@ -210,19 +211,44 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     const mesh = currentMeshRef.current;
     if (!renderer || !scene || !camera || !mesh) return [];
 
-    // Save interactive viewport state
+    // 1. Save interactive viewport state
     const origRotX = mesh.rotation.x;
     const origRotY = mesh.rotation.y;
     const origRotZ = mesh.rotation.z;
     const origCamPos = camera.position.clone();
     const origBg = scene.background;
 
-    // Isolate diagnostic environment: neutral gray 50% background, hide grid
+    // 2. Hide interactive colored viewport lights
+    const interactiveLights: THREE.Light[] = [];
+    scene.traverse((child) => {
+      if ((child as THREE.Light).isLight) {
+        interactiveLights.push(child as THREE.Light);
+        (child as THREE.Light).visible = false;
+      }
+    });
+
+    // 3. Set neutral 50% gray diagnostic background & hide grid
     scene.background = new THREE.Color(0x808080);
     const gridChild = scene.children.find((c) => c instanceof THREE.GridHelper);
     if (gridChild) gridChild.visible = false;
 
-    // Cache original mesh materials
+    // 4. Create dedicated pure white 3-point diagnostic lighting setup
+    const diagKeyLight = new THREE.DirectionalLight(0xffffff, 1.3);
+    diagKeyLight.position.set(4, 5, 5);
+    scene.add(diagKeyLight);
+
+    const diagFillLight = new THREE.DirectionalLight(0xffffff, 0.6);
+    diagFillLight.position.set(-5, 2, 4);
+    scene.add(diagFillLight);
+
+    const diagRimLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    diagRimLight.position.set(0, -3, -5);
+    scene.add(diagRimLight);
+
+    const diagAmbientLight = new THREE.AmbientLight(0xffffff, 0.45);
+    scene.add(diagAmbientLight);
+
+    // 5. Cache original mesh materials
     const originalMaterials = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
     mesh.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
@@ -245,27 +271,27 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     camera.position.set(0, 1.0, 3.8);
     camera.lookAt(0, 0, 0);
 
-    // 1. Front Shaded (0°)
+    // Pass 1: Front Shaded (0°)
     mesh.rotation.set(0, 0, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // 2. 3/4 Iso Shaded (45°)
+    // Pass 2: 3/4 Iso Shaded (45°)
     mesh.rotation.set(0.12, Math.PI / 4, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // 3. Side Profile Shaded (90°)
+    // Pass 3: Side Profile Shaded (90°)
     mesh.rotation.set(0, Math.PI / 2, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // 4. Rear Shaded (180°)
+    // Pass 4: Rear Shaded (180°)
     mesh.rotation.set(0, Math.PI, 0);
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // 5. 3/4 Iso Clay Surface (45°)
+    // Pass 5: 3/4 Iso Clay Surface (45°)
     mesh.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = clayMaterial;
     });
@@ -273,14 +299,24 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // 6. 3/4 Iso Wireframe (45°)
+    // Pass 6: 3/4 Iso Wireframe (45°)
     mesh.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = wireMaterial;
     });
     renderer.render(scene, camera);
     snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
-    // Restore interactive viewport state
+    // 6. Clean up diagnostic lights
+    scene.remove(diagKeyLight);
+    scene.remove(diagFillLight);
+    scene.remove(diagRimLight);
+    scene.remove(diagAmbientLight);
+    diagKeyLight.dispose();
+    diagFillLight.dispose();
+    diagRimLight.dispose();
+    diagAmbientLight.dispose();
+
+    // 7. Restore interactive viewport state
     mesh.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const m = child as THREE.Mesh;
@@ -288,6 +324,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
         if (orig) m.material = orig;
       }
     });
+    interactiveLights.forEach((l) => { l.visible = true; });
     scene.background = origBg;
     if (gridChild) gridChild.visible = true;
     mesh.rotation.set(origRotX, origRotY, origRotZ);
@@ -343,7 +380,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     grid.position.y = -1.2;
     scene.add(grid);
 
-    // Lighting
+    // Interactive Viewport Lights (Cyan & Red)
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.9);
     scene.add(ambientLight);
 
@@ -613,12 +650,31 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           </div>
           <div className="status-item">
             <div className="status-label">
-              <span className={`status-dot ${status?.lmStudio.available ? 'online' : 'offline'}`} />
+              <span className={`status-dot ${status?.lmStudio.isMultimodal ? 'online' : (status?.lmStudio.available ? 'warning' : 'offline')}`} />
               <strong>Gemma 12B Vision Reviewer</strong>
             </div>
-            <span>{status?.lmStudio.available ? `${status.lmStudio.model} (Vision Active)` : (status?.lmStudio.error ? 'Offline (:1234)' : 'Connecting...')}</span>
+            <span>
+              {status?.lmStudio.isMultimodal
+                ? `${status.lmStudio.model} (Vision Active)`
+                : (status?.lmStudio.available
+                  ? `${status.lmStudio.model} (Text Only, Vision Offline)`
+                  : (status?.lmStudio.error ? 'Offline (:1234)' : 'Connecting...'))}
+            </span>
           </div>
         </div>
+
+        {/* ComfyUI Restart Required Notification */}
+        {setupStatus?.restartRequired && (
+          <div className="forge-setup-banner" style={{ borderColor: '#f59e0b', backgroundColor: '#78350f22' }}>
+            <div className="setup-header">
+              <AlertTriangle size={16} style={{ color: '#f59e0b' }} />
+              <strong style={{ color: '#f59e0b' }}>Restart ComfyUI to Activate Nodes</strong>
+            </div>
+            <p style={{ margin: '6px 0 0 0', fontSize: '0.8rem', color: '#cbd5e1' }}>
+              Custom nodes or Python packages were installed. Please restart ComfyUI to load TripoSR into memory.
+            </p>
+          </div>
+        )}
 
         {/* Engine Setup & Auto-Downloader Banner if dependencies missing */}
         {setupStatus && setupStatus.missingCount > 0 && (
@@ -848,7 +904,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
               className={`icon-button mini ${reviewing ? 'active' : ''}`}
               onClick={() => selectedAsset && triggerVisualReview(selectedAsset)}
               disabled={!selectedAsset || reviewing}
-              title="Inspect 3D Geometry with Gemma 12B Vision (6 Standard Views)"
+              title="Inspect 3D Geometry with Gemma 12B Vision (6 Standard Views, White Lighting)"
             >
               {reviewing ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
             </button>

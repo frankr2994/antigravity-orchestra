@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
 import { probeLmStudioStatus, repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
-import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
+import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress, probePythonPackages } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
 import { exportModelFormat, sanitizeAndExportGlb } from '../dist-server/mesh-qa.js';
@@ -29,6 +29,15 @@ test('probeLmStudioStatus returns structured availability and multimodal capabil
   assert.equal(typeof status.available, 'boolean');
   assert.equal(typeof status.model, 'string');
   assert.equal(typeof status.isMultimodal, 'boolean');
+});
+
+test('probePythonPackages returns boolean without throwing on valid or invalid packages', async () => {
+  const installation = findComfyInstallation();
+  const pyPath = installation?.pythonPath || (process.platform === 'win32' ? 'python.exe' : 'python3');
+  const result = await probePythonPackages(pyPath, ['sys', 'os']);
+  assert.equal(typeof result, 'boolean');
+  const fakePkgResult = await probePythonPackages(pyPath, ['non_existent_fake_package_xyz']);
+  assert.equal(fakePkgResult, false);
 });
 
 test('requestGemmaVisionReview strictly rejects requests without rendered image data', async () => {
@@ -87,7 +96,6 @@ test('preprocessImageForTripo throws error if source image does not exist', asyn
 });
 
 test('runForge3DJob fails truthfully and does not fabricate placeholder geometry when Comfy is unavailable', async () => {
-  // Point to a dummy offline port
   process.env.COMFYUI_URL = 'http://127.0.0.1:59999';
   try {
     await assert.rejects(
@@ -103,8 +111,12 @@ test('runForge3DJob fails truthfully and does not fabricate placeholder geometry
   }
 });
 
-test('FORGE_DEPENDENCIES manifest defines complete download metadata', () => {
-  assert.ok(FORGE_DEPENDENCIES.length >= 2, 'Manifest must contain core models');
+test('FORGE_DEPENDENCIES manifest defines complete download metadata and marks rembg as required', () => {
+  assert.ok(FORGE_DEPENDENCIES.length >= 3, 'Manifest must contain core models and rembg');
+  const rembgDep = FORGE_DEPENDENCIES.find((d) => d.id === 'rembg-pkg');
+  assert.ok(rembgDep, 'Manifest must include rembg-pkg');
+  assert.equal(rembgDep?.required, true, 'rembg must be marked as a required dependency');
+
   for (const dep of FORGE_DEPENDENCIES) {
     assert.ok(dep.id, 'Must have id');
     assert.ok(dep.name, 'Must have name');
@@ -117,8 +129,9 @@ test('checkForgeDependencies returns structured readiness and dependency statuse
   const setup = await checkForgeDependencies();
   assert.equal(typeof setup.comfyFound, 'boolean');
   assert.equal(typeof setup.missingCount, 'number');
+  assert.equal(typeof setup.restartRequired, 'boolean');
   assert.ok(Array.isArray(setup.items));
-  assert.ok(setup.items.length >= 2);
+  assert.ok(setup.items.length >= 3);
 });
 
 test('getDownloadProgress returns null when idle', () => {
@@ -138,15 +151,18 @@ test('buildConceptGenerationWorkflow parameterizes JSON template nodes properly'
   assert.equal(wf['3'].inputs.seed, 42);
 });
 
-test('buildTripoSRWorkflow injects image name and geometry resolution', () => {
-  const wf = buildTripoSRWorkflow({
-    imageName: 'test_render.png',
-    geometryResolution: 512,
-    threshold: 30.0,
-  });
-  assert.equal(wf['15'].inputs.image, 'test_render.png');
-  assert.equal(wf['12'].inputs.geometry_resolution, 512);
-  assert.equal(wf['12'].inputs.threshold, 30.0);
+test('buildTripoSRWorkflow supports progressive resolution escalation from 256 to 384 to 512', () => {
+  const wf256 = buildTripoSRWorkflow({ imageName: 'test.png', geometryResolution: 256, threshold: 25.0 });
+  assert.equal(wf256['12'].inputs.geometry_resolution, 256);
+  assert.equal(wf256['12'].inputs.threshold, 25.0);
+
+  const wf384 = buildTripoSRWorkflow({ imageName: 'test.png', geometryResolution: 384, threshold: 28.0 });
+  assert.equal(wf384['12'].inputs.geometry_resolution, 384);
+  assert.equal(wf384['12'].inputs.threshold, 28.0);
+
+  const wf512 = buildTripoSRWorkflow({ imageName: 'test.png', geometryResolution: 512, threshold: 30.0 });
+  assert.equal(wf512['12'].inputs.geometry_resolution, 512);
+  assert.equal(wf512['12'].inputs.threshold, 30.0);
 });
 
 test('freeComfyMemory handles unreachable endpoint gracefully', async () => {

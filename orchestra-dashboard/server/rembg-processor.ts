@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { existsSync, copyFileSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findComfyInstallation } from './comfy.js';
@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 /**
  * Preprocesses a 2D image for TripoSR neural 3D reconstruction:
- * 1. Strips background using rembg (if available) or alpha-channel transparency.
+ * 1. Strips background using rembg (if available) or existing alpha-channel transparency.
  * 2. Centers foreground subject and normalizes bounding box with standard 15% margin.
  * 3. Composites foreground onto neutral 50% gray background (RGB: 128, 128, 128) as required by TripoSR.
  */
@@ -40,9 +40,7 @@ try:
         img = remove(img)
         has_rembg = True
     except Exception as rembg_err:
-        # Fallback to alpha channel or luminance threshold if rembg not yet installed
-        if img.mode != 'RGBA':
-            img = img.convert('RGBA')
+        pass
 
     # Convert to RGBA
     if img.mode != 'RGBA':
@@ -51,6 +49,19 @@ try:
     # Find alpha bounding box
     np_img = np.array(img)
     alpha = np_img[:, :, 3]
+    
+    # Check if alpha is fully opaque (meaning no background was removed)
+    is_fully_opaque = bool(np.all(alpha == 255))
+    
+    if not has_rembg and is_fully_opaque:
+        # Cannot isolate silhouette from an opaque background without rembg
+        print(json.dumps({
+            'success': False,
+            'backgroundRemoved': False,
+            'error': 'rembg neural background remover is not installed. Cannot isolate subject from opaque background.'
+        }))
+        sys.exit(0)
+
     bbox = Image.fromarray(alpha).getbbox()
     
     if bbox:
@@ -91,19 +102,27 @@ except Exception as e:
     const { stdout } = await execFileAsync(pythonPath, ['-c', pyScript]);
     const lastLine = stdout.trim().split('\n').pop() || '{}';
     const parsed = JSON.parse(lastLine);
+    if (!parsed.success && parsed.error) {
+      // If rembg was missing on an opaque image, copy fallback but fail truthfully
+      copyFileSync(inputImagePath, outputImagePath);
+      return {
+        success: false,
+        backgroundRemoved: false,
+        error: parsed.error,
+      };
+    }
     return {
       success: Boolean(parsed.success),
       backgroundRemoved: Boolean(parsed.backgroundRemoved),
       error: parsed.error,
     };
   } catch (err) {
-    console.warn(`[preprocessImageForTripo] Warning during alpha preprocessing: ${err instanceof Error ? err.message : String(err)}`);
-    // Non-fatal fallback: copy directly to output if Python script failed
-    const { copyFileSync } = await import('node:fs');
+    console.warn(`[preprocessImageForTripo] Error during alpha preprocessing: ${err instanceof Error ? err.message : String(err)}`);
     copyFileSync(inputImagePath, outputImagePath);
     return {
-      success: true,
+      success: false,
       backgroundRemoved: false,
+      error: err instanceof Error ? err.message : String(err),
     };
   }
 }

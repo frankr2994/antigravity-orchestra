@@ -120,40 +120,99 @@ export function getForgeJob(id: string): Forge3DJob | null {
   return activeJobs.get(id) || null;
 }
 
+let cachedVisionProbe: { result: { available: boolean; model: string; isMultimodal: boolean; error?: string }; expiresAt: number } | null = null;
+
 export async function probeLmStudioStatus(): Promise<{
   available: boolean;
   model: string;
   isMultimodal: boolean;
   error?: string;
 }> {
+  const now = Date.now();
+  if (cachedVisionProbe && cachedVisionProbe.expiresAt > now) {
+    return cachedVisionProbe.result;
+  }
+
   const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
   const expectedModel = config.lmStudioModel || 'gemma-4-12b-it-qat';
+
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2500);
-    const res = await fetch(`${lmStudioUrl}/models`, { signal: controller.signal });
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const modelsRes = await fetch(`${lmStudioUrl}/models`, { signal: controller.signal });
     clearTimeout(timeout);
 
-    if (!res.ok) {
-      return { available: false, model: expectedModel, isMultimodal: false, error: `HTTP ${res.status}` };
+    if (!modelsRes.ok) {
+      const res = { available: false, model: expectedModel, isMultimodal: false, error: `HTTP ${modelsRes.status}` };
+      cachedVisionProbe = { result: res, expiresAt: now + 5000 };
+      return res;
     }
 
-    const data = (await res.json()) as any;
+    const data = (await modelsRes.json()) as any;
     const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
-    const loaded = models.find((m: string) => m.toLowerCase().includes('gemma') || m === expectedModel) || models[0] || expectedModel;
+    const loadedModel = models.find((m: string) => m.toLowerCase().includes('gemma') || m === expectedModel) || models[0] || expectedModel;
 
-    return {
+    // Genuine Multimodal Capability Probe: Send a 1x1 base64 transparent PNG to test vision support
+    const probeController = new AbortController();
+    const probeTimeout = setTimeout(() => probeController.abort(), 3500);
+
+    let isMultimodal = false;
+    let probeError: string | undefined;
+
+    try {
+      const chatRes = await fetch(`${lmStudioUrl}/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: loadedModel,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'Diagnostic vision probe. Reply with "OK".' },
+                {
+                  type: 'image_url',
+                  image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==' },
+                },
+              ],
+            },
+          ],
+          max_tokens: 2,
+        }),
+        signal: probeController.signal,
+      });
+
+      clearTimeout(probeTimeout);
+      if (chatRes.ok) {
+        isMultimodal = true;
+      } else {
+        const errText = await chatRes.text();
+        isMultimodal = false;
+        probeError = `Loaded model does not support image inputs: ${errText.slice(0, 100)}`;
+      }
+    } catch (chatErr) {
+      clearTimeout(probeTimeout);
+      isMultimodal = false;
+      probeError = `Vision test timed out or rejected: ${chatErr instanceof Error ? chatErr.message : String(chatErr)}`;
+    }
+
+    const result = {
       available: true,
-      model: loaded,
-      isMultimodal: true,
+      model: loadedModel,
+      isMultimodal,
+      error: probeError,
     };
+    cachedVisionProbe = { result, expiresAt: now + 15000 };
+    return result;
   } catch (err) {
-    return {
+    const result = {
       available: false,
       model: expectedModel,
       isMultimodal: false,
       error: err instanceof Error ? err.message : String(err),
     };
+    cachedVisionProbe = { result, expiresAt: now + 5000 };
+    return result;
   }
 }
 
@@ -298,8 +357,12 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
   let repairedAsset: Forge3DAsset;
   const nextIteration = asset.iterations + 1;
 
-  if (failureType === 'concept') {
-    // 1. Concept failure: ONLY regenerate 2D concept when failure was classified as concept flaw
+  // Progressive Resolution Escalation: 256 (initial) -> 384 (Repair #1) -> 512 (Repair #2)
+  const targetResolution = nextIteration >= 3 ? 512 : 384;
+  const targetThreshold = nextIteration >= 3 ? 30.0 : 28.0;
+
+  if (failureType === 'concept' && asset.mode === 'text_to_3d') {
+    // 1. Text-to-3D Concept failure: Regenerate 2D concept with refined prompt
     const updatedPrompt = refinement ? `${asset.prompt}, ${refinement}` : `${asset.prompt}, clean sharp edges, high contrast`;
     await stageGpuForStep('concept');
 
@@ -317,14 +380,14 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
     const processedPath = join(FORGE_DIR, `${asset.id}.png`);
     await preprocessImageForTripo(rawConceptPath, processedPath);
 
-    // Copy to ComfyUI input folder
     const inputFilename = `${asset.id}_iter${nextIteration}.png`;
     const comfyInputTarget = join(installation.inputDir, inputFilename);
     copyFileSync(processedPath, comfyInputTarget);
 
     await stageGpuForStep('reconstruction');
     const tripoResult = await executeTripoSRGeneration(inputFilename, {
-      geometryResolution: 384,
+      geometryResolution: targetResolution,
+      threshold: targetThreshold,
     });
 
     const glbFileName = `${asset.id}.glb`;
@@ -346,10 +409,12 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
       review: undefined,
     };
   } else {
-    // 2. Geometry / Mesh failure: PRESERVE original 2D concept, adjust 3D reconstruction parameters!
+    // 2. Geometry / Mesh failure OR Image-to-3D:
+    // CRITICAL: NEVER replace a user's uploaded photograph with SD AI output.
+    // Preserve existing source concept image and escalate reconstruction resolution.
     const existingConceptPath = join(FORGE_DIR, `${asset.id}.png`);
     if (!existsSync(existingConceptPath)) {
-      throw new Error(`Cannot perform geometry repair: Source concept image not found at ${existingConceptPath}`);
+      throw new Error(`Cannot perform repair: Source image not found at ${existingConceptPath}`);
     }
 
     const inputFilename = `${asset.id}_iter${nextIteration}.png`;
@@ -358,8 +423,8 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
 
     await stageGpuForStep('reconstruction');
     const tripoResult = await executeTripoSRGeneration(inputFilename, {
-      geometryResolution: 384,
-      threshold: 28.0,
+      geometryResolution: targetResolution,
+      threshold: targetThreshold,
     });
 
     const glbFileName = `${asset.id}.glb`;
@@ -498,7 +563,7 @@ export async function runForge3DJob(
     job.message = 'Executing TripoSR neural 3D reconstruction on GPU...';
 
     // Neural mesh reconstruction
-    const tripoResult = await executeTripoSRGeneration(inputImageForTripo, { geometryResolution: 256 });
+    const tripoResult = await executeTripoSRGeneration(inputImageForTripo, { geometryResolution: 256, threshold: 25.0 });
     if (!tripoResult.glbBuffer || tripoResult.glbBuffer.length === 0) {
       throw new Error('TripoSR did not produce valid GLB data.');
     }
