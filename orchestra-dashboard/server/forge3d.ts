@@ -138,7 +138,6 @@ export async function probeLmStudioStatus(): Promise<{
   }
 
   const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
-  const expectedModel = config.lmStudioModel || 'gemma-4-12b-it-qat';
 
   try {
     const controller = new AbortController();
@@ -147,7 +146,7 @@ export async function probeLmStudioStatus(): Promise<{
     clearTimeout(timeout);
 
     if (!modelsRes.ok) {
-      const res = { available: false, model: expectedModel, isMultimodal: false, error: `HTTP ${modelsRes.status}` };
+      const res = { available: false, model: '', isMultimodal: false, error: `HTTP ${modelsRes.status}` };
       cachedVisionProbe = { result: res, expiresAt: now + 5000 };
       return res;
     }
@@ -155,8 +154,14 @@ export async function probeLmStudioStatus(): Promise<{
     const data = (await modelsRes.json()) as any;
     const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
     
-    // Specifically verify the configured reviewer model (or matching loaded ID)
-    const loadedModel = models.find((m: string) => m.toLowerCase() === expectedModel.toLowerCase() || m.toLowerCase().includes(expectedModel.toLowerCase())) || models[0] || expectedModel;
+    if (models.length === 0) {
+      const res = { available: true, model: '', isMultimodal: false, error: 'No model is currently loaded in LM Studio.' };
+      cachedVisionProbe = { result: res, expiresAt: now + 5000 };
+      return res;
+    }
+
+    // Target whichever model is currently loaded in LM Studio (or explicit setting if active)
+    const loadedModel = config.lmStudioModel && models.includes(config.lmStudioModel) ? config.lmStudioModel : models[0];
 
     // Genuine Semantic Visual Recognition Probe: Send a 4x4 solid red PNG and ask for color identification
     const probeController = new AbortController();
@@ -222,7 +227,7 @@ export async function probeLmStudioStatus(): Promise<{
   } catch (err) {
     const result = {
       available: false,
-      model: expectedModel,
+      model: '',
       isMultimodal: false,
       error: err instanceof Error ? err.message : String(err),
     };
@@ -239,11 +244,29 @@ export async function requestGemmaVisionReview(
     throw new Error('Gemma vision review requires real rendered viewport captures. Text-only review is disabled to eliminate hallucinated scores.');
   }
 
-  // Free TripoSR/Comfy VRAM before invoking Gemma 12B Vision
+  // Free TripoSR/Comfy VRAM before invoking vision review
   await stageGpuForStep('vision');
 
   const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
-  const model = config.lmStudioModel || 'gemma-4-12b-it-qat';
+  
+  // Discover loaded model dynamically from LM Studio
+  let model = config.lmStudioModel;
+  try {
+    const modelsRes = await fetch(`${lmStudioUrl}/models`);
+    if (modelsRes.ok) {
+      const data = (await modelsRes.json()) as any;
+      const loadedModels = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
+      if (loadedModels.length > 0) {
+        model = config.lmStudioModel && loadedModels.includes(config.lmStudioModel) ? config.lmStudioModel : loadedModels[0];
+      }
+    }
+  } catch {
+    /* fallback to config */
+  }
+
+  if (!model) {
+    throw new Error('No model is currently loaded in LM Studio. Please load a multimodal/vision model in LM Studio.');
+  }
 
   const systemInstruction = `You are an expert 3D Game Art and Geometric Mesh Quality Inspector.
 Your job is to visually evaluate rendered diagnostic captures of a reconstructed 3D asset against the user's design request.

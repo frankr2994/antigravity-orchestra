@@ -85,7 +85,7 @@ export async function getLoadedLmStudioModels(): Promise<string[]> {
 export async function getActiveLmStudioModel(): Promise<string> {
   const loaded = await getLoadedLmStudioModels();
   if (loaded.length > 0) return loaded[0]!;
-  return config.lmStudioModel;
+  return config.lmStudioModel || '';
 }
 
 export async function loadLmStudioModel(modelId: string, options?: { gpu?: string; contextLength?: number }): Promise<{ ok: boolean; message: string; activeModel?: string }> {
