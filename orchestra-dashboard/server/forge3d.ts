@@ -210,6 +210,24 @@ Respond strictly in valid JSON format:
   };
 }
 
+export async function reviewForgeAsset(
+  id: string,
+  imagesBase64: string[]
+): Promise<Forge3DReview> {
+  const asset = getForgeAsset(id);
+  if (!asset) {
+    throw new Error(`Asset not found with ID ${id}`);
+  }
+
+  const review = await requestGemmaVisionReview(asset.prompt, imagesBase64);
+  asset.review = review;
+
+  const metaPath = join(FORGE_DIR, `${id}.meta.json`);
+  writeFileSync(metaPath, JSON.stringify(asset, null, 2));
+
+  return review;
+}
+
 export async function runForge3DJob(
   input: string | Forge3DGenerateOptions,
   styleArg = 'stylized',

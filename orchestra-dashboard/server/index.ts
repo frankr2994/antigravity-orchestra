@@ -13,7 +13,7 @@ import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 import { getComfyStatus } from './comfy.js';
-import { deleteForgeAsset, listForgeAssets, runForge3DJob } from './forge3d.js';
+import { deleteForgeAsset, listForgeAssets, reviewForgeAsset, runForge3DJob } from './forge3d.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 
 const app = express();
@@ -420,6 +420,19 @@ app.get('/api/forge3d/assets/:filename', (req, res) => {
 app.delete('/api/forge3d/assets/:id', (req, res) => {
   const success = deleteForgeAsset(req.params.id);
   res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge3d/assets/:id/review', async (req, res, next) => {
+  try {
+    const imagesBase64 = Array.isArray(req.body?.imagesBase64) ? req.body.imagesBase64 : [];
+    if (!imagesBase64.length) {
+      throw new Error('imagesBase64 array containing rendered canvas views is required.');
+    }
+    const review = await reviewForgeAsset(req.params.id, imagesBase64);
+    res.json(review);
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/forge3d/generate', async (req, res, next) => {

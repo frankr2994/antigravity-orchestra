@@ -109,6 +109,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
   const [selectedStyle, setSelectedStyle] = useState('stylized');
   const [autoReview, setAutoReview] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [status, setStatus] = useState<ForgeStatus | null>(null);
   const [setupStatus, setSetupStatus] = useState<ForgeSetupStatus | null>(null);
   const [downloadProgress, setDownloadProgress] = useState<ActiveDownloadProgress | null>(null);
@@ -197,6 +198,73 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   }, [installingDepId, downloadProgress, pollDownload]);
 
+  // Capture Multi-Angle base64 PNG snapshots from Three.js canvas
+  const captureSnapshots = useCallback(async (): Promise<string[]> => {
+    const renderer = rendererRef.current;
+    const scene = sceneRef.current;
+    const camera = cameraRef.current;
+    const mesh = currentMeshRef.current;
+    if (!renderer || !scene || !camera || !mesh) return [];
+
+    const origRotX = mesh.rotation.x;
+    const origRotY = mesh.rotation.y;
+    const origRotZ = mesh.rotation.z;
+    const origCamPos = camera.position.clone();
+
+    const snapshots: string[] = [];
+    const angles = [
+      { rotY: 0, rotX: 0 },
+      { rotY: Math.PI / 4, rotX: 0.15 },
+      { rotY: Math.PI / 2, rotX: 0 },
+      { rotY: Math.PI, rotX: 0 },
+    ];
+
+    camera.position.set(0, 1.2, 4.2);
+    camera.lookAt(0, 0, 0);
+
+    for (const angle of angles) {
+      mesh.rotation.set(angle.rotX, angle.rotY, 0);
+      renderer.render(scene, camera);
+      const dataUrl = renderer.domElement.toDataURL('image/png');
+      snapshots.push(dataUrl.replace(/^data:image\/png;base64,/, ''));
+    }
+
+    mesh.rotation.set(origRotX, origRotY, origRotZ);
+    camera.position.copy(origCamPos);
+    camera.lookAt(0, 0, 0);
+    renderer.render(scene, camera);
+
+    return snapshots;
+  }, []);
+
+  const triggerVisualReview = useCallback(async (targetAsset: Forge3DAsset) => {
+    if (!targetAsset || reviewing) return;
+    try {
+      setReviewing(true);
+      setError('');
+      await new Promise((r) => setTimeout(r, 200));
+      const snapshots = await captureSnapshots();
+      if (snapshots.length === 0) {
+        throw new Error('Could not capture viewport snapshots for Gemma vision review.');
+      }
+
+      const review = await api<Forge3DReview>(`/api/forge3d/assets/${targetAsset.id}/review`, {
+        method: 'POST',
+        body: JSON.stringify({ imagesBase64: snapshots }),
+      });
+
+      setAssets((prev) =>
+        prev.map((a) => (a.id === targetAsset.id ? { ...a, review } : a))
+      );
+      setSelectedAsset((prev) => (prev?.id === targetAsset.id ? { ...prev, review } : prev));
+    } catch (err) {
+      console.warn('Vision inspection error:', err);
+      setError(`Vision inspection warning: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setReviewing(false);
+    }
+  }, [api, captureSnapshots, reviewing]);
+
   // Setup Three.js WebGL Scene
   useEffect(() => {
     const container = containerRef.current;
@@ -230,7 +298,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     camera.position.set(0, 1.5, 4.5);
     cameraRef.current = camera;
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
@@ -239,7 +307,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
     const animate = () => {
       animationFrameRef.current = requestAnimationFrame(animate);
-      if (!isDraggingRef.current && currentMeshRef.current) {
+      if (!isDraggingRef.current && currentMeshRef.current && !reviewing) {
         currentMeshRef.current.rotation.y += 0.004;
       }
       renderer.render(scene, camera);
@@ -261,7 +329,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
       if (animationFrameRef.current) cancelAnimationFrame(animationFrameRef.current);
       renderer.dispose();
     };
-  }, []);
+  }, [reviewing]);
 
   // Update Mesh in 3D Scene
   useEffect(() => {
@@ -306,6 +374,11 @@ export function Forge3DView({ api }: Forge3DViewProps) {
 
           sceneRef.current.add(root);
           currentMeshRef.current = root;
+
+          // If autoReview is on and asset does not yet have a review, trigger visual inspection
+          if (autoReview && !selectedAsset.review) {
+            void triggerVisualReview(selectedAsset);
+          }
         },
         undefined,
         (err) => {
@@ -314,7 +387,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
         }
       );
     }
-  }, [selectedAsset, renderMode, wireframeOverlay]);
+  }, [selectedAsset, renderMode, wireframeOverlay, autoReview, triggerVisualReview]);
 
   // Mouse Orbit Controls
   const handleMouseDown = (e: React.MouseEvent) => {
@@ -691,6 +764,15 @@ export function Forge3DView({ api }: Forge3DViewProps) {
               title="Toggle Wireframe Overlay"
             >
               <Layers size={14} />
+            </button>
+
+            <button
+              className={`icon-button mini ${reviewing ? 'active' : ''}`}
+              onClick={() => selectedAsset && triggerVisualReview(selectedAsset)}
+              disabled={!selectedAsset || reviewing}
+              title="Inspect 3D Geometry with Gemma 12B Vision"
+            >
+              {reviewing ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
             </button>
 
             <button className="icon-button mini" onClick={resetCamera} title="Reset View">

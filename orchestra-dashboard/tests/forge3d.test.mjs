@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
-import { requestGemmaVisionReview, runForge3DJob } from '../dist-server/forge3d.js';
+import { requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
@@ -30,6 +30,17 @@ test('requestGemmaVisionReview strictly rejects requests without rendered image 
     },
     {
       message: /requires real rendered viewport captures/i,
+    }
+  );
+});
+
+test('reviewForgeAsset throws error if asset does not exist', async () => {
+  await assert.rejects(
+    async () => {
+      await reviewForgeAsset('non_existent_id', ['fake_b64']);
+    },
+    {
+      message: /Asset not found with ID/i,
     }
   );
 });
