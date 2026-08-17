@@ -19,7 +19,7 @@ export const config = {
   databasePath: resolve(dataDir, 'orchestra.db'),
   uiToken: randomBytes(24).toString('hex'),
   lmStudioBaseUrl: process.env.LM_STUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
-  lmStudioModel: process.env.LM_STUDIO_MODEL || 'gemma-4-e2b-it-qat',
+  lmStudioModel: process.env.LM_STUDIO_MODEL || 'gemma-4-12b-it-qat',
   maxGlobalTasks: 2,
   onboardingVersion: '1.0.0',
 };
