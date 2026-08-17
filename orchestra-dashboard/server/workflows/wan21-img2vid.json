@@ -1,0 +1,66 @@
+{
+  "1": {
+    "inputs": {
+      "image": "source_frame.png",
+      "upload": "image"
+    },
+    "class_type": "LoadImage"
+  },
+  "2": {
+    "inputs": {
+      "ckpt_name": "wan2.1_i2v_480p_14B_bf16.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple"
+  },
+  "3": {
+    "inputs": {
+      "pixels": ["1", 0],
+      "vae": ["2", 2]
+    },
+    "class_type": "VAEEncode"
+  },
+  "4": {
+    "inputs": {
+      "text": "cinematic camera movement, high visual fidelity, seamless motion",
+      "clip": ["2", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "5": {
+    "inputs": {
+      "text": "blurry, low quality, distorted, static, jitter",
+      "clip": ["2", 1]
+    },
+    "class_type": "CLIPTextEncode"
+  },
+  "6": {
+    "inputs": {
+      "seed": 42,
+      "steps": 25,
+      "cfg": 6.0,
+      "sampler_name": "euler",
+      "scheduler": "normal",
+      "denoise": 1.0,
+      "model": ["2", 0],
+      "positive": ["4", 0],
+      "negative": ["5", 0],
+      "latent_image": ["3", 0]
+    },
+    "class_type": "KSampler"
+  },
+  "7": {
+    "inputs": {
+      "samples": ["6", 0],
+      "vae": ["2", 2]
+    },
+    "class_type": "VAEDecode"
+  },
+  "8": {
+    "inputs": {
+      "filename_prefix": "Forge_Wan_I2V",
+      "fps": 16,
+      "images": ["7", 0]
+    },
+    "class_type": "SaveAnimatedWEBP"
+  }
+}

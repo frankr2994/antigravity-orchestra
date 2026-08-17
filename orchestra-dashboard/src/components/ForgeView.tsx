@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Eye,
+  Film,
   Paintbrush,
   Plus,
   RefreshCw,
@@ -63,6 +64,9 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [selectedAsset, setSelectedAsset] = useState<ForgeAsset | null>(null);
   const [activeVersionId, setActiveVersionId] = useState<string>('v1');
 
+  // Mode: Create | Revise | Animate
+  const [mode, setMode] = useState<'create' | 'revise' | 'animate'>('create');
+
   // Generation State
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
@@ -70,11 +74,15 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [generating, setGenerating] = useState(false);
 
   // Revision State
-  const [mode, setMode] = useState<'create' | 'revise'>('create');
   const [revisionPrompt, setRevisionPrompt] = useState('');
   const [editScope, setEditScope] = useState<EditScope>('localized');
   const [denoise, setDenoise] = useState(0.85);
   const [revising, setRevising] = useState(false);
+
+  // Video Animation State
+  const [animationPrompt, setAnimationPrompt] = useState('cinematic camera movement, smooth motion, high visual quality');
+  const [videoModel, setVideoModel] = useState<'ltx-video' | 'wan2.1-1.3b'>('ltx-video');
+  const [animating, setAnimating] = useState(false);
 
   // Inpainting Canvas & Brush State
   const [isBrushActive, setIsBrushActive] = useState(false);
@@ -129,6 +137,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
 
   // Active version resolution
   const activeVersion = selectedAsset?.versions.find((v) => v.versionId === activeVersionId) || selectedAsset?.versions[0];
+  const isVideoVersion = activeVersion?.operationType === 'animate' || activeVersion?.outputUrl?.endsWith('.mp4') || activeVersion?.outputUrl?.endsWith('.webp');
 
   // 2. Dependency Installer
   const handleInstallDep = async (depId: string) => {
@@ -214,7 +223,35 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 5. Version Revert Handler
+  // 5. Video Animation Handler (Phase 2 Image-to-Video)
+  const handleAnimate = async () => {
+    if (!selectedAsset || animating) return;
+    try {
+      setAnimating(true);
+      setError('');
+
+      const updatedAsset = await api<ForgeAsset>('/api/forge/animate', {
+        method: 'POST',
+        body: JSON.stringify({
+          assetId: selectedAsset.id,
+          sourceVersionId: activeVersionId,
+          animationPrompt: animationPrompt.trim(),
+          videoModel,
+          fps: 24,
+        }),
+      });
+
+      setAssets((prev) => prev.map((a) => (a.id === updatedAsset.id ? updatedAsset : a)));
+      setSelectedAsset(updatedAsset);
+      setActiveVersionId(updatedAsset.activeVersionId);
+    } catch (err) {
+      setError(`Animation failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setAnimating(false);
+    }
+  };
+
+  // 6. Version Revert Handler
   const handleRevert = async (versionId: string) => {
     if (!selectedAsset) return;
     try {
@@ -230,14 +267,13 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 6. Gemma 12B Vision Review
+  // 7. Gemma 12B Vision Review
   const triggerCreationReview = async () => {
     if (!selectedAsset || !activeVersion || reviewing) return;
     try {
       setReviewing(true);
       setError('');
 
-      // Fetch active image and convert to base64
       const imgRes = await fetch(activeVersion.outputUrl);
       const blob = await imgRes.blob();
       const reader = new FileReader();
@@ -268,7 +304,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 7. Canvas Mask Drawing Helpers
+  // 8. Canvas Mask Drawing Helpers
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isBrushActive) return;
     setIsDrawing(true);
@@ -333,7 +369,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           </div>
         </div>
 
-        {/* Action Controls */}
+        {/* Action Modes */}
         <div className="flex items-center gap-2">
           <button
             onClick={() => { setMode('create'); }}
@@ -354,16 +390,26 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
             <Wand2 className="h-3.5 w-3.5" />
             Targeted Revise
           </button>
+          <button
+            onClick={() => { setMode('animate'); }}
+            disabled={!selectedAsset}
+            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
+              mode === 'animate' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40'
+            }`}
+          >
+            <Film className="h-3.5 w-3.5" />
+            Animate (I2V)
+          </button>
         </div>
       </div>
 
-      {/* ─── 1-Click Dependency Setup Banner (if any missing) ─────────────── */}
+      {/* ─── 1-Click Dependency Setup Banner ─────────────────────────────── */}
       {setupStatus && setupStatus.missingCount > 0 && (
         <div className="flex items-center justify-between border-b border-amber-500/30 bg-amber-950/40 px-6 py-2 text-xs text-amber-200">
           <div className="flex items-center gap-2">
             <AlertTriangle className="h-4 w-4 text-amber-400" />
             <span>
-              {setupStatus.missingCount} recommended model(s) missing for full SDXL inpainting fidelity.
+              {setupStatus.missingCount} recommended model(s) available for full SDXL inpainting & video synthesis.
             </span>
           </div>
           <div className="flex items-center gap-2">
@@ -402,6 +448,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
             {assets.map((asset) => {
               const activeVer = asset.versions.find((v) => v.versionId === asset.activeVersionId) || asset.versions[0];
               const isSelected = selectedAsset?.id === asset.id;
+              const hasVideo = asset.versions.some((v) => v.operationType === 'animate');
               return (
                 <div
                   key={asset.id}
@@ -415,11 +462,18 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                       : 'border-slate-800/80 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/50'
                   }`}
                 >
-                  <img
-                    src={activeVer?.outputUrl}
-                    alt={asset.title}
-                    className="h-12 w-12 rounded object-cover border border-slate-700/50 bg-slate-950"
-                  />
+                  <div className="relative h-12 w-12 rounded overflow-hidden border border-slate-700/50 bg-slate-950">
+                    <img
+                      src={activeVer?.outputUrl}
+                      alt={asset.title}
+                      className="h-full w-full object-cover"
+                    />
+                    {hasVideo && (
+                      <div className="absolute top-0.5 right-0.5 rounded bg-indigo-600/90 p-0.5 shadow">
+                        <Film className="h-2.5 w-2.5 text-white" />
+                      </div>
+                    )}
+                  </div>
                   <div className="flex-1 min-w-0">
                     <p className="truncate text-xs font-medium text-slate-200">{asset.title}</p>
                     <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
@@ -449,7 +503,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           </div>
         </div>
 
-        {/* ─── Center Viewport: 2D Canvas & Inpainting Studio ─────────────── */}
+        {/* ─── Center Viewport: 2D Canvas & Video Player ─────────────────── */}
         <div className="relative flex flex-1 flex-col items-center justify-center bg-slate-950 overflow-hidden">
           {/* Top Canvas Toolbar */}
           <div className="absolute top-4 left-4 z-20 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 p-1.5 shadow-lg backdrop-blur">
@@ -474,40 +528,44 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
             >
               <RotateCcw className="h-4 w-4" />
             </button>
-            <div className="h-4 w-px bg-slate-800" />
-            <button
-              onClick={() => setIsBrushActive(!isBrushActive)}
-              className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition ${
-                isBrushActive ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-              }`}
-              title="Paint Inpaint Mask"
-            >
-              <Paintbrush className="h-3.5 w-3.5" />
-              <span>Mask Brush</span>
-            </button>
-            {isBrushActive && (
+            {!isVideoVersion && (
               <>
-                <input
-                  type="range"
-                  min="10"
-                  max="100"
-                  value={brushSize}
-                  onChange={(e) => setBrushSize(Number(e.target.value))}
-                  className="w-16 h-1 bg-slate-700 rounded cursor-pointer"
-                  title={`Brush size: ${brushSize}px`}
-                />
+                <div className="h-4 w-px bg-slate-800" />
                 <button
-                  onClick={clearMask}
-                  className="rounded p-1 text-slate-400 hover:text-rose-400"
-                  title="Clear Inpaint Mask"
+                  onClick={() => setIsBrushActive(!isBrushActive)}
+                  className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition ${
+                    isBrushActive ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'
+                  }`}
+                  title="Paint Inpaint Mask"
                 >
-                  <Undo className="h-3.5 w-3.5" />
+                  <Paintbrush className="h-3.5 w-3.5" />
+                  <span>Mask Brush</span>
                 </button>
+                {isBrushActive && (
+                  <>
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
+                      value={brushSize}
+                      onChange={(e) => setBrushSize(Number(e.target.value))}
+                      className="w-16 h-1 bg-slate-700 rounded cursor-pointer"
+                      title={`Brush size: ${brushSize}px`}
+                    />
+                    <button
+                      onClick={clearMask}
+                      className="rounded p-1 text-slate-400 hover:text-rose-400"
+                      title="Clear Inpaint Mask"
+                    >
+                      <Undo className="h-3.5 w-3.5" />
+                    </button>
+                  </>
+                )}
               </>
             )}
           </div>
 
-          {/* Main Image Display Area */}
+          {/* Main Display Area (Image or Video) */}
           <div
             className="relative flex items-center justify-center w-full h-full cursor-grab active:cursor-grabbing select-none"
             style={{
@@ -530,28 +588,41 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           >
             {activeVersion ? (
               <div className="relative rounded-lg shadow-2xl overflow-hidden border border-slate-800">
-                <img
-                  src={activeVersion.outputUrl}
-                  alt={activeVersion.changeDescription}
-                  className="max-h-[600px] max-w-[600px] object-contain pointer-events-none"
-                  onLoad={(e) => {
-                    const img = e.currentTarget;
-                    if (maskCanvasRef.current) {
-                      maskCanvasRef.current.width = img.naturalWidth || 1024;
-                      maskCanvasRef.current.height = img.naturalHeight || 1024;
-                    }
-                  }}
-                />
+                {isVideoVersion && activeVersion.outputUrl.endsWith('.mp4') ? (
+                  <video
+                    src={activeVersion.outputUrl}
+                    controls
+                    autoPlay
+                    loop
+                    playsInline
+                    className="max-h-[600px] max-w-[600px] object-contain rounded"
+                  />
+                ) : (
+                  <img
+                    src={activeVersion.outputUrl}
+                    alt={activeVersion.changeDescription}
+                    className="max-h-[600px] max-w-[600px] object-contain pointer-events-none rounded"
+                    onLoad={(e) => {
+                      const img = e.currentTarget;
+                      if (maskCanvasRef.current) {
+                        maskCanvasRef.current.width = img.naturalWidth || 1024;
+                        maskCanvasRef.current.height = img.naturalHeight || 1024;
+                      }
+                    }}
+                  />
+                )}
 
-                {/* Inpainting Mask Paint Canvas Overlay */}
-                <canvas
-                  ref={maskCanvasRef}
-                  className={`absolute inset-0 h-full w-full opacity-60 ${isBrushActive ? 'cursor-crosshair z-10' : 'pointer-events-none'}`}
-                  onMouseDown={startDrawing}
-                  onMouseMove={draw}
-                  onMouseUp={stopDrawing}
-                  onMouseLeave={stopDrawing}
-                />
+                {/* Inpainting Mask Paint Canvas Overlay (Only for still images) */}
+                {!isVideoVersion && (
+                  <canvas
+                    ref={maskCanvasRef}
+                    className={`absolute inset-0 h-full w-full opacity-60 ${isBrushActive ? 'cursor-crosshair z-10' : 'pointer-events-none'}`}
+                    onMouseDown={startDrawing}
+                    onMouseMove={draw}
+                    onMouseUp={stopDrawing}
+                    onMouseLeave={stopDrawing}
+                  />
+                )}
               </div>
             ) : (
               <div className="flex flex-col items-center gap-3 text-slate-600">
@@ -567,13 +638,17 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
               <span className="font-semibold text-indigo-400">{activeVersion.versionId}</span>
               <span>•</span>
               <span className="truncate max-w-xs">{activeVersion.changeDescription}</span>
-              <span>•</span>
-              <span className="text-slate-500">{activeVersion.params.width}×{activeVersion.params.height}</span>
+              {activeVersion.fps && (
+                <>
+                  <span>•</span>
+                  <span className="text-indigo-300 font-medium">{activeVersion.fps} FPS</span>
+                </>
+              )}
             </div>
           )}
         </div>
 
-        {/* ─── Right Sidebar: Controls & Version History ─────────────────────── */}
+        {/* ─── Right Sidebar: Controls, Revisions & Animations ───────────────── */}
         <div className="flex w-96 flex-col border-l border-slate-800 bg-slate-900/60 overflow-y-auto">
           {mode === 'create' ? (
             /* ─── Create Form ──────────────────────────────────────────────── */
@@ -626,6 +701,99 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                 {generating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
                 {generating ? 'Generating Asset...' : 'Generate Asset'}
               </button>
+            </div>
+          ) : mode === 'animate' ? (
+            /* ─── Phase 2: Animate (Image-to-Video) Form ───────────────────────── */
+            <div className="p-4 space-y-4">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-200">Animate Version (I2V)</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Generate continuous temporal motion from the selected image still.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Camera & Motion Prompt</label>
+                <textarea
+                  value={animationPrompt}
+                  onChange={(e) => setAnimationPrompt(e.target.value)}
+                  placeholder="e.g. cinematic camera slow pan right, wheels spinning smoothly, headlights illuminating road"
+                  className="w-full h-20 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-100 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-1.5">Video Model</label>
+                <select
+                  value={videoModel}
+                  onChange={(e) => setVideoModel(e.target.value as any)}
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="ltx-video">LTX-Video 2B Distilled (Primary Fast I2V, ~25s)</option>
+                  <option value="wan2.1-1.3b">Wan 2.1 1.3B (Motion Quality Tier, ~60s)</option>
+                </select>
+              </div>
+
+              <button
+                onClick={handleAnimate}
+                disabled={animating || !selectedAsset}
+                className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
+              >
+                {animating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
+                {animating ? 'Rendering Video Animation...' : 'Render Animation (I2V)'}
+              </button>
+
+              {/* Version History */}
+              <div className="border-t border-slate-800 pt-4">
+                <div className="flex items-center justify-between mb-2.5">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Version History</span>
+                  <span className="text-xs text-slate-500">{selectedAsset?.versions.length} versions</span>
+                </div>
+
+                <div className="space-y-2">
+                  {selectedAsset?.versions.map((ver) => {
+                    const isActive = ver.versionId === activeVersionId;
+                    const isAnim = ver.operationType === 'animate';
+                    return (
+                      <div
+                        key={ver.versionId}
+                        onClick={() => setActiveVersionId(ver.versionId)}
+                        className={`flex cursor-pointer items-center justify-between rounded-lg border p-2.5 transition ${
+                          isActive
+                            ? 'border-indigo-500/80 bg-indigo-950/30'
+                            : 'border-slate-800/80 bg-slate-950 hover:border-slate-700'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {isAnim ? (
+                            <Film className={`h-3.5 w-3.5 ${isActive ? 'text-indigo-400' : 'text-slate-500'}`} />
+                          ) : (
+                            <span className={`text-xs font-bold ${isActive ? 'text-indigo-400' : 'text-slate-500'}`}>
+                              {ver.versionId}
+                            </span>
+                          )}
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-medium text-slate-200">{ver.changeDescription}</p>
+                            <span className="text-[10px] text-slate-500">{ver.operationType}</span>
+                          </div>
+                        </div>
+
+                        {!isActive && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleRevert(ver.versionId);
+                            }}
+                            className="text-[11px] font-medium text-slate-400 hover:text-indigo-400 px-1.5 py-0.5 rounded bg-slate-800/80"
+                          >
+                            Revert
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           ) : (
             /* ─── Revise Form (Targeted Edit & Lineage) ───────────────────────── */
@@ -711,6 +879,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                 <div className="space-y-2">
                   {selectedAsset?.versions.map((ver) => {
                     const isActive = ver.versionId === activeVersionId;
+                    const isAnim = ver.operationType === 'animate';
                     return (
                       <div
                         key={ver.versionId}
@@ -722,9 +891,13 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                         }`}
                       >
                         <div className="flex items-center gap-2.5 min-w-0">
-                          <span className={`text-xs font-bold ${isActive ? 'text-indigo-400' : 'text-slate-500'}`}>
-                            {ver.versionId}
-                          </span>
+                          {isAnim ? (
+                            <Film className={`h-3.5 w-3.5 ${isActive ? 'text-indigo-400' : 'text-slate-500'}`} />
+                          ) : (
+                            <span className={`text-xs font-bold ${isActive ? 'text-indigo-400' : 'text-slate-500'}`}>
+                              {ver.versionId}
+                            </span>
+                          )}
                           <div className="min-w-0">
                             <p className="truncate text-xs font-medium text-slate-200">{ver.changeDescription}</p>
                             <span className="text-[10px] text-slate-500">{ver.operationType}</span>

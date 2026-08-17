@@ -7,6 +7,8 @@ import {
   executeSdxlTxt2Img,
   executeSdxlImg2Img,
   executeSdxlInpaint,
+  executeLtxImg2Vid,
+  executeWanImg2Vid,
   findComfyInstallation,
   getComfyStatus,
 } from './comfy.js';
@@ -17,6 +19,7 @@ import {
   type ForgeJob,
   type ForgeGenerateOptions,
   type ForgeRevisionOptions,
+  type ForgeAnimateOptions,
   type VisualReview,
   type EditScope,
 } from './forge-types.js';
@@ -256,6 +259,96 @@ Respond strictly in valid JSON:
   };
 }
 
+export async function requestVideoReview(
+  prompt: string,
+  keyframesBase64: string[]
+): Promise<VisualReview> {
+  await stageGpuForStep('vision_review');
+  const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
+
+  const systemInstruction = `You are an expert video continuity and temporal quality reviewer.
+Evaluate this animated video sequence (sampled across start, middle, and end keyframes) against the prompt: "${prompt}".
+
+Check for:
+1. Temporal consistency — Is character identity, background, and lighting consistent across frames?
+2. Motion naturalness — Are movements smooth without warping, limb duplication, or tearing?
+3. Prompt fidelity — Does the animation fulfill the cinematic intent?
+
+Respond strictly in valid JSON:
+{
+  "verdict": "pass" | "needs_repair",
+  "score": <0-100 integer>,
+  "revisionMetrics": {
+    "requestedChangeSuccess": <0-100>,
+    "identityPreservation": <0-100>,
+    "compositionPreservation": <0-100>,
+    "backgroundPreservation": <0-100>,
+    "stylePreservation": <0-100>,
+    "temporalConsistency": <0-100>
+  },
+  "critique": "<2-3 sentence honest evaluation of motion and temporal continuity>",
+  "failureType": "temporal" | "composition" | "artifact" | "identity_drift" | "none",
+  "suggestedAction": "<concrete guidance if repair is needed, or empty string if passed>"
+}`;
+
+  const imageMessages = keyframesBase64.map((b64) => ({
+    type: 'image_url' as const,
+    image_url: { url: `data:image/png;base64,${b64}` },
+  }));
+
+  const res = await fetch(`${lmStudioUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: config.lmStudioModel || undefined,
+      messages: [
+        { role: 'system', content: systemInstruction },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: `Prompt: "${prompt}"\nReview attached keyframes from the animated sequence:` },
+            ...imageMessages,
+          ],
+        },
+      ],
+      temperature: 0.1,
+    }),
+  });
+
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`LM Studio video review failed (HTTP ${res.status}): ${errorText}`);
+  }
+
+  const data = (await res.json()) as any;
+  const rawContent = data.choices?.[0]?.message?.content || '';
+  const cleanJson = rawContent.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleanJson);
+  } catch {
+    throw new Error(`Failed to parse Gemma video critique JSON: ${rawContent}`);
+  }
+
+  return {
+    verdict: parsed.verdict === 'needs_repair' ? 'needs_repair' : 'pass',
+    score: typeof parsed.score === 'number' ? Math.max(0, Math.min(100, Math.round(parsed.score))) : 75,
+    revisionMetrics: parsed.revisionMetrics || {
+      requestedChangeSuccess: 80,
+      identityPreservation: 80,
+      compositionPreservation: 80,
+      backgroundPreservation: 80,
+      stylePreservation: 80,
+      temporalConsistency: 80,
+    },
+    critique: parsed.critique || 'Video temporal review completed.',
+    failureType: parsed.failureType || 'none',
+    suggestedAction: parsed.suggestedAction || '',
+    reviewedAt: new Date().toISOString(),
+  };
+}
+
 // ─── Execution Engines: Generation, Revision, and Repair ─────────────────────────
 
 export async function runForgeGeneration(options: ForgeGenerateOptions): Promise<ForgeAsset> {
@@ -465,3 +558,90 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
 
   return asset;
 }
+
+export async function runForgeAnimateVersion(options: ForgeAnimateOptions): Promise<ForgeAsset> {
+  const asset = getForgeAsset(options.assetId);
+  if (!asset) throw new Error(`Asset ${options.assetId} not found.`);
+
+  const sourceVerId = options.sourceVersionId || asset.activeVersionId;
+  const sourceVer = asset.versions.find((v) => v.versionId === sourceVerId);
+  if (!sourceVer) throw new Error(`Source version ${sourceVerId} not found.`);
+
+  const installation = findComfyInstallation();
+  if (!installation) throw new Error('ComfyUI installation directory not found.');
+
+  const nextVerIndex = asset.versions.length + 1;
+  const nextVerId = `v${nextVerIndex}`;
+  const assetDir = join(FORGE_ASSETS_DIR, asset.id);
+
+  await stageGpuForStep('video_gen');
+
+  const sourceFilename = `${asset.id}_${nextVerId}_source.png`;
+  copyFileSync(sourceVer.outputPath, join(installation.inputDir, sourceFilename));
+
+  const model = options.videoModel || 'ltx-video';
+  const prompt = options.animationPrompt || 'cinematic camera movement, smooth motion, high visual quality';
+  const fps = options.fps || 24;
+
+  let resultBuffer: Buffer;
+  const ext = 'webp';
+
+  if (model === 'wan2.1-1.3b') {
+    const video = await executeWanImg2Vid({
+      sourceImage: sourceFilename,
+      prompt,
+      negativePrompt: options.negativePrompt,
+      fps: 16,
+      steps: options.steps || 25,
+      cfg: options.cfg || 6.0,
+      seed: options.seed ?? sourceVer.params.seed,
+    });
+    resultBuffer = video.buffer;
+  } else {
+    // Default: LTX-Video 2B distilled
+    const video = await executeLtxImg2Vid({
+      sourceImage: sourceFilename,
+      prompt,
+      negativePrompt: options.negativePrompt,
+      fps,
+      steps: options.steps || 20,
+      cfg: options.cfg || 3.0,
+      seed: options.seed ?? sourceVer.params.seed,
+      denoise: options.denoise ?? 1.0,
+    });
+    resultBuffer = video.buffer;
+  }
+
+  const nextVerPath = join(assetDir, `${nextVerId}.${ext}`);
+  writeFileSync(nextVerPath, resultBuffer);
+
+  const newVersion: AssetVersion = {
+    versionId: nextVerId,
+    parentVersionId: sourceVer.versionId,
+    operationType: 'animate',
+    changeDescription: `Animation: ${prompt}`,
+    params: {
+      ...sourceVer.params,
+      workflow: model === 'wan2.1-1.3b' ? 'wan21-img2vid' : 'ltx-img2vid',
+      checkpoint: model === 'wan2.1-1.3b' ? 'wan2.1_i2v_480p_14B_bf16.safetensors' : 'ltx-video-2b-v0.9.5.safetensors',
+      prompt,
+      fps,
+      videoModel: model,
+      sourceImagePath: sourceVer.outputPath,
+    },
+    outputPath: nextVerPath,
+    outputUrl: `/api/forge/assets/${asset.id}/${nextVerId}.${ext}`,
+    videoUrl: `/api/forge/assets/${asset.id}/${nextVerId}.${ext}`,
+    fps,
+    sourceImageVersionId: sourceVer.versionId,
+    createdAt: new Date().toISOString(),
+  };
+
+  asset.versions.push(newVersion);
+  asset.activeVersionId = nextVerId;
+  asset.updatedAt = new Date().toISOString();
+  saveAssetMeta(asset);
+
+  return asset;
+}
+

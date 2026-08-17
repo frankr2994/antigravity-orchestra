@@ -56,6 +56,42 @@ export interface SdxlInpaintParams extends SdxlTxt2ImgParams {
   denoise?: number;
 }
 
+export interface LtxImg2VidParams {
+  sourceImage: string;
+  prompt?: string;
+  negativePrompt?: string;
+  ckptName?: string;
+  seed?: number;
+  steps?: number;
+  cfg?: number;
+  fps?: number;
+  denoise?: number;
+}
+
+export interface WanTxt2VidParams {
+  prompt: string;
+  negativePrompt?: string;
+  ckptName?: string;
+  width?: number;
+  height?: number;
+  length?: number;
+  seed?: number;
+  steps?: number;
+  cfg?: number;
+  fps?: number;
+}
+
+export interface WanImg2VidParams {
+  sourceImage: string;
+  prompt?: string;
+  negativePrompt?: string;
+  ckptName?: string;
+  seed?: number;
+  steps?: number;
+  cfg?: number;
+  fps?: number;
+}
+
 function loadWorkflowJson(filename: string): Record<string, any> {
   const filePath = join(WORKFLOWS_DIR, filename);
   if (!existsSync(filePath)) {
@@ -225,6 +261,105 @@ export function buildSdxlInpaintWorkflow(params: SdxlInpaintParams): Record<stri
     if (params.samplerName) workflow['3'].inputs.sampler_name = params.samplerName;
     if (params.scheduler) workflow['3'].inputs.scheduler = params.scheduler;
     workflow['3'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.85;
+  }
+
+  return workflow;
+}
+
+export function buildLtxImg2VidWorkflow(params: LtxImg2VidParams): Record<string, any> {
+  const workflow = loadWorkflowJson('ltx-img2vid.json');
+
+  if (workflow['1']?.inputs) {
+    workflow['1'].inputs.image = params.sourceImage;
+  }
+
+  if (workflow['2']?.inputs && params.ckptName) {
+    workflow['2'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['4']?.inputs && params.prompt) {
+    workflow['4'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['5']?.inputs && params.negativePrompt) {
+    workflow['5'].inputs.text = params.negativePrompt.trim();
+  }
+
+  if (workflow['6']?.inputs) {
+    workflow['6'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['6'].inputs.steps = params.steps;
+    if (params.cfg) workflow['6'].inputs.cfg = params.cfg;
+    if (typeof params.denoise === 'number') workflow['6'].inputs.denoise = params.denoise;
+  }
+
+  if (workflow['8']?.inputs && params.fps) {
+    workflow['8'].inputs.fps = params.fps;
+  }
+
+  return workflow;
+}
+
+export function buildWanTxt2VidWorkflow(params: WanTxt2VidParams): Record<string, any> {
+  const workflow = loadWorkflowJson('wan21-txt2vid.json');
+
+  if (workflow['1']?.inputs && params.ckptName) {
+    workflow['1'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['2']?.inputs) {
+    if (params.width) workflow['2'].inputs.width = params.width;
+    if (params.height) workflow['2'].inputs.height = params.height;
+    if (params.length) workflow['2'].inputs.length = params.length;
+  }
+
+  if (workflow['3']?.inputs) {
+    workflow['3'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['4']?.inputs && params.negativePrompt) {
+    workflow['4'].inputs.text = params.negativePrompt.trim();
+  }
+
+  if (workflow['5']?.inputs) {
+    workflow['5'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['5'].inputs.steps = params.steps;
+    if (params.cfg) workflow['5'].inputs.cfg = params.cfg;
+  }
+
+  if (workflow['7']?.inputs && params.fps) {
+    workflow['7'].inputs.fps = params.fps;
+  }
+
+  return workflow;
+}
+
+export function buildWanImg2VidWorkflow(params: WanImg2VidParams): Record<string, any> {
+  const workflow = loadWorkflowJson('wan21-img2vid.json');
+
+  if (workflow['1']?.inputs) {
+    workflow['1'].inputs.image = params.sourceImage;
+  }
+
+  if (workflow['2']?.inputs && params.ckptName) {
+    workflow['2'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['4']?.inputs && params.prompt) {
+    workflow['4'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['5']?.inputs && params.negativePrompt) {
+    workflow['5'].inputs.text = params.negativePrompt.trim();
+  }
+
+  if (workflow['6']?.inputs) {
+    workflow['6'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['6'].inputs.steps = params.steps;
+    if (params.cfg) workflow['6'].inputs.cfg = params.cfg;
+  }
+
+  if (workflow['8']?.inputs && params.fps) {
+    workflow['8'].inputs.fps = params.fps;
   }
 
   return workflow;

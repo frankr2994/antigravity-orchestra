@@ -4,6 +4,7 @@ export type OperationType =
   | 'create'
   | 'auto_repair'
   | 'user_revision'
+  | 'animate'
   | 'upscale'
   | 'variant';
 
@@ -49,6 +50,10 @@ export interface GenerationParams {
   maskPath?: string;
   sourceImagePath?: string;
   referenceImages?: string[];
+  fps?: number;
+  durationSeconds?: number;
+  frameCount?: number;
+  videoModel?: 'ltx-video' | 'wan2.1-1.3b' | 'wan2.1-14b';
 }
 
 export interface RevisionMetrics {
@@ -82,6 +87,11 @@ export interface AssetVersion {
   outputUrl: string;
   thumbnailPath?: string;
   thumbnailUrl?: string;
+  videoUrl?: string;
+  durationSeconds?: number;
+  fps?: number;
+  frameCount?: number;
+  sourceImageVersionId?: string;
   review?: VisualReview;
   createdAt: string;
 }
@@ -127,6 +137,9 @@ export interface ForgeGenerateOptions {
   scheduler?: string;
   checkpoint?: string;
   type?: AssetType;
+  videoModel?: 'ltx-video' | 'wan2.1-1.3b' | 'wan2.1-14b';
+  durationSeconds?: number;
+  fps?: number;
   autoReview?: boolean;
 }
 
@@ -136,6 +149,20 @@ export interface ForgeRevisionOptions {
   revisionPrompt: string;
   scope?: EditScope;
   maskBase64?: string;
+  denoise?: number;
+  autoReview?: boolean;
+}
+
+export interface ForgeAnimateOptions {
+  assetId: string;
+  sourceVersionId?: string;
+  animationPrompt?: string;
+  negativePrompt?: string;
+  videoModel?: 'ltx-video' | 'wan2.1-1.3b' | 'wan2.1-14b';
+  fps?: number;
+  steps?: number;
+  cfg?: number;
+  seed?: number;
   denoise?: number;
   autoReview?: boolean;
 }

@@ -21,8 +21,10 @@ import {
   revertAssetVersion,
   requestCreationReview,
   requestRevisionReview,
+  requestVideoReview,
   runForgeGeneration,
   runForgeRevision,
+  runForgeAnimateVersion,
   FORGE_ASSETS_DIR,
 } from './forge.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
@@ -548,6 +550,10 @@ app.get('/api/forge/assets/:id/:filename', (req, res) => {
   }
   if (req.params.filename.endsWith('.png')) {
     res.setHeader('Content-Type', 'image/png');
+  } else if (req.params.filename.endsWith('.webp')) {
+    res.setHeader('Content-Type', 'image/webp');
+  } else if (req.params.filename.endsWith('.mp4')) {
+    res.setHeader('Content-Type', 'video/mp4');
   } else if (req.params.filename.endsWith('.jpg') || req.params.filename.endsWith('.jpeg')) {
     res.setHeader('Content-Type', 'image/jpeg');
   }
@@ -573,6 +579,7 @@ app.post('/api/forge/generate', async (req, res, next) => {
       steps: req.body?.steps,
       cfg: req.body?.cfg,
       type: req.body?.type || 'image',
+      videoModel: req.body?.videoModel,
       autoReview: req.body?.autoReview,
     });
     res.status(201).json(asset);
@@ -598,6 +605,30 @@ app.post('/api/forge/revise', async (req, res, next) => {
       autoReview: req.body?.autoReview,
     });
     res.status(200).json(asset);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/animate', async (req, res, next) => {
+  try {
+    const assetId = String(req.body?.assetId || '').trim();
+    if (!assetId) throw new Error('Asset ID is required for animation.');
+
+    const asset = await runForgeAnimateVersion({
+      assetId,
+      sourceVersionId: req.body?.sourceVersionId,
+      animationPrompt: req.body?.animationPrompt,
+      negativePrompt: req.body?.negativePrompt,
+      videoModel: req.body?.videoModel,
+      fps: req.body?.fps,
+      steps: req.body?.steps,
+      cfg: req.body?.cfg,
+      seed: req.body?.seed,
+      denoise: req.body?.denoise,
+      autoReview: req.body?.autoReview,
+    });
+    res.status(201).json(asset);
   } catch (error) {
     next(error);
   }
@@ -635,6 +666,20 @@ app.post('/api/forge/review/revision', async (req, res, next) => {
       throw new Error('requestedChange, originalImageBase64, and revisedImageBase64 are required.');
     }
     const review = await requestRevisionReview(requestedChange, originalImageBase64, revisedImageBase64);
+    res.json(review);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/review/video', async (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    const keyframesBase64 = Array.isArray(req.body?.keyframesBase64) ? req.body.keyframesBase64 : [];
+    if (!prompt || !keyframesBase64.length) {
+      throw new Error('prompt and keyframesBase64 array are required.');
+    }
+    const review = await requestVideoReview(prompt, keyframesBase64);
     res.json(review);
   } catch (error) {
     next(error);

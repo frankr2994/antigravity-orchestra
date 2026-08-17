@@ -6,10 +6,16 @@ import {
   buildSdxlTxt2ImgWorkflow,
   buildSdxlImg2ImgWorkflow,
   buildSdxlInpaintWorkflow,
+  buildLtxImg2VidWorkflow,
+  buildWanTxt2VidWorkflow,
+  buildWanImg2VidWorkflow,
   type ConceptGenParams,
   type SdxlTxt2ImgParams,
   type SdxlImg2ImgParams,
   type SdxlInpaintParams,
+  type LtxImg2VidParams,
+  type WanTxt2VidParams,
+  type WanImg2VidParams,
 } from './workflow-loader.js';
 import { sanitizeAndExportGlb, type MeshQAStats } from './mesh-qa.js';
 
@@ -400,4 +406,95 @@ export async function executeSdxlInpaint(
   const buffer = readFileSync(localPath);
   return { filename, localPath, buffer };
 }
+
+export async function executeLtxImg2Vid(
+  params: LtxImg2VidParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildLtxImg2VidWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 120000, endpoint);
+
+  const images = history.outputs?.['8']?.images;
+  if (!images || !images.length) {
+    throw new Error('LTX video generation completed without producing video frames/output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Generated video not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
+export async function executeWanTxt2Vid(
+  params: WanTxt2VidParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildWanTxt2VidWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 150000, endpoint);
+
+  const images = history.outputs?.['7']?.images;
+  if (!images || !images.length) {
+    throw new Error('Wan T2V video generation completed without producing video output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Generated video not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
+export async function executeWanImg2Vid(
+  params: WanImg2VidParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildWanImg2VidWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 150000, endpoint);
+
+  const images = history.outputs?.['8']?.images;
+  if (!images || !images.length) {
+    throw new Error('Wan I2V video generation completed without producing video output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Generated video not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
 
