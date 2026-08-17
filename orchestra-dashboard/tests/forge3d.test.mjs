@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
-import { repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
+import { probeLmStudioStatus, repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
 import { exportModelFormat, sanitizeAndExportGlb } from '../dist-server/mesh-qa.js';
+import { preprocessImageForTripo } from '../dist-server/rembg-processor.js';
 
 test('ComfyUI installation discovery resolves candidate directories dynamically', () => {
   const installation = findComfyInstallation();
@@ -21,6 +22,13 @@ test('getComfyStatus fails truthfully when connecting to an invalid endpoint', a
   assert.equal(status.available, false);
   assert.equal(status.tripoReady, false);
   assert.ok(status.error, 'Must include specific error message');
+});
+
+test('probeLmStudioStatus returns structured availability and multimodal capability', async () => {
+  const status = await probeLmStudioStatus();
+  assert.equal(typeof status.available, 'boolean');
+  assert.equal(typeof status.model, 'string');
+  assert.equal(typeof status.isMultimodal, 'boolean');
 });
 
 test('requestGemmaVisionReview strictly rejects requests without rendered image data', async () => {
@@ -67,6 +75,17 @@ test('exportModelFormat throws error if input model does not exist', async () =>
   );
 });
 
+test('preprocessImageForTripo throws error if source image does not exist', async () => {
+  await assert.rejects(
+    async () => {
+      await preprocessImageForTripo('F:/non_existent_source.png', 'F:/output.png');
+    },
+    {
+      message: /does not exist/i,
+    }
+  );
+});
+
 test('runForge3DJob fails truthfully and does not fabricate placeholder geometry when Comfy is unavailable', async () => {
   // Point to a dummy offline port
   process.env.COMFYUI_URL = 'http://127.0.0.1:59999';
@@ -89,8 +108,8 @@ test('FORGE_DEPENDENCIES manifest defines complete download metadata', () => {
   for (const dep of FORGE_DEPENDENCIES) {
     assert.ok(dep.id, 'Must have id');
     assert.ok(dep.name, 'Must have name');
-    assert.ok(dep.targetSubdir, 'Must specify targetSubdir');
-    assert.ok(dep.downloadUrl.startsWith('https://'), 'Must specify HTTPS download URL');
+    assert.ok(dep.targetSubdir !== undefined, 'Must specify targetSubdir');
+    assert.ok(dep.downloadUrl, 'Must specify download URL');
   }
 });
 

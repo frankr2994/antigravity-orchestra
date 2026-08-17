@@ -88,6 +88,9 @@ interface ForgeStatus {
   lmStudio: {
     url: string;
     model: string;
+    available?: boolean;
+    isMultimodal?: boolean;
+    error?: string;
   };
 }
 
@@ -199,7 +202,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     }
   }, [installingDepId, downloadProgress, pollDownload]);
 
-  // Capture Multi-Angle base64 PNG snapshots from Three.js canvas
+  // Capture 6 Standardized Deterministic Diagnostic Snapshots for Gemma Vision Review
   const captureSnapshots = useCallback(async (): Promise<string[]> => {
     const renderer = rendererRef.current;
     const scene = sceneRef.current;
@@ -207,29 +210,86 @@ export function Forge3DView({ api }: Forge3DViewProps) {
     const mesh = currentMeshRef.current;
     if (!renderer || !scene || !camera || !mesh) return [];
 
+    // Save interactive viewport state
     const origRotX = mesh.rotation.x;
     const origRotY = mesh.rotation.y;
     const origRotZ = mesh.rotation.z;
     const origCamPos = camera.position.clone();
+    const origBg = scene.background;
+
+    // Isolate diagnostic environment: neutral gray 50% background, hide grid
+    scene.background = new THREE.Color(0x808080);
+    const gridChild = scene.children.find((c) => c instanceof THREE.GridHelper);
+    if (gridChild) gridChild.visible = false;
+
+    // Cache original mesh materials
+    const originalMaterials = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>();
+    mesh.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const m = child as THREE.Mesh;
+        originalMaterials.set(m, m.material);
+      }
+    });
+
+    const clayMaterial = new THREE.MeshStandardMaterial({
+      color: 0xb0b0b0,
+      roughness: 0.45,
+      metalness: 0.05,
+    });
+    const wireMaterial = new THREE.MeshBasicMaterial({
+      color: 0x0284c7,
+      wireframe: true,
+    });
 
     const snapshots: string[] = [];
-    const angles = [
-      { rotY: 0, rotX: 0 },
-      { rotY: Math.PI / 4, rotX: 0.15 },
-      { rotY: Math.PI / 2, rotX: 0 },
-      { rotY: Math.PI, rotX: 0 },
-    ];
-
-    camera.position.set(0, 1.2, 4.2);
+    camera.position.set(0, 1.0, 3.8);
     camera.lookAt(0, 0, 0);
 
-    for (const angle of angles) {
-      mesh.rotation.set(angle.rotX, angle.rotY, 0);
-      renderer.render(scene, camera);
-      const dataUrl = renderer.domElement.toDataURL('image/png');
-      snapshots.push(dataUrl.replace(/^data:image\/png;base64,/, ''));
-    }
+    // 1. Front Shaded (0°)
+    mesh.rotation.set(0, 0, 0);
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
 
+    // 2. 3/4 Iso Shaded (45°)
+    mesh.rotation.set(0.12, Math.PI / 4, 0);
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
+
+    // 3. Side Profile Shaded (90°)
+    mesh.rotation.set(0, Math.PI / 2, 0);
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
+
+    // 4. Rear Shaded (180°)
+    mesh.rotation.set(0, Math.PI, 0);
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
+
+    // 5. 3/4 Iso Clay Surface (45°)
+    mesh.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = clayMaterial;
+    });
+    mesh.rotation.set(0.12, Math.PI / 4, 0);
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
+
+    // 6. 3/4 Iso Wireframe (45°)
+    mesh.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) (child as THREE.Mesh).material = wireMaterial;
+    });
+    renderer.render(scene, camera);
+    snapshots.push(renderer.domElement.toDataURL('image/png').replace(/^data:image\/png;base64,/, ''));
+
+    // Restore interactive viewport state
+    mesh.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const m = child as THREE.Mesh;
+        const orig = originalMaterials.get(m);
+        if (orig) m.material = orig;
+      }
+    });
+    scene.background = origBg;
+    if (gridChild) gridChild.visible = true;
     mesh.rotation.set(origRotX, origRotY, origRotZ);
     camera.position.copy(origCamPos);
     camera.lookAt(0, 0, 0);
@@ -553,10 +613,10 @@ export function Forge3DView({ api }: Forge3DViewProps) {
           </div>
           <div className="status-item">
             <div className="status-label">
-              <span className={`status-dot ${status?.lmStudio ? 'online' : 'offline'}`} />
+              <span className={`status-dot ${status?.lmStudio.available ? 'online' : 'offline'}`} />
               <strong>Gemma 12B Vision Reviewer</strong>
             </div>
-            <span>{status?.lmStudio.model ? 'Active & Ready' : 'Port 1234'}</span>
+            <span>{status?.lmStudio.available ? `${status.lmStudio.model} (Vision Active)` : (status?.lmStudio.error ? 'Offline (:1234)' : 'Connecting...')}</span>
           </div>
         </div>
 
@@ -572,9 +632,9 @@ export function Forge3DView({ api }: Forge3DViewProps) {
                 <div key={dep.id} className="setup-row">
                   <div className="setup-meta">
                     <span>{dep.name}</span>
-                    <small>{dep.installed ? 'Installed ✓' : `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB missing`}</small>
+                    <small>{dep.installed ? 'Installed ✓' : (dep.sizeBytes > 0 ? `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB missing` : 'Custom Node / Package missing')}</small>
                   </div>
-                  {!dep.installed && dep.sizeBytes > 0 && (
+                  {!dep.installed && (
                     <button
                       className="mini primary"
                       onClick={() => handleInstallDependency(dep.id)}
@@ -672,7 +732,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
                   <div className="dropzone-placeholder">
                     <Upload size={24} className="dropzone-icon" />
                     <span>Click or drag 2D image here</span>
-                    <small>PNG, JPG, WEBP (Neutral background recommended)</small>
+                    <small>PNG, JPG, WEBP (Neural background remover applied)</small>
                   </div>
                 )}
               </div>
@@ -788,7 +848,7 @@ export function Forge3DView({ api }: Forge3DViewProps) {
               className={`icon-button mini ${reviewing ? 'active' : ''}`}
               onClick={() => selectedAsset && triggerVisualReview(selectedAsset)}
               disabled={!selectedAsset || reviewing}
-              title="Inspect 3D Geometry with Gemma 12B Vision"
+              title="Inspect 3D Geometry with Gemma 12B Vision (6 Standard Views)"
             >
               {reviewing ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
             </button>

@@ -13,7 +13,7 @@ import { ensureAntigravityStatusCollector } from './observability.js';
 import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 import { getComfyStatus } from './comfy.js';
-import { deleteForgeAsset, getForgeAsset, listForgeAssets, repairForgeAsset, reviewForgeAsset, runForge3DJob } from './forge3d.js';
+import { deleteForgeAsset, getForgeAsset, getForgeJob, listForgeAssets, probeLmStudioStatus, repairForgeAsset, reviewForgeAsset, runForge3DJob } from './forge3d.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 import { exportModelFormat } from './mesh-qa.js';
 
@@ -32,7 +32,8 @@ if (!antigravityCollector.configured) console.warn(`Antigravity telemetry: ${ant
 const allowedHosts = new Set([`127.0.0.1:${config.port}`, `localhost:${config.port}`, '127.0.0.1:5173', 'localhost:5173']);
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use((req, res, next) => {
   const host = req.headers.host || '';
   if (!allowedHosts.has(host)) return res.status(403).json({ error: 'Invalid host.' });
@@ -368,11 +369,15 @@ app.patch('/api/settings', (req, res) => {
 
 app.get('/api/forge3d/status', async (_req, res) => {
   const comfy = await getComfyStatus();
+  const lmStudio = await probeLmStudioStatus();
   res.json({
     comfy,
     lmStudio: {
       url: config.lmStudioBaseUrl,
-      model: config.lmStudioModel,
+      model: lmStudio.model,
+      available: lmStudio.available,
+      isMultimodal: lmStudio.isMultimodal,
+      error: lmStudio.error,
     },
   });
 });
@@ -416,6 +421,14 @@ app.get('/api/forge3d/assets/:filename', (req, res) => {
     res.setHeader('Content-Type', 'image/png');
   }
   res.sendFile(file);
+});
+
+app.get('/api/forge3d/jobs/:id', (req, res) => {
+  const job = getForgeJob(req.params.id);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found' });
+  }
+  res.json(job);
 });
 
 app.delete('/api/forge3d/assets/:id', (req, res) => {

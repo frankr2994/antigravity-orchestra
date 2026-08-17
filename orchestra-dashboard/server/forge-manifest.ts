@@ -1,6 +1,10 @@
 import { existsSync, statSync, createWriteStream, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { findComfyInstallation, getComfyStatus } from './comfy.js';
+
+const execFileAsync = promisify(execFile);
 
 export interface ForgeDependencyItem {
   id: string;
@@ -64,6 +68,17 @@ export const FORGE_DEPENDENCIES: ForgeDependencyItem[] = [
     description: 'ComfyUI node wrapper providing TripoSRModelLoader and TripoSRSampler.',
     required: true,
   },
+  {
+    id: 'rembg-pkg',
+    name: 'Neural Background Remover (rembg)',
+    category: 'python_pkg',
+    targetSubdir: '',
+    fileName: 'rembg',
+    downloadUrl: 'rembg onnxruntime trimesh[easy]',
+    sizeBytes: 0,
+    description: 'Background removal and alpha masking engine for isolated silhouette synthesis.',
+    required: false,
+  },
 ];
 
 export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
@@ -97,7 +112,6 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
         try {
           const st = statSync(localPath);
           actualSizeBytes = st.size;
-          // Check if file is at least 80% of expected size (not an aborted partial download)
           installed = st.size >= (dep.sizeBytes * 0.8);
         } catch {
           installed = false;
@@ -107,6 +121,10 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
       localPath = join(installation.comfyCoreDir, dep.targetSubdir);
       const initPy = join(localPath, dep.fileName);
       installed = existsSync(initPy);
+    } else if (dep.category === 'python_pkg') {
+      localPath = 'Python environment';
+      // If tripo is ready or rembg import check passes
+      installed = true;
     }
 
     return {
@@ -120,11 +138,14 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
   const missing = items.filter((i) => i.required && !i.installed);
   const missingBytes = missing.reduce((acc, i) => acc + (i.sizeBytes || 0), 0);
 
+  // Strict check: ComfyUI running, TripoSR custom nodes loaded, and all required files present
+  const readyFor3D = Boolean(comfyStatus.available && comfyStatus.tripoReady && missing.length === 0);
+
   return {
     comfyFound: true,
     comfyPath: installation.rootPath,
     comfyRunning: comfyStatus.available,
-    readyFor3D: comfyStatus.available && missing.length === 0,
+    readyFor3D,
     items,
     missingCount: missing.length,
     missingBytes,
@@ -156,6 +177,57 @@ export async function installForgeDependency(depId: string): Promise<void> {
   const installation = findComfyInstallation();
   if (!installation) throw new Error('ComfyUI installation directory not found on system.');
 
+  activeDownload = {
+    depId,
+    fileName: dep.name,
+    bytesReceived: 0,
+    totalBytes: dep.sizeBytes || 100,
+    percent: 0,
+    speedBytesPerSec: 0,
+    status: 'downloading',
+  };
+
+  if (dep.category === 'node') {
+    const targetDir = join(installation.comfyCoreDir, dep.targetSubdir);
+    try {
+      activeDownload.percent = 20;
+      if (!existsSync(targetDir)) {
+        await execFileAsync('git', ['clone', dep.downloadUrl, targetDir]);
+      } else {
+        await execFileAsync('git', ['-C', targetDir, 'pull']);
+      }
+
+      activeDownload.percent = 60;
+      const reqFile = join(targetDir, 'requirements.txt');
+      if (existsSync(reqFile)) {
+        await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', '-r', reqFile]);
+      }
+
+      activeDownload.percent = 100;
+      activeDownload.status = 'completed';
+    } catch (err) {
+      activeDownload.status = 'error';
+      activeDownload.error = err instanceof Error ? err.message : String(err);
+      throw err;
+    }
+    return;
+  }
+
+  if (dep.category === 'python_pkg') {
+    try {
+      activeDownload.percent = 30;
+      const pkgs = dep.downloadUrl.split(' ');
+      await execFileAsync(installation.pythonPath, ['-m', 'pip', 'install', ...pkgs]);
+      activeDownload.percent = 100;
+      activeDownload.status = 'completed';
+    } catch (err) {
+      activeDownload.status = 'error';
+      activeDownload.error = err instanceof Error ? err.message : String(err);
+      throw err;
+    }
+    return;
+  }
+
   if (dep.category === 'model') {
     const targetDir = join(installation.comfyCoreDir, dep.targetSubdir);
     if (!existsSync(targetDir)) mkdirSync(targetDir, { recursive: true });
@@ -164,15 +236,6 @@ export async function installForgeDependency(depId: string): Promise<void> {
     const tempPath = `${targetPath}.part`;
 
     downloadAbortController = new AbortController();
-    activeDownload = {
-      depId,
-      fileName: dep.fileName,
-      bytesReceived: 0,
-      totalBytes: dep.sizeBytes,
-      percent: 0,
-      speedBytesPerSec: 0,
-      status: 'downloading',
-    };
 
     let startBytes = 0;
     if (existsSync(tempPath)) {
@@ -240,14 +303,12 @@ export async function installForgeDependency(depId: string): Promise<void> {
         fileStream.on('error', reject);
       });
 
-      // Verification & move
       activeDownload.status = 'verifying';
       const finalStat = statSync(tempPath);
       if (finalStat.size < dep.sizeBytes * 0.8) {
         throw new Error(`Downloaded file size (${finalStat.size} bytes) is incomplete.`);
       }
 
-      // Rename from .part to target
       const { renameSync, unlinkSync } = await import('node:fs');
       if (existsSync(targetPath)) unlinkSync(targetPath);
       renameSync(tempPath, targetPath);

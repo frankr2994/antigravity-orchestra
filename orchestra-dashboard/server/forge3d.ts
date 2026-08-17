@@ -5,6 +5,7 @@ import { config } from './config.js';
 import { executeConceptGeneration, executeTripoSRGeneration, findComfyInstallation, getComfyStatus } from './comfy.js';
 import { stageGpuForStep } from './gpu-manager.js';
 import type { MeshBoundingBox } from './mesh-qa.js';
+import { preprocessImageForTripo } from './rembg-processor.js';
 
 export interface Forge3DReview {
   verdict: 'pass' | 'needs_repair';
@@ -104,9 +105,11 @@ export function deleteForgeAsset(id: string): boolean {
     const metaPath = join(FORGE_DIR, `${id}.meta.json`);
     const glbPath = join(FORGE_DIR, `${id}.glb`);
     const previewPath = join(FORGE_DIR, `${id}.png`);
+    const rawPath = join(FORGE_DIR, `${id}_raw.png`);
     if (existsSync(metaPath)) unlinkSync(metaPath);
     if (existsSync(glbPath)) unlinkSync(glbPath);
     if (existsSync(previewPath)) unlinkSync(previewPath);
+    if (existsSync(rawPath)) unlinkSync(rawPath);
     return true;
   } catch {
     return false;
@@ -117,6 +120,43 @@ export function getForgeJob(id: string): Forge3DJob | null {
   return activeJobs.get(id) || null;
 }
 
+export async function probeLmStudioStatus(): Promise<{
+  available: boolean;
+  model: string;
+  isMultimodal: boolean;
+  error?: string;
+}> {
+  const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
+  const expectedModel = config.lmStudioModel || 'gemma-4-12b-it-qat';
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2500);
+    const res = await fetch(`${lmStudioUrl}/models`, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      return { available: false, model: expectedModel, isMultimodal: false, error: `HTTP ${res.status}` };
+    }
+
+    const data = (await res.json()) as any;
+    const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
+    const loaded = models.find((m: string) => m.toLowerCase().includes('gemma') || m === expectedModel) || models[0] || expectedModel;
+
+    return {
+      available: true,
+      model: loaded,
+      isMultimodal: true,
+    };
+  } catch (err) {
+    return {
+      available: false,
+      model: expectedModel,
+      isMultimodal: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export async function requestGemmaVisionReview(
   prompt: string,
   imagesBase64: string[]
@@ -125,17 +165,26 @@ export async function requestGemmaVisionReview(
     throw new Error('Gemma vision review requires real rendered viewport captures. Text-only review is disabled to eliminate hallucinated scores.');
   }
 
+  // Free TripoSR/Comfy VRAM before invoking Gemma 12B Vision
+  await stageGpuForStep('vision');
+
   const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
   const model = config.lmStudioModel || 'gemma-4-12b-it-qat';
 
   const systemInstruction = `You are an expert 3D Game Art and Geometric Mesh Quality Inspector.
-Your job is to visually evaluate rendered multi-angle captures of a generated 3D asset against the user's original design request.
-You are given actual multi-angle views of the 3D model (Front, 3/4 Perspective, Side, Rear, and Clay/Wireframe).
+Your job is to visually evaluate rendered diagnostic captures of a reconstructed 3D asset against the user's design request.
+You are given 6 standardized deterministic diagnostic views of the 3D model:
+1. Front Shaded (0°)
+2. 3/4 Iso Perspective Shaded (45°)
+3. Side Profile Shaded (90°)
+4. Rear Shaded (180°)
+5. 3/4 Iso Clay Surface (45° neutral material)
+6. 3/4 Iso Wireframe (45° topological structure)
 
 Evaluate:
 1. Prompt Fidelity: Does the geometry accurately embody "${prompt}"?
 2. 360-Degree Silhouette: Does the rear/side geometry flow naturally or contain unnatural hollows/flattening?
-3. Surface & Topological Quality: Look for warping, disconnected spikes, or bad normals.
+3. Surface & Topological Quality: Check the clay and wireframe renders for surface pinch, spikes, or bad normals.
 
 Respond strictly in valid JSON format:
 {
@@ -149,7 +198,7 @@ Respond strictly in valid JSON format:
   const userContent: any[] = [
     {
       type: 'text',
-      text: `Original Prompt: "${prompt}"\n\nInspect the attached multi-angle renders of the reconstructed 3D mesh. Return only the JSON object.`,
+      text: `Original Prompt: "${prompt}"\n\nInspect the attached 6 standardized multi-angle diagnostic renders. Return only the JSON object.`,
     },
   ];
 
@@ -247,8 +296,10 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
   }
 
   let repairedAsset: Forge3DAsset;
+  const nextIteration = asset.iterations + 1;
 
-  if (failureType === 'concept' || asset.mode === 'text_to_3d') {
+  if (failureType === 'concept') {
+    // 1. Concept failure: ONLY regenerate 2D concept when failure was classified as concept flaw
     const updatedPrompt = refinement ? `${asset.prompt}, ${refinement}` : `${asset.prompt}, clean sharp edges, high contrast`;
     await stageGpuForStep('concept');
 
@@ -260,12 +311,19 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
       height: 512,
     });
 
-    const previewFileName = `${asset.id}.png`;
-    const previewFilePath = join(FORGE_DIR, previewFileName);
-    writeFileSync(previewFilePath, concept.buffer);
+    const rawConceptPath = join(FORGE_DIR, `${asset.id}_raw.png`);
+    writeFileSync(rawConceptPath, concept.buffer);
+
+    const processedPath = join(FORGE_DIR, `${asset.id}.png`);
+    await preprocessImageForTripo(rawConceptPath, processedPath);
+
+    // Copy to ComfyUI input folder
+    const inputFilename = `${asset.id}_iter${nextIteration}.png`;
+    const comfyInputTarget = join(installation.inputDir, inputFilename);
+    copyFileSync(processedPath, comfyInputTarget);
 
     await stageGpuForStep('reconstruction');
-    const tripoResult = await executeTripoSRGeneration(concept.filename, {
+    const tripoResult = await executeTripoSRGeneration(inputFilename, {
       geometryResolution: 384,
     });
 
@@ -276,7 +334,7 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
     repairedAsset = {
       ...asset,
       refinedPrompt: updatedPrompt,
-      previewUrl: `/api/forge3d/assets/${previewFileName}`,
+      previewUrl: `/api/forge3d/assets/${asset.id}.png`,
       vertexCount: tripoResult.stats.vertexCount,
       triangleCount: tripoResult.stats.triangleCount,
       isWatertight: tripoResult.stats.isWatertight,
@@ -284,12 +342,22 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
       eulerNumber: tripoResult.stats.eulerNumber,
       boundingBox: tripoResult.stats.boundingBox,
       fileSizeBytes: tripoResult.glbBuffer.length,
-      iterations: asset.iterations + 1,
+      iterations: nextIteration,
       review: undefined,
     };
   } else {
+    // 2. Geometry / Mesh failure: PRESERVE original 2D concept, adjust 3D reconstruction parameters!
+    const existingConceptPath = join(FORGE_DIR, `${asset.id}.png`);
+    if (!existsSync(existingConceptPath)) {
+      throw new Error(`Cannot perform geometry repair: Source concept image not found at ${existingConceptPath}`);
+    }
+
+    const inputFilename = `${asset.id}_iter${nextIteration}.png`;
+    const comfyInputTarget = join(installation.inputDir, inputFilename);
+    copyFileSync(existingConceptPath, comfyInputTarget);
+
     await stageGpuForStep('reconstruction');
-    const tripoResult = await executeTripoSRGeneration(`${asset.id}.png`, {
+    const tripoResult = await executeTripoSRGeneration(inputFilename, {
       geometryResolution: 384,
       threshold: 28.0,
     });
@@ -307,7 +375,7 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
       eulerNumber: tripoResult.stats.eulerNumber,
       boundingBox: tripoResult.stats.boundingBox,
       fileSizeBytes: tripoResult.glbBuffer.length,
-      iterations: asset.iterations + 1,
+      iterations: nextIteration,
       review: undefined,
     };
   }
@@ -369,7 +437,6 @@ export async function runForge3DJob(
     if (mode === 'text_to_3d') {
       if (!prompt) throw new Error('Prompt is required for Text-to-3D generation.');
 
-      // Check if 2D concept checkpoint exists
       const sdCkpt = join(installation.comfyCoreDir, 'models', 'checkpoints', 'v1-5-pruned-emaonly.safetensors');
       if (!existsSync(sdCkpt)) {
         throw new Error('2D Concept Generator checkpoint (v1-5-pruned-emaonly.safetensors) is not installed. Use the 1-Click Engine Setup in the banner to download it.');
@@ -381,15 +448,20 @@ export async function runForge3DJob(
 
       const concept = await executeConceptGeneration({ prompt });
 
-      // Save concept PNG to Orchestra forge directory
-      const localConceptPath = join(FORGE_DIR, `${assetId}.png`);
-      writeFileSync(localConceptPath, concept.buffer);
+      // Save raw concept to Orchestra forge directory
+      const rawConceptPath = join(FORGE_DIR, `${assetId}_raw.png`);
+      writeFileSync(rawConceptPath, concept.buffer);
+
+      // Preprocess image with rembg background removal & composite on 50% neutral gray canvas
+      const processedConceptPath = join(FORGE_DIR, `${assetId}.png`);
+      await preprocessImageForTripo(rawConceptPath, processedConceptPath);
       previewUrl = `/api/forge3d/assets/${assetId}.png`;
 
-      // Copy to ComfyUI input folder so TripoSR can load it
-      const comfyInputTarget = join(installation.inputDir, concept.filename);
-      copyFileSync(concept.localPath, comfyInputTarget);
-      inputImageForTripo = concept.filename;
+      // Copy processed image to ComfyUI input folder
+      const comfyInputFilename = `${assetId}.png`;
+      const comfyInputTarget = join(installation.inputDir, comfyInputFilename);
+      copyFileSync(processedConceptPath, comfyInputTarget);
+      inputImageForTripo = comfyInputFilename;
 
       // GPU Memory Staging: Free 2D diffusion weights from VRAM before loading TripoSR
       job.status = 'staging_gpu';
@@ -399,15 +471,26 @@ export async function runForge3DJob(
     } else {
       // Image to 3D mode
       if (!options.imageFilename) throw new Error('Image filename is required for Image-to-3D generation.');
-      inputImageForTripo = options.imageFilename;
 
       if (options.imageBuffer) {
-        const dest = join(installation.inputDir, options.imageFilename);
-        writeFileSync(dest, options.imageBuffer);
-        const localPreview = join(FORGE_DIR, `${assetId}.png`);
-        writeFileSync(localPreview, options.imageBuffer);
+        const rawUploadPath = join(FORGE_DIR, `${assetId}_raw.png`);
+        writeFileSync(rawUploadPath, options.imageBuffer);
+
+        const processedPath = join(FORGE_DIR, `${assetId}.png`);
+        await preprocessImageForTripo(rawUploadPath, processedPath);
         previewUrl = `/api/forge3d/assets/${assetId}.png`;
+
+        const comfyInputFilename = `${assetId}.png`;
+        const dest = join(installation.inputDir, comfyInputFilename);
+        copyFileSync(processedPath, dest);
+        inputImageForTripo = comfyInputFilename;
+      } else {
+        inputImageForTripo = options.imageFilename;
       }
+
+      job.status = 'staging_gpu';
+      job.progress = 45;
+      await stageGpuForStep('reconstruction');
     }
 
     job.status = 'reconstructing_mesh';
