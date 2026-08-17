@@ -398,9 +398,9 @@ export async function repairForgeAsset(id: string): Promise<Forge3DAsset> {
   let repairedAsset: Forge3DAsset;
   const nextIteration = asset.iterations + 1;
 
-  // Maintain native TripoSR Marching Cubes resolution (256) with threshold escalation
+  // Maintain native TripoSR Marching Cubes resolution (256) with calibrated threshold
   const targetResolution = 256;
-  const targetThreshold = nextIteration >= 3 ? 28.0 : 25.0;
+  const targetThreshold = nextIteration >= 3 ? 18.0 : 15.0;
 
   if (failureType === 'concept' && asset.mode === 'text_to_3d') {
     // 1. Text-to-3D Concept failure: Regenerate 2D concept with refined prompt
@@ -620,7 +620,7 @@ export async function runForge3DJob(
     job.message = 'Executing TripoSR neural 3D reconstruction on GPU...';
 
     // Neural mesh reconstruction
-    const tripoResult = await executeTripoSRGeneration(inputImageForTripo, { geometryResolution: 256, threshold: 25.0 });
+    const tripoResult = await executeTripoSRGeneration(inputImageForTripo, { geometryResolution: 256, threshold: 15.0 });
     if (!tripoResult.glbBuffer || tripoResult.glbBuffer.length === 0) {
       throw new Error('TripoSR did not produce valid GLB data.');
     }

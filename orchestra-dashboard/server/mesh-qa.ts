@@ -66,14 +66,20 @@ try:
     mesh.process(validate=True)
     mesh.fix_normals()
 
-    # 3. Disconnected Component Filtering: Prune floating satellite voxel noise
+    # 3. Automatic Quadric Decimation: Keep real-time 3D performance (approx 80k faces)
     try:
-        if len(mesh.faces) > 250000 and hasattr(mesh, 'simplify_quadric_decimation'):
-            try:
-                mesh = mesh.simplify_quadric_decimation(150000)
-            except Exception:
-                pass
-        if len(mesh.faces) <= 300000:
+        if len(mesh.faces) > 100000 and hasattr(mesh, 'simplify_quadric_decimation'):
+            target_pct = 1.0 - (80000.0 / len(mesh.faces))
+            if 0.05 <= target_pct < 1.0:
+                mesh = mesh.simplify_quadric_decimation(percent=target_pct)
+                mesh.remove_unreferenced_vertices()
+                mesh.fix_normals()
+    except Exception:
+        pass
+
+    # 4. Disconnected Component Filtering: Prune floating satellite voxel noise
+    try:
+        if len(mesh.faces) <= 200000:
             components = mesh.split(only_watertight=False)
             if len(components) > 1:
                 components = sorted(components, key=lambda c: len(c.faces), reverse=True)
