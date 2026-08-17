@@ -1,4 +1,4 @@
-import { existsSync, statSync, createWriteStream, mkdirSync } from 'node:fs';
+import { existsSync, statSync, createWriteStream, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFile } from 'node:child_process';
@@ -15,6 +15,7 @@ export interface ForgeDependencyItem {
   fileName: string;
   downloadUrl: string;
   sizeBytes: number;
+  sha256?: string;
   description: string;
   required: boolean;
 }
@@ -143,7 +144,7 @@ export async function checkForgeDependencies(): Promise<ForgeSetupStatus> {
         try {
           const st = statSync(localPath);
           actualSizeBytes = st.size;
-          installed = st.size >= (dep.sizeBytes * 0.8);
+          installed = st.size >= (dep.sizeBytes * 0.9);
         } catch {
           installed = false;
         }
@@ -303,13 +304,28 @@ export async function installForgeDependency(depId: string): Promise<void> {
         throw new Error(`Download failed with HTTP ${res.status}: ${res.statusText}`);
       }
 
+      // If server returned 416 (Range Not Satisfiable), delete .part and start cleanly from byte 0
+      if (res.status === 416) {
+        const { unlinkSync } = await import('node:fs');
+        if (existsSync(tempPath)) unlinkSync(tempPath);
+        startBytes = 0;
+        return installForgeDependency(depId);
+      }
+
+      // CRITICAL FIX: Only append if server honored Range with HTTP 206 Partial Content.
+      // If server sent HTTP 200 (OK), it ignored Range and sent the whole file from byte 0.
+      const isPartialContent = res.status === 206;
+      if (!isPartialContent && startBytes > 0) {
+        startBytes = 0;
+      }
+
       const totalLengthHeader = res.headers.get('content-length');
       const totalBytes = totalLengthHeader
         ? parseInt(totalLengthHeader, 10) + startBytes
         : dep.sizeBytes;
       activeDownload.totalBytes = totalBytes;
 
-      const fileStream = createWriteStream(tempPath, { flags: startBytes > 0 ? 'a' : 'w' });
+      const fileStream = createWriteStream(tempPath, { flags: isPartialContent && startBytes > 0 ? 'a' : 'w' });
       const reader = res.body?.getReader();
       if (!reader) throw new Error('Failed to get readable stream from response.');
 
@@ -345,8 +361,20 @@ export async function installForgeDependency(depId: string): Promise<void> {
 
       activeDownload.status = 'verifying';
       const finalStat = statSync(tempPath);
-      if (finalStat.size < dep.sizeBytes * 0.8) {
-        throw new Error(`Downloaded file size (${finalStat.size} bytes) is incomplete.`);
+      if (finalStat.size < dep.sizeBytes * 0.9 && finalStat.size !== dep.sizeBytes) {
+        throw new Error(`Downloaded file size (${finalStat.size} bytes) is incomplete (expected ${dep.sizeBytes} bytes).`);
+      }
+
+      // Check SHA-256 if defined in dependency item
+      if (dep.sha256) {
+        const { createHash } = await import('node:crypto');
+        const hash = createHash('sha256');
+        const fileBuf = readFileSync(tempPath);
+        hash.update(fileBuf);
+        const digest = hash.digest('hex');
+        if (digest.toLowerCase() !== dep.sha256.toLowerCase()) {
+          throw new Error(`Downloaded file failed SHA-256 checksum verification (got ${digest}, expected ${dep.sha256})`);
+        }
       }
 
       const { renameSync, unlinkSync } = await import('node:fs');

@@ -72,6 +72,9 @@ if (!existsSync(FORGE_DIR)) {
 
 const activeJobs = new Map<string, Forge3DJob>();
 
+// 4x4 Solid Red RGBA PNG (Verified valid zlib IDAT stream)
+export const DIAGNOSTIC_RED_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAFUlEQVR4nGP8z8DwnwEJMDGgAcICAIPRAgYCkO9YAAAAAElFTkSuQmCC';
+
 export function listForgeAssets(): Forge3DAsset[] {
   try {
     if (!existsSync(FORGE_DIR)) return [];
@@ -151,9 +154,11 @@ export async function probeLmStudioStatus(): Promise<{
 
     const data = (await modelsRes.json()) as any;
     const models = Array.isArray(data.data) ? data.data.map((m: any) => m.id) : [];
-    const loadedModel = models.find((m: string) => m.toLowerCase().includes('gemma') || m === expectedModel) || models[0] || expectedModel;
+    
+    // Specifically verify the configured reviewer model (or matching loaded ID)
+    const loadedModel = models.find((m: string) => m.toLowerCase() === expectedModel.toLowerCase() || m.toLowerCase().includes(expectedModel.toLowerCase())) || models[0] || expectedModel;
 
-    // Genuine Semantic Visual Recognition Probe: Send a 4x4 pure red image and ask for color identification
+    // Genuine Semantic Visual Recognition Probe: Send a 4x4 solid red PNG and ask for color identification
     const probeController = new AbortController();
     const probeTimeout = setTimeout(() => probeController.abort(), 4000);
 
@@ -170,10 +175,10 @@ export async function probeLmStudioStatus(): Promise<{
             {
               role: 'user',
               content: [
-                { type: 'text', text: 'What color is this image? Reply with only the single color name (e.g. red, blue, green).' },
+                { type: 'text', text: 'What is the dominant color of this image? Respond with exactly one word (e.g. red, blue, green).' },
                 {
                   type: 'image_url',
-                  image_url: { url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAD0lEQVR42mP8z8AARAwMAGsgBP7qZ7vUAAAAAElFTkSuQmCC' },
+                  image_url: { url: `data:image/png;base64,${DIAGNOSTIC_RED_PNG_B64}` },
                 },
               ],
             },
@@ -188,11 +193,12 @@ export async function probeLmStudioStatus(): Promise<{
       if (chatRes.ok) {
         const chatData = (await chatRes.json()) as any;
         const text = chatData.choices?.[0]?.message?.content || '';
-        if (/red/i.test(text)) {
+        const normalized = text.trim().toLowerCase().replace(/[.!,\r\n]/g, '').trim();
+        if (normalized === 'red' || normalized.startsWith('red') || normalized.endsWith('red')) {
           isMultimodal = true;
         } else {
           isMultimodal = false;
-          probeError = `Model did not visually identify red image (replied: "${text.trim()}"). Ensure a vision model is active.`;
+          probeError = `Model did not visually identify the red test image (responded: "${text.trim()}"). Ensure a vision model is active.`;
         }
       } else {
         const errText = await chatRes.text();

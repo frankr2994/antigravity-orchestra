@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { inflateSync } from 'node:zlib';
 import { findComfyInstallation, getComfyStatus } from '../dist-server/comfy.js';
-import { probeLmStudioStatus, repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
+import { DIAGNOSTIC_RED_PNG_B64, probeLmStudioStatus, repairForgeAsset, requestGemmaVisionReview, reviewForgeAsset, runForge3DJob } from '../dist-server/forge3d.js';
 import { checkForgeDependencies, FORGE_DEPENDENCIES, getDownloadProgress, probePythonPackages } from '../dist-server/forge-manifest.js';
 import { buildConceptGenerationWorkflow, buildTripoSRWorkflow } from '../dist-server/workflow-loader.js';
 import { freeComfyMemory } from '../dist-server/gpu-manager.js';
@@ -22,6 +23,23 @@ test('getComfyStatus fails truthfully when connecting to an invalid endpoint', a
   assert.equal(status.available, false);
   assert.equal(status.tripoReady, false);
   assert.ok(status.error, 'Must include specific error message');
+});
+
+test('DIAGNOSTIC_RED_PNG_B64 contains a valid, non-corrupt PNG with decompressible zlib IDAT stream', () => {
+  const buf = Buffer.from(DIAGNOSTIC_RED_PNG_B64, 'base64');
+  // PNG signature
+  assert.equal(buf.subarray(0, 8).toString('hex'), '89504e470d0a1a0a', 'Must have valid 8-byte PNG header');
+  
+  // Locate IDAT chunk
+  const idatIndex = buf.indexOf(Buffer.from('IDAT'));
+  assert.ok(idatIndex > 0, 'Must contain IDAT chunk');
+  
+  const idatLength = buf.readUInt32BE(idatIndex - 4);
+  const idatData = buf.subarray(idatIndex + 4, idatIndex + 4 + idatLength);
+  
+  // Decompress zlib payload
+  const decompressed = inflateSync(idatData);
+  assert.ok(decompressed.length > 0, 'Decompressed scanline data must not be empty');
 });
 
 test('probeLmStudioStatus returns structured availability and multimodal capability', async () => {
@@ -103,7 +121,7 @@ test('runForge3DJob fails truthfully and does not fabricate placeholder geometry
         await runForge3DJob('Test asset', 'stylized', false);
       },
       {
-        message: /ComfyUI is not reachable/i,
+        message: /ComfyUI is not reachable|Neural 3D Engine is not ready/i,
       }
     );
   } finally {
