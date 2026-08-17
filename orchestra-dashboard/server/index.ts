@@ -14,6 +14,17 @@ import { closeCodexAppServer } from './codex-app-server.js';
 import { getMcpStatus, listAllMcpServers, toggleMcpServer } from './mcp.js';
 import { getComfyStatus } from './comfy.js';
 import { deleteForgeAsset, getForgeAsset, getForgeJob, listForgeAssets, probeLmStudioStatus, repairForgeAsset, reviewForgeAsset, runForge3DJob } from './forge3d.js';
+import {
+  deleteForgeAsset as deleteVisualAsset,
+  getForgeAsset as getVisualAsset,
+  listForgeAssets as listVisualAssets,
+  revertAssetVersion,
+  requestCreationReview,
+  requestRevisionReview,
+  runForgeGeneration,
+  runForgeRevision,
+  FORGE_ASSETS_DIR,
+} from './forge.js';
 import { checkForgeDependencies, getDownloadProgress, installForgeDependency } from './forge-manifest.js';
 import { exportModelFormat } from './mesh-qa.js';
 
@@ -515,6 +526,121 @@ app.post('/api/forge3d/generate', async (req, res, next) => {
     next(error);
   }
 });
+
+// ─── Visual Pipeline (SDXL, Inpainting Revisions, 2-Tier Vision QA) ─────────────
+
+app.get('/api/forge/assets', (_req, res) => {
+  res.json(listVisualAssets());
+});
+
+app.get('/api/forge/assets/:id', (req, res) => {
+  const asset = getVisualAsset(req.params.id);
+  if (!asset) {
+    return res.status(404).json({ error: 'Asset not found' });
+  }
+  res.json(asset);
+});
+
+app.get('/api/forge/assets/:id/:filename', (req, res) => {
+  const file = join(FORGE_ASSETS_DIR, req.params.id, req.params.filename);
+  if (!existsSync(file)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  if (req.params.filename.endsWith('.png')) {
+    res.setHeader('Content-Type', 'image/png');
+  } else if (req.params.filename.endsWith('.jpg') || req.params.filename.endsWith('.jpeg')) {
+    res.setHeader('Content-Type', 'image/jpeg');
+  }
+  res.sendFile(file);
+});
+
+app.delete('/api/forge/assets/:id', (req, res) => {
+  const success = deleteVisualAsset(req.params.id);
+  res.status(success ? 204 : 404).end();
+});
+
+app.post('/api/forge/generate', async (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    if (!prompt) throw new Error('Prompt is required for generation.');
+    const asset = await runForgeGeneration({
+      prompt,
+      negativePrompt: req.body?.negativePrompt,
+      style: req.body?.style,
+      width: req.body?.width,
+      height: req.body?.height,
+      seed: req.body?.seed,
+      steps: req.body?.steps,
+      cfg: req.body?.cfg,
+      type: req.body?.type || 'image',
+      autoReview: req.body?.autoReview,
+    });
+    res.status(201).json(asset);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/revise', async (req, res, next) => {
+  try {
+    const assetId = String(req.body?.assetId || '').trim();
+    const revisionPrompt = String(req.body?.revisionPrompt || '').trim();
+    if (!assetId) throw new Error('Asset ID is required for revision.');
+    if (!revisionPrompt) throw new Error('Revision prompt is required.');
+
+    const asset = await runForgeRevision({
+      assetId,
+      targetVersionId: req.body?.targetVersionId,
+      revisionPrompt,
+      scope: req.body?.scope,
+      maskBase64: req.body?.maskBase64,
+      denoise: req.body?.denoise,
+      autoReview: req.body?.autoReview,
+    });
+    res.status(200).json(asset);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/assets/:id/revert', (req, res, next) => {
+  try {
+    const versionId = String(req.body?.versionId || '').trim();
+    if (!versionId) throw new Error('Version ID is required.');
+    const asset = revertAssetVersion(req.params.id, versionId);
+    res.json(asset);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/review/creation', async (req, res, next) => {
+  try {
+    const prompt = String(req.body?.prompt || '').trim();
+    const imageBase64 = String(req.body?.imageBase64 || '').trim();
+    if (!prompt || !imageBase64) throw new Error('Prompt and imageBase64 are required.');
+    const review = await requestCreationReview(prompt, imageBase64);
+    res.json(review);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/forge/review/revision', async (req, res, next) => {
+  try {
+    const requestedChange = String(req.body?.requestedChange || '').trim();
+    const originalImageBase64 = String(req.body?.originalImageBase64 || '').trim();
+    const revisedImageBase64 = String(req.body?.revisedImageBase64 || '').trim();
+    if (!requestedChange || !originalImageBase64 || !revisedImageBase64) {
+      throw new Error('requestedChange, originalImageBase64, and revisedImageBase64 are required.');
+    }
+    const review = await requestRevisionReview(requestedChange, originalImageBase64, revisedImageBase64);
+    res.json(review);
+  } catch (error) {
+    next(error);
+  }
+});
+
 
 const publicDir = join(config.dashboardRoot, 'dist');
 if (existsSync(publicDir)) {

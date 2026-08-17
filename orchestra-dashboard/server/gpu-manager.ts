@@ -7,6 +7,25 @@ export interface GpuMemoryInfo {
   gpuName: string;
 }
 
+export type PipelineStage =
+  | 'idle'
+  | 'txt2img'
+  | 'img2img'
+  | 'inpaint'
+  | 'controlnet'
+  | 'ipadapter'
+  | 'segmentation'
+  | 'video_gen'
+  | 'video_inpaint'
+  | 'upscale'
+  | 'vision_review'
+  // Backward compatibility aliases:
+  | 'concept'
+  | 'reconstruction'
+  | 'vision';
+
+let currentStage: PipelineStage = 'idle';
+
 export async function freeComfyMemory(endpoint = getComfyUrl()): Promise<boolean> {
   try {
     const res = await fetch(`${endpoint}/free`, {
@@ -45,11 +64,11 @@ export async function getGpuMemory(endpoint = getComfyUrl()): Promise<GpuMemoryI
 }
 
 export async function stageGpuForStep(
-  targetStep: 'concept' | 'reconstruction' | 'vision',
+  targetStep: PipelineStage,
   endpoint = getComfyUrl()
 ): Promise<void> {
-  // If moving from concept generation to 3D reconstruction, unload 2D diffusion weights
-  if (targetStep === 'reconstruction' || targetStep === 'vision') {
+  if (targetStep !== currentStage) {
     await freeComfyMemory(endpoint);
+    currentStage = targetStep;
   }
 }

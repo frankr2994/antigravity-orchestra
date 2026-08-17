@@ -31,6 +31,31 @@ export interface TripoSRParams {
   chunkSize?: number;
 }
 
+export interface SdxlTxt2ImgParams {
+  prompt: string;
+  negativePrompt?: string;
+  ckptName?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  cfg?: number;
+  seed?: number;
+  samplerName?: string;
+  scheduler?: string;
+  denoise?: number;
+}
+
+export interface SdxlImg2ImgParams extends SdxlTxt2ImgParams {
+  sourceImage: string;
+  denoise?: number;
+}
+
+export interface SdxlInpaintParams extends SdxlTxt2ImgParams {
+  sourceImage: string;
+  maskImage: string;
+  denoise?: number;
+}
+
 function loadWorkflowJson(filename: string): Record<string, any> {
   const filePath = join(WORKFLOWS_DIR, filename);
   if (!existsSync(filePath)) {
@@ -99,6 +124,107 @@ export function buildTripoSRWorkflow(params: TripoSRParams): Record<string, any>
   if (workflow['12']?.inputs) {
     if (params.geometryResolution) workflow['12'].inputs.geometry_resolution = params.geometryResolution;
     if (params.threshold) workflow['12'].inputs.threshold = params.threshold;
+  }
+
+  return workflow;
+}
+
+export function buildSdxlTxt2ImgWorkflow(params: SdxlTxt2ImgParams): Record<string, any> {
+  const workflow = loadWorkflowJson('sdxl-txt2img.json');
+
+  if (workflow['4']?.inputs && params.ckptName) {
+    workflow['4'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['5']?.inputs) {
+    if (params.width) workflow['5'].inputs.width = params.width;
+    if (params.height) workflow['5'].inputs.height = params.height;
+  }
+
+  if (workflow['6']?.inputs) {
+    workflow['6'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['7']?.inputs) {
+    const defaultNegative = 'blurry, low quality, distorted, artifacts, extra limbs, bad anatomy, watermark, signature';
+    workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
+  }
+
+  if (workflow['3']?.inputs) {
+    workflow['3'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['3'].inputs.steps = params.steps;
+    if (params.cfg) workflow['3'].inputs.cfg = params.cfg;
+    if (params.samplerName) workflow['3'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['3'].inputs.scheduler = params.scheduler;
+    if (typeof params.denoise === 'number') workflow['3'].inputs.denoise = params.denoise;
+  }
+
+  return workflow;
+}
+
+export function buildSdxlImg2ImgWorkflow(params: SdxlImg2ImgParams): Record<string, any> {
+  const workflow = loadWorkflowJson('sdxl-img2img.json');
+
+  if (workflow['1']?.inputs) {
+    workflow['1'].inputs.image = params.sourceImage;
+  }
+
+  if (workflow['4']?.inputs && params.ckptName) {
+    workflow['4'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['6']?.inputs) {
+    workflow['6'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['7']?.inputs) {
+    const defaultNegative = 'blurry, low quality, distorted, artifacts, text, watermark';
+    workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
+  }
+
+  if (workflow['3']?.inputs) {
+    workflow['3'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['3'].inputs.steps = params.steps;
+    if (params.cfg) workflow['3'].inputs.cfg = params.cfg;
+    if (params.samplerName) workflow['3'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['3'].inputs.scheduler = params.scheduler;
+    workflow['3'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.45;
+  }
+
+  return workflow;
+}
+
+export function buildSdxlInpaintWorkflow(params: SdxlInpaintParams): Record<string, any> {
+  const workflow = loadWorkflowJson('sdxl-inpaint.json');
+
+  if (workflow['1']?.inputs) {
+    workflow['1'].inputs.image = params.sourceImage;
+  }
+
+  if (workflow['2']?.inputs) {
+    workflow['2'].inputs.image = params.maskImage;
+  }
+
+  if (workflow['4']?.inputs && params.ckptName) {
+    workflow['4'].inputs.ckpt_name = params.ckptName;
+  }
+
+  if (workflow['6']?.inputs) {
+    workflow['6'].inputs.text = params.prompt.trim();
+  }
+
+  if (workflow['7']?.inputs) {
+    const defaultNegative = 'blurry, low quality, distorted, artifacts, seams, watermark';
+    workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
+  }
+
+  if (workflow['3']?.inputs) {
+    workflow['3'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['3'].inputs.steps = params.steps;
+    if (params.cfg) workflow['3'].inputs.cfg = params.cfg;
+    if (params.samplerName) workflow['3'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['3'].inputs.scheduler = params.scheduler;
+    workflow['3'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.85;
   }
 
   return workflow;

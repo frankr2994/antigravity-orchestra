@@ -1,6 +1,16 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { buildConceptGenerationWorkflow, buildTripoSRWorkflow, type ConceptGenParams } from './workflow-loader.js';
+import {
+  buildConceptGenerationWorkflow,
+  buildTripoSRWorkflow,
+  buildSdxlTxt2ImgWorkflow,
+  buildSdxlImg2ImgWorkflow,
+  buildSdxlInpaintWorkflow,
+  type ConceptGenParams,
+  type SdxlTxt2ImgParams,
+  type SdxlImg2ImgParams,
+  type SdxlInpaintParams,
+} from './workflow-loader.js';
 import { sanitizeAndExportGlb, type MeshQAStats } from './mesh-qa.js';
 
 export interface ComfySystemDevice {
@@ -300,3 +310,94 @@ export async function executeTripoSRGeneration(
     objFilename,
   };
 }
+
+export async function executeSdxlTxt2Img(
+  params: SdxlTxt2ImgParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildSdxlTxt2ImgWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
+
+  const images = history.outputs?.['9']?.images;
+  if (!images || !images.length) {
+    throw new Error('SDXL image generation completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Generated image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
+export async function executeSdxlImg2Img(
+  params: SdxlImg2ImgParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildSdxlImg2ImgWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
+
+  const images = history.outputs?.['9']?.images;
+  if (!images || !images.length) {
+    throw new Error('SDXL img2img revision completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Revised image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
+export async function executeSdxlInpaint(
+  params: SdxlInpaintParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildSdxlInpaintWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 90000, endpoint);
+
+  const images = history.outputs?.['9']?.images;
+  if (!images || !images.length) {
+    throw new Error('SDXL inpainting completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`Inpainted image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
