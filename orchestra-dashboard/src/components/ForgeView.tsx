@@ -493,6 +493,26 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
+  const handleApplyRepairToRevise = () => {
+    if (!activeVersion?.review) return;
+    const review = activeVersion.review;
+    setMode('revise');
+
+    const repairText =
+      review.suggestedAction ||
+      `Fix ${review.failureType !== 'none' ? review.failureType : 'visual artifacts'} identified in Gemma review: ${review.critique}`;
+    setRevisionPrompt(repairText);
+
+    if (review.failureType === 'anatomy' || review.failureType === 'artifact') {
+      setEditScope('localized');
+      setIsBrushActive(true);
+    } else if (review.failureType === 'identity_drift') {
+      setEditScope('regional');
+    } else {
+      setEditScope('structural');
+    }
+  };
+
   // Canvas Mask Helpers
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isBrushActive) return;
@@ -1298,9 +1318,31 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                 )}
               </div>
               {activeVersion?.review ? (
-                <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
-                  {activeVersion.review.critique}
-                </p>
+                <div>
+                  <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                    {activeVersion.review.critique}
+                  </p>
+                  {activeVersion.review.suggestedAction && (
+                    <div style={{ marginTop: '4px', fontSize: '11px', color: 'var(--cyan)' }}>
+                      <strong>Suggested Repair:</strong> {activeVersion.review.suggestedAction}
+                    </div>
+                  )}
+                  {activeVersion.review.verdict === 'needs_repair' && (
+                    <div style={{ marginTop: '8px', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <button
+                        type="button"
+                        className="forge-btn"
+                        style={{ padding: '4px 10px', fontSize: '11px', width: 'auto', display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+                        onClick={handleApplyRepairToRevise}
+                      >
+                        <Wand2 size={12} /> Apply Repair to Revise
+                      </button>
+                      <span style={{ fontSize: '10px', color: 'var(--muted)' }}>
+                        Populates repair prompt & selects mask brush
+                      </span>
+                    </div>
+                  )}
+                </div>
               ) : (
                 <small style={{ color: 'var(--muted)' }}>
                   Click "Inspect Active Version" above to trigger an independent multimodal quality critique.
