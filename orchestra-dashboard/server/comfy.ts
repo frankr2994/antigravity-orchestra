@@ -209,7 +209,7 @@ export async function submitComfyPrompt(
 
 export async function pollComfyHistory(
   promptId: string,
-  timeoutMs = 90000,
+  timeoutMs = 300000,
   endpoint = getComfyUrl()
 ): Promise<any> {
   const startTime = Date.now();
@@ -258,7 +258,7 @@ export async function executeConceptGeneration(
 
   const workflow = buildConceptGenerationWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['9']?.images;
   if (!images || !images.length) {
@@ -298,7 +298,7 @@ export async function executeTripoSRGeneration(
   });
 
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const outputs = history.outputs?.['13']?.mesh;
   if (!outputs || !outputs.length) {
@@ -330,7 +330,7 @@ export async function executeSdxlTxt2Img(
 
   const workflow = buildSdxlTxt2ImgWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['9']?.images;
   if (!images || !images.length) {
@@ -360,7 +360,7 @@ export async function executeSdxlImg2Img(
 
   const workflow = buildSdxlImg2ImgWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['9']?.images;
   if (!images || !images.length) {
@@ -390,7 +390,7 @@ export async function executeSdxlInpaint(
 
   const workflow = buildSdxlInpaintWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['9']?.images;
   if (!images || !images.length) {
@@ -420,7 +420,7 @@ export async function executeLtxImg2Vid(
 
   const workflow = buildLtxImg2VidWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 120000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['8']?.images;
   if (!images || !images.length) {
@@ -450,7 +450,7 @@ export async function executeWanTxt2Vid(
 
   const workflow = buildWanTxt2VidWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 150000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['7']?.images;
   if (!images || !images.length) {
@@ -480,7 +480,7 @@ export async function executeWanImg2Vid(
 
   const workflow = buildWanImg2VidWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 150000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['8']?.images;
   if (!images || !images.length) {
@@ -510,7 +510,7 @@ export async function executeSdxlIpAdapter(
 
   const workflow = buildSdxlIpAdapterWorkflow(params);
   const { promptId } = await submitComfyPrompt(workflow, endpoint);
-  const history = await pollComfyHistory(promptId, 90000, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
 
   const images = history.outputs?.['11']?.images;
   if (!images || !images.length) {
