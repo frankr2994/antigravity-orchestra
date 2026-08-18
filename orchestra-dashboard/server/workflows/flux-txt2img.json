@@ -1,10 +1,9 @@
 {
   "1": {
     "inputs": {
-      "unet_name": "flux1-dev-fp8.safetensors",
-      "weight_dtype": "default"
+      "ckpt_name": "flux1-dev-fp8.safetensors"
     },
-    "class_type": "UNETLoader"
+    "class_type": "CheckpointLoaderSimple"
   },
   "2": {
     "inputs": {

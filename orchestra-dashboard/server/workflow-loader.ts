@@ -437,7 +437,11 @@ export function buildFluxTxt2ImgWorkflow(params: FluxTxt2ImgParams): Record<stri
   const workflow = loadWorkflowJson('flux-txt2img.json');
 
   if (workflow['1']?.inputs && params.unetName) {
-    workflow['1'].inputs.unet_name = params.unetName;
+    if ('ckpt_name' in workflow['1'].inputs) {
+      workflow['1'].inputs.ckpt_name = params.unetName;
+    } else {
+      workflow['1'].inputs.unet_name = params.unetName;
+    }
   }
   if (workflow['2']?.inputs) {
     if (params.clip1) workflow['2'].inputs.clip_name1 = params.clip1;
