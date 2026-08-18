@@ -597,6 +597,7 @@ app.post('/api/forge/generate', async (req, res, next) => {
       prompt,
       negativePrompt: req.body?.negativePrompt,
       style: req.body?.style,
+      checkpoint: req.body?.checkpoint,
       width: req.body?.width,
       height: req.body?.height,
       seed: req.body?.seed,

@@ -3,11 +3,14 @@ import {
   ArrowRight,
   BookmarkPlus,
   Camera,
+  CheckCircle2,
   Clapperboard,
+  Cpu,
   Download,
   Eye,
   Film,
   HardDriveDownload,
+  Layers,
   Loader2,
   Paintbrush,
   Plus,
@@ -70,6 +73,90 @@ interface ForgeViewProps {
   api: <T>(path: string, init?: RequestInit) => Promise<T>;
 }
 
+interface ModelChoice {
+  id: string;
+  depId: string;
+  name: string;
+  subtitle: string;
+  vram: string;
+  speed: string;
+  badge: string;
+  description: string;
+}
+
+const AVAILABLE_MODELS: ModelChoice[] = [
+  {
+    id: 'RealVisXL_V5.0.safetensors',
+    depId: 'sdxl-realvis',
+    name: 'RealVisXL v5.0',
+    subtitle: 'SDXL Raw DSLR & 35mm Photography',
+    vram: '~6.5 GB VRAM',
+    speed: '~5s (Fast)',
+    badge: 'Recommended Realism',
+    description: 'Ultra-realistic raw photography. Eliminates AI plastic shine with natural skin pores, fabric texture, and authentic optical bokeh.',
+  },
+  {
+    id: 'juggernautXL_v9.safetensors',
+    depId: 'sdxl-juggernaut',
+    name: 'Juggernaut XL v9',
+    subtitle: 'SDXL Cinematic & Production Concept',
+    vram: '~6.5 GB VRAM',
+    speed: '~5s (Fast)',
+    badge: 'Cinematic Concept',
+    description: 'Flagship cinematic model with high-contrast Hollywood lighting, environmental depth, vehicles, and architecture.',
+  },
+  {
+    id: 'CyberRealisticXL_v2.0.safetensors',
+    depId: 'sdxl-cyberrealistic',
+    name: 'CyberRealistic XL v2.0',
+    subtitle: 'SDXL Human Portrait & Iris Specialist',
+    vram: '~6.5 GB VRAM',
+    speed: '~5s (Fast)',
+    badge: 'Portraits & Eyes',
+    description: 'Trained for hyper-detailed human portraits, lifelike eye reflections, hair dynamics, and subsurface skin lighting.',
+  },
+  {
+    id: 'flux1-dev-fp8.safetensors',
+    depId: 'flux-dev-fp8',
+    name: 'FLUX.1 [dev]',
+    subtitle: '12B Parameter Flow Transformer (FP8)',
+    vram: '~9.2 GB VRAM',
+    speed: '~22s (SOTA Quality)',
+    badge: 'SOTA Quality',
+    description: 'Industry-leading 12B parameter flow transformer. Flawless hands, text rendering, and ray-traced lighting physics.',
+  },
+  {
+    id: 'flux1-schnell-fp8.safetensors',
+    depId: 'flux-schnell-fp8',
+    name: 'FLUX.1 [schnell]',
+    subtitle: '4-Step Distilled Flow Transformer (FP8)',
+    vram: '~8.5 GB VRAM',
+    speed: '~6s (Fast)',
+    badge: 'Fast Flow Turbo',
+    description: 'Fast 4-step distilled Flux.1 transformer delivering high anatomy and prompt fidelity in seconds.',
+  },
+  {
+    id: 'ponyDiffusionV6XL_v6StartWithThisOne.safetensors',
+    depId: 'sdxl-pony',
+    name: 'Pony Diffusion V6 XL',
+    subtitle: 'SDXL Stylized Anime & Digital Art',
+    vram: '~6.5 GB VRAM',
+    speed: '~5s (Fast)',
+    badge: 'Stylized / Anime',
+    description: 'Premier stylized 2D/3D anime, digital concept art, and tag-controlled character composition.',
+  },
+  {
+    id: 'v1-5-pruned-emaonly.safetensors',
+    depId: 'concept-sd15',
+    name: 'Stable Diffusion 1.5 Base',
+    subtitle: 'Legacy 512px Base Model',
+    vram: '~3.0 GB VRAM',
+    speed: '~2s (Ultra Fast)',
+    badge: 'Legacy Base',
+    description: 'Lightweight default checkpoint for fast preliminary drafts.',
+  },
+];
+
 const STYLE_PRESETS = [
   { id: 'photorealistic', name: 'Photorealistic PBR', promptSuffix: ', highly detailed photorealistic 8k, professional photography, 50mm f/1.8, cinematic lighting' },
   { id: 'cinematic', name: 'Cinematic 35mm', promptSuffix: ', cinematic movie still, 35mm film grain, anamorphic lens flare, moody atmosphere, masterpiece' },
@@ -114,6 +201,8 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
   const [selectedStyle, setSelectedStyle] = useState('photorealistic');
+  const [selectedModel, setSelectedModel] = useState<string>('RealVisXL_V5.0.safetensors');
+  const [showModelManager, setShowModelManager] = useState(false);
   const [generating, setGenerating] = useState(false);
 
   // Revision Inputs
@@ -309,6 +398,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           prompt: fullPrompt,
           negativePrompt: negativePrompt.trim() || undefined,
           style: selectedStyle,
+          checkpoint: selectedModel,
           entityId: selectedEntityId || undefined,
           entityWeight: selectedEntityId ? entityWeight : undefined,
         }),
@@ -760,6 +850,54 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
                 fontSize: '11px',
               }}
             />
+
+            <div style={{ marginBottom: '4px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                <label style={{ margin: 0 }}>AI Checkpoint Model</label>
+                <button
+                  type="button"
+                  onClick={() => setShowModelManager(true)}
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--accent)',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                    padding: 0,
+                    fontWeight: 600,
+                  }}
+                >
+                  <Layers size={12} /> Model Library & VRAM
+                </button>
+              </div>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                disabled={generating}
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  background: 'var(--bg)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '8px',
+                  color: 'var(--text)',
+                  fontSize: '11px',
+                  fontWeight: 600,
+                }}
+              >
+                {AVAILABLE_MODELS.map((m) => {
+                  const isInstalled = setupStatus?.items.find((i) => i.id === m.depId)?.installed ?? (m.id.includes('v1-5') || false);
+                  return (
+                    <option key={m.id} value={m.id}>
+                      {isInstalled ? '✓' : '⬇'} {m.name} — {m.vram} ({m.speed})
+                    </option>
+                  );
+                })}
+              </select>
+            </div>
 
             <label>Visual Style Preset</label>
             <div className="preset-grid">
@@ -1534,6 +1672,110 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '6px' }}>
               <button className="secondary" onClick={() => setShowNewEntityModal(false)}>Cancel</button>
               <button className="primary" onClick={handleCreateEntity} disabled={!newEntityName.trim()}>Save Entity</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Modal: Model Library & Hardware VRAM Manager ─────────────────── */}
+      {showModelManager && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 60, background: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px' }}>
+          <div style={{ width: '100%', maxWidth: '680px', maxHeight: '85vh', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '14px', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+            <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h3 style={{ margin: 0, fontSize: '15px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Layers size={18} className="accent" /> AI Checkpoint Model Library
+                </h3>
+                <span style={{ fontSize: '11px', color: 'var(--muted)' }}>
+                  Hardware calibrated for RTX 2080 Ti (11 GB VRAM) • Auto-staged VRAM handoffs
+                </span>
+              </div>
+              <button onClick={() => setShowModelManager(false)} style={{ background: 'none', border: 'none', color: 'var(--muted)', cursor: 'pointer' }}>
+                <X size={18} />
+              </button>
+            </div>
+
+            <div style={{ padding: '16px 20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              {AVAILABLE_MODELS.map((m) => {
+                const depItem = setupStatus?.items.find((i) => i.id === m.depId);
+                const isInstalled = depItem?.installed ?? (m.id.includes('v1-5') || false);
+                const isSelected = selectedModel === m.id;
+
+                return (
+                  <div
+                    key={m.id}
+                    style={{
+                      padding: '14px',
+                      background: isSelected ? 'rgba(99, 102, 241, 0.08)' : 'var(--bg)',
+                      border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                      borderRadius: '10px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '8px',
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <strong style={{ fontSize: '13px', color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
+                            {m.name}
+                          </strong>
+                          <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(99, 102, 241, 0.2)', color: 'var(--accent)', fontWeight: 600 }}>
+                            {m.badge}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: '11px', color: 'var(--muted)' }}>{m.subtitle}</span>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        {isInstalled ? (
+                          <button
+                            type="button"
+                            className={`mini ${isSelected ? 'primary' : 'secondary'}`}
+                            onClick={() => {
+                              setSelectedModel(m.id);
+                              setShowModelManager(false);
+                            }}
+                            style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                          >
+                            <CheckCircle2 size={12} /> {isSelected ? 'Active Model' : 'Select'}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="mini primary"
+                            onClick={() => handleInstallDep(m.depId)}
+                            disabled={Boolean(installingDep)}
+                            style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                          >
+                            {installingDep === m.depId ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                            {installingDep === m.depId ? 'Downloading...' : `Install (${depItem?.sizeBytes ? `${(depItem.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Download'})`}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                      {m.description}
+                    </p>
+
+                    <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--muted)', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                      <span><Cpu size={12} style={{ display: 'inline', verticalAlign: '-1px', marginRight: '4px' }} /><strong>VRAM:</strong> {m.vram}</span>
+                      <span>⚡ <strong>Speed (2080 Ti):</strong> {m.speed}</span>
+                      <span>📁 <strong>Filename:</strong> <code style={{ fontSize: '10px' }}>{m.id}</code></span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--panel)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ fontSize: '11px', color: 'var(--muted)' }}>
+                Manual drop location: <code>models/checkpoints/</code>
+              </span>
+              <button className="secondary" onClick={() => setShowModelManager(false)} style={{ padding: '6px 14px', fontSize: '11px' }}>
+                Close
+              </button>
             </div>
           </div>
         </div>
