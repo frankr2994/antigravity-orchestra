@@ -112,17 +112,13 @@ export function buildConceptGenerationWorkflow(params: ConceptGenParams): Record
 
   // Node 6: Positive prompt
   if (workflow['6']?.inputs) {
-    const basePrompt = params.prompt.trim();
-    if (/isometric|3\/4|white background|3d asset|game prop/i.test(basePrompt)) {
-      workflow['6'].inputs.text = basePrompt;
-    } else {
-      workflow['6'].inputs.text = `high detail 3D game prop of ${basePrompt}, elevated 3/4 view, studio lighting, plain white background, isolated, sharp focus`;
-    }
+    workflow['6'].inputs.text = params.prompt.trim();
   }
 
   // Node 7: Negative prompt
   if (workflow['7']?.inputs) {
-    const defaultNegative = 'extra handles, multiple handles, deformed handle, two handles, floating artifacts, mutated, deformed, table, desk, surface, floor, shadow on ground, flat 2d, illustration, room, background clutter, multiple objects, human hands, cropped, blurry, cut off, transparency grid, watermark, text, logo';
+    const defaultNegative =
+      'ugly, deformed, noisy, blurry, distorted, low quality, bad anatomy, bad hands, missing fingers, extra digit, fewer digits, cropped, worst quality, jpeg artifacts, watermark, signature';
     workflow['7'].inputs.text = params.negativePrompt ? `${params.negativePrompt}, ${defaultNegative}` : defaultNegative;
   }
 
