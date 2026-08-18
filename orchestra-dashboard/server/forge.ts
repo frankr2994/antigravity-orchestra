@@ -353,6 +353,39 @@ Respond strictly in valid JSON:
 
 // ─── Execution Engines: Generation, Revision, and Repair ─────────────────────────
 
+export function resolveActiveImageCheckpoint(requested?: string): { ckptName: string; isSdxl: boolean } {
+  const installation = findComfyInstallation();
+  if (!installation) return { ckptName: 'v1-5-pruned-emaonly.safetensors', isSdxl: false };
+  const ckptDir = join(installation.comfyCoreDir, 'models', 'checkpoints');
+
+  if (requested && existsSync(join(ckptDir, requested))) {
+    const isSdxl = !/v1-5|sd15|model\.ckpt/i.test(requested);
+    return { ckptName: requested, isSdxl };
+  }
+
+  const preferredSdxl = [
+    'RealVisXL_V5.0.safetensors',
+    'juggernautXL_v9.safetensors',
+    'CyberRealisticXL_v2.0.safetensors',
+    'ponyDiffusionV6XL_v6StartWithThisOne.safetensors',
+  ];
+
+  for (const name of preferredSdxl) {
+    if (existsSync(join(ckptDir, name))) {
+      return { ckptName: name, isSdxl: true };
+    }
+  }
+
+  if (existsSync(ckptDir)) {
+    const files = readdirSync(ckptDir).filter((f) => f.endsWith('.safetensors') && !/model\.ckpt/i.test(f));
+    const nonSd15 = files.find((f) => !/v1-5|sd15/i.test(f));
+    if (nonSd15) return { ckptName: nonSd15, isSdxl: true };
+    if (files.length > 0) return { ckptName: files[0], isSdxl: false };
+  }
+
+  return { ckptName: 'v1-5-pruned-emaonly.safetensors', isSdxl: false };
+}
+
 export async function runForgeGeneration(options: ForgeGenerateOptions): Promise<ForgeAsset> {
   const installation = findComfyInstallation();
   if (!installation) throw new Error('ComfyUI installation directory not found.');
@@ -391,9 +424,8 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
     const cfg = options.cfg || 7.0;
 
     let resultBuffer: Buffer;
-    const sdxlPath = join(installation.comfyCoreDir, 'models', 'checkpoints', 'juggernautXL_v9.safetensors');
-    const useSdxl = existsSync(sdxlPath);
-    let workflowType = 'sdxl-txt2img';
+    const { ckptName, isSdxl } = resolveActiveImageCheckpoint();
+    let workflowType = isSdxl ? 'sdxl-txt2img' : 'concept-gen';
 
     if (boundEntity && boundEntity.referenceImages.length > 0) {
       job.status = 'staging_gpu';
@@ -414,7 +446,7 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
         ipAdapterWeight: options.entityWeight ?? boundEntity.ipAdapterWeight ?? 0.8,
         prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
-        ckptName: 'juggernautXL_v9.safetensors',
+        ckptName,
         width: options.width || 1024,
         height: options.height || 1024,
         steps,
@@ -423,10 +455,10 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       });
       resultBuffer = gen.buffer;
       workflowType = 'sdxl-ipadapter';
-    } else if (useSdxl) {
+    } else if (isSdxl) {
       job.status = 'staging_gpu';
       job.progress = 25;
-      job.message = 'Staging GPU for SDXL generation...';
+      job.message = `Staging GPU for SDXL generation (${ckptName})...`;
       await stageGpuForStep('txt2img');
 
       job.status = 'generating';
@@ -436,7 +468,7 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       const gen = await executeSdxlTxt2Img({
         prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
-        ckptName: 'juggernautXL_v9.safetensors',
+        ckptName,
         width: options.width || 1024,
         height: options.height || 1024,
         steps,
@@ -478,15 +510,15 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       changeDescription: boundEntity ? `Generated with ${boundEntity.name}` : 'Initial generation',
       params: {
         workflow: workflowType,
-        checkpoint: useSdxl ? 'juggernautXL_v9.safetensors' : 'v1-5-pruned-emaonly.safetensors',
+        checkpoint: ckptName,
         seed,
         steps,
         cfg,
         denoise: 1.0,
         sampler: 'euler',
         scheduler: 'normal',
-        width: options.width || (useSdxl ? 1024 : 512),
-        height: options.height || (useSdxl ? 1024 : 512),
+        width: options.width || (isSdxl ? 1024 : 512),
+        height: options.height || (isSdxl ? 1024 : 512),
         prompt: promptWithEntity,
         negativePrompt: options.negativePrompt,
         entityId: options.entityId,
@@ -554,12 +586,14 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     copyFileSync(parentVer.outputPath, join(installation.inputDir, sourceFilename));
     writeFileSync(join(installation.inputDir, maskFilename), maskBuffer);
 
+    const activeCkpt = parentVer.params.checkpoint || resolveActiveImageCheckpoint().ckptName;
+
     const inpaint = await executeSdxlInpaint({
       sourceImage: sourceFilename,
       maskImage: maskFilename,
       prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
       negativePrompt: parentVer.params.negativePrompt,
-      ckptName: parentVer.params.checkpoint || 'juggernautXL_v9.safetensors',
+      ckptName: activeCkpt,
       seed: parentVer.params.seed,
       denoise,
     });
@@ -570,11 +604,13 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     const sourceFilename = `${asset.id}_${nextVerId}_src.png`;
     copyFileSync(parentVer.outputPath, join(installation.inputDir, sourceFilename));
 
+    const activeCkpt = parentVer.params.checkpoint || resolveActiveImageCheckpoint().ckptName;
+
     const img2img = await executeSdxlImg2Img({
       sourceImage: sourceFilename,
       prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
       negativePrompt: parentVer.params.negativePrompt,
-      ckptName: parentVer.params.checkpoint || 'juggernautXL_v9.safetensors',
+      ckptName: activeCkpt,
       seed: parentVer.params.seed,
       denoise,
     });
