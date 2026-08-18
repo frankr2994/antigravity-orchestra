@@ -1,12 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle,
   ArrowRight,
   BookmarkPlus,
   Camera,
   Clapperboard,
+  Download,
   Eye,
   Film,
+  HardDriveDownload,
+  Loader2,
   Paintbrush,
   Plus,
   RefreshCw,
@@ -14,9 +16,9 @@ import {
   Sparkles,
   Trash2,
   Undo,
-  UserPlus,
   Users,
   Wand2,
+  X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
@@ -60,12 +62,20 @@ interface ForgeDependencyStatus {
     installed: boolean;
     description: string;
     required: boolean;
+    sizeBytes?: number;
   }>;
 }
 
 interface ForgeViewProps {
   api: <T>(path: string, init?: RequestInit) => Promise<T>;
 }
+
+const STYLE_PRESETS = [
+  { id: 'photorealistic', name: 'Photorealistic PBR', promptSuffix: ', highly detailed photorealistic 8k, professional photography, 50mm f/1.8, cinematic lighting' },
+  { id: 'cinematic', name: 'Cinematic 35mm', promptSuffix: ', cinematic movie still, 35mm film grain, anamorphic lens flare, moody atmosphere, masterpiece' },
+  { id: 'digital_art', name: 'Concept Art', promptSuffix: ', digital concept art, octane render, dramatic lighting, artstation trending, volumetric haze' },
+  { id: 'anime', name: 'Stylized Anime', promptSuffix: ', beautiful modern anime style, makoto shinkai aesthetic, vibrant colors, clean lineart' },
+];
 
 export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [status, setStatus] = useState<ForgeStatus | null>(null);
@@ -97,29 +107,29 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [newShotCamera, setNewShotCamera] = useState<CameraMovement>('pan_right');
   const [newShotEntityId, setNewShotEntityId] = useState('');
 
-  // Mode: Create | Revise | Animate | Entities | Storyboard
+  // Primary Workflow Mode
   const [mode, setMode] = useState<'create' | 'revise' | 'animate' | 'entities' | 'storyboard'>('create');
 
-  // Generation State
+  // Generation Inputs
   const [prompt, setPrompt] = useState('');
   const [negativePrompt, setNegativePrompt] = useState('');
-  const [stylePreset, setStylePreset] = useState('photorealistic');
+  const [selectedStyle, setSelectedStyle] = useState('photorealistic');
   const [generating, setGenerating] = useState(false);
 
-  // Revision State
+  // Revision Inputs
   const [revisionPrompt, setRevisionPrompt] = useState('');
   const [editScope, setEditScope] = useState<EditScope>('localized');
   const [denoise, setDenoise] = useState(0.85);
   const [revising, setRevising] = useState(false);
 
-  // Video Animation State
-  const [animationPrompt, setAnimationPrompt] = useState('cinematic camera movement, smooth motion, high visual quality');
+  // Video Animation Inputs
+  const [animationPrompt, setAnimationPrompt] = useState('cinematic camera slow pan right, smooth motion, high visual quality');
   const [videoModel, setVideoModel] = useState<'ltx-video' | 'wan2.1-1.3b'>('ltx-video');
   const [animating, setAnimating] = useState(false);
 
   // Inpainting Canvas & Brush State
   const [isBrushActive, setIsBrushActive] = useState(false);
-  const [brushSize, setBrushSize] = useState(30);
+  const [brushSize, setBrushSize] = useState(35);
   const [isDrawing, setIsDrawing] = useState(false);
   const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hasMaskDrawn, setHasMaskDrawn] = useState(false);
@@ -135,7 +145,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [error, setError] = useState('');
 
   // 1. Fetch Engine Status, Assets, Entities, Storyboards
-  const fetchStatus = useCallback(async () => {
+  const loadStatus = useCallback(async () => {
     try {
       const st = await api<ForgeStatus>('/api/forge3d/status');
       setStatus(st);
@@ -146,7 +156,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   }, [api]);
 
-  const fetchAssets = useCallback(async () => {
+  const loadAssets = useCallback(async () => {
     try {
       const list = await api<ForgeAsset[]>('/api/forge/assets');
       setAssets(list);
@@ -159,7 +169,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   }, [api, selectedAsset]);
 
-  const fetchEntities = useCallback(async () => {
+  const loadEntities = useCallback(async () => {
     try {
       const list = await api<ForgeEntity[]>('/api/forge/entities');
       setEntities(list);
@@ -168,7 +178,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   }, [api]);
 
-  const fetchStoryboards = useCallback(async () => {
+  const loadStoryboards = useCallback(async () => {
     try {
       const list = await api<StoryboardSequence[]>('/api/forge/storyboards');
       setStoryboards(list);
@@ -181,24 +191,22 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   }, [api, activeStoryboardId]);
 
   useEffect(() => {
-    void fetchStatus();
-    void fetchAssets();
-    void fetchEntities();
-    void fetchStoryboards();
+    void loadStatus();
+    void loadAssets();
+    void loadEntities();
+    void loadStoryboards();
     const timer = setInterval(() => {
-      void fetchStatus();
+      void loadStatus();
     }, 10000);
     return () => clearInterval(timer);
-  }, [fetchStatus, fetchAssets, fetchEntities, fetchStoryboards]);
+  }, [loadStatus, loadAssets, loadEntities, loadStoryboards]);
 
-  // Active storyboard resolution
+  // Active Storyboard & Version Resolution
   const activeStoryboard = storyboards.find((s) => s.id === activeStoryboardId) || storyboards[0];
-
-  // Active version resolution
   const activeVersion = selectedAsset?.versions.find((v) => v.versionId === activeVersionId) || selectedAsset?.versions[0];
   const isVideoVersion = activeVersion?.operationType === 'animate' || activeVersion?.outputUrl?.endsWith('.mp4') || activeVersion?.outputUrl?.endsWith('.webp');
 
-  // 2. Dependency Installer
+  // Dependency Installer
   const handleInstallDep = async (depId: string) => {
     try {
       setInstallingDep(depId);
@@ -211,7 +219,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
         if (!p?.progress) {
           clearInterval(interval);
           setInstallingDep(null);
-          void fetchStatus();
+          void loadStatus();
         }
       }, 1000);
     } catch (err) {
@@ -220,18 +228,21 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 3. New Generation Handler (with Optional Entity Binding)
+  // Generation Handler
   const handleGenerate = async () => {
     if (!prompt.trim() || generating) return;
     try {
       setGenerating(true);
       setError('');
+      const preset = STYLE_PRESETS.find((p) => p.id === selectedStyle);
+      const fullPrompt = `${prompt.trim()}${preset ? preset.promptSuffix : ''}`;
+
       const asset = await api<ForgeAsset>('/api/forge/generate', {
         method: 'POST',
         body: JSON.stringify({
-          prompt: prompt.trim(),
+          prompt: fullPrompt,
           negativePrompt: negativePrompt.trim() || undefined,
-          style: stylePreset,
+          style: selectedStyle,
           entityId: selectedEntityId || undefined,
           entityWeight: selectedEntityId ? entityWeight : undefined,
         }),
@@ -248,7 +259,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 4. Targeted Revision Handler
+  // Targeted Revision Handler
   const handleRevise = async () => {
     if (!selectedAsset || !revisionPrompt.trim() || revising) return;
     try {
@@ -284,7 +295,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 5. Video Animation Handler
+  // Video Animation Handler
   const handleAnimate = async () => {
     if (!selectedAsset || animating) return;
     try {
@@ -312,10 +323,10 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 6. Save Active Version Directly as a Persistent Entity
+  // Save Character Roster
   const handleSaveAsEntity = async () => {
     if (!selectedAsset || !activeVersion) return;
-    const name = window.prompt('Enter Character / Prop Name:', selectedAsset.title.slice(0, 20));
+    const name = window.prompt('Enter Character or Prop Name:', selectedAsset.title.slice(0, 20));
     if (!name?.trim()) return;
 
     try {
@@ -330,13 +341,13 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
       });
       setEntities((prev) => [entity, ...prev]);
       setSelectedEntityId(entity.id);
-      window.alert(`Successfully saved "${entity.name}" to your Cast & Props Roster!`);
+      window.alert(`Saved "${entity.name}" to Cast & Props Roster!`);
     } catch (err) {
       setError(`Failed to save entity: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  // 7. Create New Custom Entity
+  // Create Custom Entity
   const handleCreateEntity = async () => {
     if (!newEntityName.trim()) return;
     try {
@@ -359,11 +370,10 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 8. Storyboard Handlers (Phase 4)
+  // Storyboard Handlers
   const handleCreateStoryboard = async () => {
-    const title = window.prompt('Storyboard Title:', 'Scene 1: Cyberpunk Alley Encounter');
+    const title = window.prompt('Storyboard Title:', 'Scene 1: Cyberpunk Encounter');
     if (!title?.trim()) return;
-
     try {
       const seq = await api<StoryboardSequence>('/api/forge/storyboards', {
         method: 'POST',
@@ -388,7 +398,6 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
           entityRefs: newShotEntityId ? [newShotEntityId] : [],
         }),
       });
-
       const updated = { ...activeStoryboard, shots: [...activeStoryboard.shots, shot] };
       setStoryboards((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
       setShowAddShotModal(false);
@@ -406,7 +415,6 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
       const updatedShot = await api<StoryboardShot>(`/api/forge/storyboards/${activeStoryboard.id}/shots/${shotId}/render`, {
         method: 'POST',
       });
-
       const updated = {
         ...activeStoryboard,
         shots: activeStoryboard.shots.map((s) => (s.id === shotId ? updatedShot : s)),
@@ -435,7 +443,6 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 9. Version Revert Handler
   const handleRevert = async (versionId: string) => {
     if (!selectedAsset) return;
     try {
@@ -451,13 +458,11 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 10. Gemma 12B Vision Review
   const triggerCreationReview = async () => {
     if (!selectedAsset || !activeVersion || reviewing) return;
     try {
       setReviewing(true);
       setError('');
-
       const imgRes = await fetch(activeVersion.outputUrl);
       const blob = await imgRes.blob();
       const reader = new FileReader();
@@ -488,34 +493,27 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
-  // 11. Canvas Mask Drawing Helpers
+  // Canvas Mask Helpers
   const startDrawing = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isBrushActive) return;
     setIsDrawing(true);
     draw(e);
   };
-
-  const stopDrawing = () => {
-    setIsDrawing(false);
-  };
-
+  const stopDrawing = () => setIsDrawing(false);
   const draw = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!isDrawing || !maskCanvasRef.current || !isBrushActive) return;
     const canvas = maskCanvasRef.current;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
-
     const rect = canvas.getBoundingClientRect();
     const x = (e.clientX - rect.left) * (canvas.width / rect.width);
     const y = (e.clientY - rect.top) * (canvas.height / rect.height);
-
     ctx.fillStyle = '#ffffff';
     ctx.beginPath();
     ctx.arc(x, y, brushSize / 2, 0, Math.PI * 2);
     ctx.fill();
     setHasMaskDrawn(true);
   };
-
   const clearMask = () => {
     if (!maskCanvasRef.current) return;
     const ctx = maskCanvasRef.current.getContext('2d');
@@ -525,229 +523,609 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   };
 
   return (
-    <div className="flex h-full flex-col bg-slate-950 text-slate-100">
-      {/* ─── Top Engine Status Bar ────────────────────────────────────────── */}
-      <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/80 px-6 py-2.5 backdrop-blur">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <Sparkles className="h-5 w-5 text-indigo-400" />
-            <h1 className="text-base font-semibold tracking-wide text-white">Forge Studio</h1>
+    <div className="forge-container">
+      {/* ─── Left Sidebar: Controls & Inputs ──────────────────────────────── */}
+      <div className="forge-sidebar">
+        <div className="forge-header">
+          <div>
+            <span className="eyebrow">Visual Production Suite</span>
+            <h2><Sparkles size={20} className="accent" /> Forge Studio</h2>
           </div>
+          <button
+            className="icon-button mini"
+            onClick={() => { void loadStatus(); void loadAssets(); void loadEntities(); void loadStoryboards(); }}
+            title="Refresh Services"
+          >
+            <RefreshCw size={14} />
+          </button>
+        </div>
 
-          <div className="flex items-center gap-4 text-xs">
-            {/* Comfy Status */}
-            <div className="flex items-center gap-1.5 rounded-md bg-slate-800/80 px-2.5 py-1">
-              <span className={`h-2 w-2 rounded-full ${status?.comfy?.available ? 'bg-emerald-400' : 'bg-rose-500'}`} />
-              <span className="font-medium text-slate-300">
-                ComfyUI: {status?.comfy?.devices?.[0]?.name || (status?.comfy?.available ? 'Online' : 'Offline')}
-              </span>
+        {/* Status Card */}
+        <div className="forge-status-card">
+          <div className="status-item">
+            <div className="status-label">
+              <span className={`status-dot ${status?.comfy.available ? 'online' : 'offline'}`} />
+              <strong>ComfyUI Engine</strong>
             </div>
-
-            {/* LM Studio Vision Status */}
-            <div className="flex items-center gap-1.5 rounded-md bg-slate-800/80 px-2.5 py-1">
-              <span className={`h-2 w-2 rounded-full ${status?.lmStudio?.isMultimodal ? 'bg-emerald-400' : status?.lmStudio?.available ? 'bg-amber-400' : 'bg-slate-500'}`} />
-              <span className="font-medium text-slate-300">
-                Gemma Vision: {status?.lmStudio?.isMultimodal ? 'Multimodal Ready' : status?.lmStudio?.available ? 'Text Only' : 'Offline'}
-              </span>
+            <span>{status?.comfy.available ? `${status.comfy.devices[0]?.name?.split(':')[1] || 'GPU Ready'}` : 'Offline (:8188)'}</span>
+          </div>
+          <div className="status-item">
+            <div className="status-label">
+              <span className={`status-dot ${status?.lmStudio.isMultimodal ? 'online' : (status?.lmStudio.available ? 'warning' : 'offline')}`} />
+              <strong>Gemma Vision QA</strong>
             </div>
+            <span>{status?.lmStudio.isMultimodal ? 'Vision Active' : status?.lmStudio.available ? 'Text Only' : 'Offline'}</span>
           </div>
         </div>
 
-        {/* Action Modes */}
-        <div className="flex items-center gap-2">
+        {/* Setup Banner */}
+        {setupStatus && setupStatus.missingCount > 0 && (
+          <div className="forge-setup-banner">
+            <div className="setup-header">
+              <HardDriveDownload size={16} className="accent" />
+              <strong>Recommended Models ({setupStatus.missingCount} available)</strong>
+            </div>
+            <div className="setup-list">
+              {setupStatus.items.filter((i) => !i.installed).slice(0, 2).map((dep) => (
+                <div key={dep.id} className="setup-row">
+                  <div className="setup-meta">
+                    <span>{dep.name}</span>
+                    <small>{dep.sizeBytes ? `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Custom Model'}</small>
+                  </div>
+                  <button
+                    className="mini primary"
+                    onClick={() => handleInstallDep(dep.id)}
+                    disabled={Boolean(installingDep)}
+                  >
+                    {installingDep === dep.id ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                    Install
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="forge-error-box" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>{error}</span>
+            <button onClick={() => setError('')} style={{ background: 'none', border: 'none', color: '#f87171', cursor: 'pointer' }}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
+        {/* Mode Tabs */}
+        <div className="forge-tabs" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
           <button
-            onClick={() => { setMode('create'); }}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-              mode === 'create' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-            }`}
+            type="button"
+            className={`tab-btn ${mode === 'create' ? 'active' : ''}`}
+            onClick={() => setMode('create')}
+            title="Create New Image (SDXL)"
           >
-            <Plus className="h-3.5 w-3.5" />
-            New Image
+            <Plus size={13} /> Create
           </button>
           <button
-            onClick={() => { setMode('revise'); }}
+            type="button"
+            className={`tab-btn ${mode === 'revise' ? 'active' : ''}`}
+            onClick={() => setMode('revise')}
             disabled={!selectedAsset}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-              mode === 'revise' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40'
-            }`}
+            title="Targeted Revision & Surgical Inpaint"
           >
-            <Wand2 className="h-3.5 w-3.5" />
-            Targeted Revise
+            <Wand2 size={13} /> Revise
           </button>
           <button
-            onClick={() => { setMode('animate'); }}
+            type="button"
+            className={`tab-btn ${mode === 'animate' ? 'active' : ''}`}
+            onClick={() => setMode('animate')}
             disabled={!selectedAsset}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-              mode === 'animate' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 disabled:opacity-40'
-            }`}
+            title="1-Click Image-to-Video Animation"
           >
-            <Film className="h-3.5 w-3.5" />
-            Animate (I2V)
+            <Film size={13} /> Animate
           </button>
           <button
-            onClick={() => { setMode('entities'); }}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-              mode === 'entities' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-            }`}
+            type="button"
+            className={`tab-btn ${mode === 'entities' ? 'active' : ''}`}
+            onClick={() => setMode('entities')}
+            title="Cast & Props Roster (IP-Adapter Lock)"
           >
-            <Users className="h-3.5 w-3.5" />
-            Cast & Props ({entities.length})
+            <Users size={13} /> Cast
           </button>
           <button
-            onClick={() => { setMode('storyboard'); }}
-            className={`flex items-center gap-1.5 rounded-md px-3 py-1 text-xs font-medium transition ${
-              mode === 'storyboard' ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-500/20' : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-            }`}
+            type="button"
+            className={`tab-btn ${mode === 'storyboard' ? 'active' : ''}`}
+            onClick={() => setMode('storyboard')}
+            title="Multi-Shot Storyboard Director"
           >
-            <Clapperboard className="h-3.5 w-3.5" />
-            Storyboard Director ({storyboards.length})
+            <Clapperboard size={13} /> Direct
           </button>
+        </div>
+
+        {/* ─── Mode Specific Forms ────────────────────────────────────────── */}
+        {mode === 'create' && (
+          <div className="forge-form">
+            <label>Prompt Description</label>
+            <textarea
+              rows={3}
+              placeholder="e.g. Cyberpunk mercenary standing on a rain-slicked rooftop in Neo-Tokyo, neon reflections, highly detailed..."
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              disabled={generating}
+            />
+
+            <label>Negative Prompt (Optional)</label>
+            <input
+              type="text"
+              placeholder="e.g. blurry, deformed, bad anatomy, text, watermark"
+              value={negativePrompt}
+              onChange={(e) => setNegativePrompt(e.target.value)}
+              disabled={generating}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                background: 'var(--bg)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                color: 'var(--text)',
+                fontSize: '11px',
+              }}
+            />
+
+            <label>Visual Style Preset</label>
+            <div className="preset-grid">
+              {STYLE_PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`preset-btn ${selectedStyle === p.id ? 'active' : ''}`}
+                  onClick={() => setSelectedStyle(p.id)}
+                >
+                  {p.name}
+                </button>
+              ))}
+            </div>
+
+            {entities.length > 0 && (
+              <div>
+                <label style={{ display: 'block', marginBottom: '6px' }}>Attach Character / Prop Lock (IP-Adapter)</label>
+                <select
+                  value={selectedEntityId}
+                  onChange={(e) => setSelectedEntityId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '8px 10px',
+                    background: 'var(--bg)',
+                    border: '1px solid var(--border)',
+                    borderRadius: '8px',
+                    color: 'var(--text)',
+                    fontSize: '11px',
+                  }}
+                >
+                  <option value="">None (Standard Generation)</option>
+                  {entities.map((ent) => (
+                    <option key={ent.id} value={ent.id}>
+                      {ent.name} ({ent.category}) {ent.referenceImages.length > 0 ? '✓' : ''}
+                    </option>
+                  ))}
+                </select>
+
+                {selectedEntityId && (
+                  <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ fontSize: '10px', color: 'var(--muted)' }}>Identity Lock: {entityWeight.toFixed(2)}</span>
+                    <input
+                      type="range"
+                      min="0.2"
+                      max="1.0"
+                      step="0.05"
+                      value={entityWeight}
+                      onChange={(e) => setEntityWeight(Number(e.target.value))}
+                      style={{ width: '120px' }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button
+              className="primary forge-btn"
+              onClick={handleGenerate}
+              disabled={!prompt.trim() || generating}
+            >
+              {generating ? <Loader2 size={15} className="spin" /> : <Sparkles size={15} />}
+              {generating ? 'Synthesizing Image...' : 'Generate New Image'}
+            </button>
+          </div>
+        )}
+
+        {mode === 'revise' && selectedAsset && (
+          <div className="forge-form">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Targeted Change Request</label>
+              <span style={{ fontSize: '10px', color: 'var(--cyan)', fontWeight: 600 }}>Active: {activeVersionId}</span>
+            </div>
+            <textarea
+              rows={2}
+              placeholder="e.g. Make his jacket red, remove the person in the background, change lighting to sunset..."
+              value={revisionPrompt}
+              onChange={(e) => setRevisionPrompt(e.target.value)}
+              disabled={revising}
+            />
+
+            <label>Edit Scope</label>
+            <div className="preset-grid">
+              <button
+                type="button"
+                className={`preset-btn ${editScope === 'localized' ? 'active' : ''}`}
+                onClick={() => { setEditScope('localized'); setDenoise(0.85); }}
+              >
+                Localized Mask Inpaint
+              </button>
+              <button
+                type="button"
+                className={`preset-btn ${editScope === 'structural' ? 'active' : ''}`}
+                onClick={() => { setEditScope('structural'); setDenoise(0.45); }}
+              >
+                Structural Img2Img
+              </button>
+            </div>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
+              <label style={{ margin: 0 }}>Denoise Strength: {denoise.toFixed(2)}</label>
+              <input
+                type="range"
+                min="0.10"
+                max="0.95"
+                step="0.05"
+                value={denoise}
+                onChange={(e) => setDenoise(Number(e.target.value))}
+                style={{ width: '120px' }}
+              />
+            </div>
+
+            <button
+              className="primary forge-btn"
+              onClick={handleRevise}
+              disabled={!revisionPrompt.trim() || revising}
+            >
+              {revising ? <Loader2 size={15} className="spin" /> : <Wand2 size={15} />}
+              {revising ? 'Applying Revision...' : 'Apply Revision (Non-Destructive)'}
+            </button>
+          </div>
+        )}
+
+        {mode === 'animate' && selectedAsset && (
+          <div className="forge-form">
+            <label>Camera & Motion Prompt</label>
+            <textarea
+              rows={2}
+              placeholder="e.g. cinematic camera slow pan right, wheels spinning smoothly, headlights illuminating road..."
+              value={animationPrompt}
+              onChange={(e) => setAnimationPrompt(e.target.value)}
+              disabled={animating}
+            />
+
+            <label>Video Generation Model</label>
+            <select
+              value={videoModel}
+              onChange={(e) => setVideoModel(e.target.value as any)}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                background: 'var(--bg)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                color: 'var(--text)',
+                fontSize: '11px',
+              }}
+            >
+              <option value="ltx-video">LTX-Video 2B Distilled (Fast 24 FPS, ~25s)</option>
+              <option value="wan2.1-1.3b">Wan 2.1 1.3B (Motion Quality, ~60s)</option>
+            </select>
+
+            <button
+              className="primary forge-btn"
+              onClick={handleAnimate}
+              disabled={animating}
+            >
+              {animating ? <Loader2 size={15} className="spin" /> : <Film size={15} />}
+              {animating ? 'Rendering Video Animation...' : 'Render Animation (I2V)'}
+            </button>
+          </div>
+        )}
+
+        {mode === 'entities' && (
+          <div className="forge-form">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Cast & Props Roster ({entities.length})</label>
+              <button
+                type="button"
+                className="mini primary"
+                onClick={() => setShowNewEntityModal(true)}
+              >
+                <Plus size={11} /> New Entity
+              </button>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '180px', overflowY: 'auto' }}>
+              {entities.map((ent) => (
+                <div
+                  key={ent.id}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    padding: '6px 8px',
+                    background: 'rgba(0,0,0,0.2)',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Users size={14} className="accent" />
+                    <div>
+                      <strong style={{ fontSize: '11px', display: 'block' }}>{ent.name}</strong>
+                      <small style={{ fontSize: '9px', color: 'var(--muted)' }}>{ent.category}</small>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="mini secondary"
+                    onClick={() => {
+                      setSelectedEntityId(selectedEntityId === ent.id ? '' : ent.id);
+                      setMode('create');
+                    }}
+                  >
+                    {selectedEntityId === ent.id ? 'Attached' : 'Use in Scene'}
+                  </button>
+                </div>
+              ))}
+              {entities.length === 0 && (
+                <small style={{ color: 'var(--muted)', textAlign: 'center', padding: '10px' }}>
+                  No saved characters yet. Click "+ New Entity" or "Save as Character" in the viewport.
+                </small>
+              )}
+            </div>
+          </div>
+        )}
+
+        {mode === 'storyboard' && (
+          <div className="forge-form">
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <label>Storyboard Sequences ({storyboards.length})</label>
+              <button type="button" className="mini primary" onClick={handleCreateStoryboard}>
+                <Plus size={11} /> New Scene
+              </button>
+            </div>
+            <select
+              value={activeStoryboardId}
+              onChange={(e) => setActiveStoryboardId(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '8px 10px',
+                background: 'var(--bg)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                color: 'var(--text)',
+                fontSize: '11px',
+              }}
+            >
+              {storyboards.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.title} ({s.shots.length} shots)
+                </option>
+              ))}
+            </select>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px' }}>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setShowAddShotModal(true)}
+              >
+                <Plus size={12} /> Add Shot
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={handleRenderSequence}
+                disabled={renderingSequence || !activeStoryboard || activeStoryboard.shots.length === 0}
+              >
+                {renderingSequence ? <Loader2 size={12} className="spin" /> : <Film size={12} />}
+                Render All
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ─── Asset Library List ─────────────────────────────────────────── */}
+        <div className="forge-library">
+          <div className="library-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+            <span>GENERATED ASSETS</span>
+            <span>{assets.length} items</span>
+          </div>
+          <div className="asset-list">
+            {assets.map((asset) => {
+              const activeVer = asset.versions.find((v) => v.versionId === asset.activeVersionId) || asset.versions[0];
+              const isSelected = selectedAsset?.id === asset.id;
+              const hasVideo = asset.versions.some((v) => v.operationType === 'animate');
+              return (
+                <div
+                  key={asset.id}
+                  className={`asset-card ${isSelected ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedAsset(asset);
+                    setActiveVersionId(asset.activeVersionId || asset.versions[0]?.versionId || 'v1');
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
+                    <div style={{ width: '32px', height: '32px', borderRadius: '4px', overflow: 'hidden', background: '#000', flexShrink: 0, position: 'relative' }}>
+                      <img src={activeVer?.outputUrl} alt={asset.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                      {hasVideo && (
+                        <div style={{ position: 'absolute', top: 1, right: 1, background: 'var(--blue)', borderRadius: '2px', padding: '1px' }}>
+                          <Film size={8} color="#fff" />
+                        </div>
+                      )}
+                    </div>
+                    <div className="asset-card-info">
+                      <strong>{asset.title}</strong>
+                      <small>{asset.versions.length} version(s) • {new Date(asset.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
+                    </div>
+                  </div>
+                  <div className="asset-card-actions">
+                    <button
+                      className="icon-button mini"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void api(`/api/forge/assets/${asset.id}`, { method: 'DELETE' });
+                        setAssets((prev) => prev.filter((a) => a.id !== asset.id));
+                        if (selectedAsset?.id === asset.id) setSelectedAsset(null);
+                      }}
+                      title="Delete Asset"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {assets.length === 0 && (
+              <small style={{ color: 'var(--muted)', textAlign: 'center', padding: '16px' }}>
+                No assets generated yet.<br />Enter a prompt above to create your first visual asset.
+              </small>
+            )}
+          </div>
         </div>
       </div>
 
-      {/* ─── 1-Click Dependency Setup Banner ─────────────────────────────── */}
-      {setupStatus && setupStatus.missingCount > 0 && (
-        <div className="flex items-center justify-between border-b border-amber-500/30 bg-amber-950/40 px-6 py-2 text-xs text-amber-200">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 text-amber-400" />
-            <span>
-              {setupStatus.missingCount} recommended model(s) available for full SDXL inpainting & video synthesis.
-            </span>
+      {/* ─── Right Viewport Area: 2D Canvas / Video / Storyboard Timeline ─── */}
+      <div className="forge-viewport-area">
+        {/* Top Viewport Toolbar */}
+        <div className="viewport-toolbar">
+          <div className="viewport-title">
+            <strong>{mode === 'storyboard' ? activeStoryboard?.title || 'Storyboard Sequence' : selectedAsset?.title || 'Visual Canvas'}</strong>
+            {activeVersion && (
+              <span className="pill" style={{ color: 'var(--cyan)' }}>
+                {activeVersion.versionId} • {activeVersion.operationType}
+              </span>
+            )}
           </div>
-          <div className="flex items-center gap-2">
-            {setupStatus.items.filter((i) => !i.installed).slice(0, 2).map((dep) => (
-              <button
-                key={dep.id}
-                onClick={() => handleInstallDep(dep.id)}
-                disabled={Boolean(installingDep)}
-                className="rounded bg-amber-600/80 px-2.5 py-0.5 text-xs font-medium text-white hover:bg-amber-600 disabled:opacity-50"
-              >
-                {installingDep === dep.id ? 'Installing...' : `Install ${dep.name.split(' ')[0]}`}
-              </button>
-            ))}
+
+          <div className="viewport-controls">
+            {mode !== 'storyboard' && !isVideoVersion && (
+              <>
+                <button
+                  className={`mini-btn ${isBrushActive ? 'primary' : 'secondary'}`}
+                  onClick={() => setIsBrushActive(!isBrushActive)}
+                  title="Paint Inpaint Mask"
+                >
+                  <Paintbrush size={12} />
+                  Mask Brush
+                </button>
+                {isBrushActive && (
+                  <>
+                    <input
+                      type="range"
+                      min="10"
+                      max="100"
+                      value={brushSize}
+                      onChange={(e) => setBrushSize(Number(e.target.value))}
+                      style={{ width: '70px' }}
+                      title={`Brush size: ${brushSize}px`}
+                    />
+                    <button className="icon-button mini" onClick={clearMask} title="Clear Mask">
+                      <Undo size={12} />
+                    </button>
+                  </>
+                )}
+                <button
+                  className="mini-btn secondary"
+                  onClick={handleSaveAsEntity}
+                  disabled={!selectedAsset}
+                  title="Save this character to Cast Roster"
+                >
+                  <BookmarkPlus size={12} />
+                  Save as Character
+                </button>
+              </>
+            )}
+            {mode !== 'storyboard' && (
+              <>
+                <button className="icon-button mini" onClick={() => setZoom((z) => Math.min(3, z + 0.2))} title="Zoom In">
+                  <ZoomIn size={14} />
+                </button>
+                <button className="icon-button mini" onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))} title="Zoom Out">
+                  <ZoomOut size={14} />
+                </button>
+                <button className="icon-button mini" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }} title="Reset View">
+                  <RotateCcw size={14} />
+                </button>
+              </>
+            )}
           </div>
         </div>
-      )}
 
-      {/* ─── Error Notification ───────────────────────────────────────────── */}
-      {error && (
-        <div className="flex items-center justify-between bg-rose-950/80 px-6 py-2 text-xs text-rose-200 border-b border-rose-800">
-          <span>{error}</span>
-          <button onClick={() => setError('')} className="text-rose-400 hover:text-white">✕</button>
-        </div>
-      )}
-
-      {/* ─── Storyboard Director Mode Layout (Phase 4) ─────────────────────── */}
-      {mode === 'storyboard' ? (
-        <div className="flex flex-1 flex-col overflow-hidden bg-slate-950">
-          {/* Storyboard Header */}
-          <div className="flex items-center justify-between border-b border-slate-800 bg-slate-900/60 px-6 py-3">
-            <div className="flex items-center gap-3">
-              <select
-                value={activeStoryboardId}
-                onChange={(e) => setActiveStoryboardId(e.target.value)}
-                className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-1.5 text-xs font-semibold text-white focus:border-indigo-500 focus:outline-none"
-              >
-                {storyboards.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.title} ({s.shots.length} shots)
-                  </option>
-                ))}
-              </select>
-              <button
-                onClick={handleCreateStoryboard}
-                className="flex items-center gap-1 rounded bg-slate-800 px-2.5 py-1 text-xs font-medium text-slate-300 hover:bg-slate-700"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                New Sequence
-              </button>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setShowAddShotModal(true)}
-                className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-700"
-              >
-                <Plus className="h-3.5 w-3.5 text-indigo-400" />
-                Add Shot
-              </button>
-              <button
-                onClick={handleRenderSequence}
-                disabled={renderingSequence || !activeStoryboard || activeStoryboard.shots.length === 0}
-                className="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
-              >
-                {renderingSequence ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Film className="h-3.5 w-3.5" />}
-                {renderingSequence ? 'Rendering Sequence...' : 'Render Entire Sequence'}
-              </button>
-            </div>
-          </div>
-
-          {/* Shot Timeline / Strip */}
-          <div className="flex-1 overflow-x-auto p-6">
-            <div className="flex items-start gap-4 min-w-max">
+        {/* Central Viewport Content */}
+        {mode === 'storyboard' ? (
+          /* ─── Storyboard Visual Strip & Continuity Lineage ─────────────── */
+          <div style={{ flex: 1, padding: '24px', overflowX: 'auto', overflowY: 'hidden', display: 'flex', alignItems: 'center' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '16px', minWidth: 'max-content' }}>
               {activeStoryboard?.shots.map((shot, idx) => {
                 const isRenderingThis = renderingShotId === shot.id;
                 const nextShot = activeStoryboard.shots[idx + 1];
                 return (
                   <React.Fragment key={shot.id}>
-                    <div className="w-80 flex-shrink-0 rounded-xl border border-slate-800 bg-slate-900/70 p-4 space-y-3 shadow-xl">
-                      {/* Shot Header */}
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-indigo-600/30 text-[11px] font-bold text-indigo-400 border border-indigo-500/40">
-                            {shot.orderIndex}
-                          </span>
-                          <span className="text-xs font-semibold text-slate-200">{shot.title}</span>
-                        </div>
-                        <span className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase ${
-                          shot.status === 'completed' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : shot.status === 'failed' ? 'bg-rose-950 text-rose-300' : 'bg-slate-800 text-slate-400'
-                        }`}>
-                          {shot.status.replace('_', ' ')}
-                        </span>
+                    <div
+                      style={{
+                        width: '280px',
+                        background: 'var(--card)',
+                        border: '1px solid var(--border)',
+                        borderRadius: '12px',
+                        padding: '14px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '10px',
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.3)',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <strong style={{ fontSize: '12px' }}>Shot {shot.orderIndex}: {shot.title}</strong>
+                        <span className="pill" style={{ fontSize: '9px' }}>{shot.status}</span>
                       </div>
 
-                      {/* Video / Still Preview */}
-                      <div className="relative h-44 w-full rounded-lg overflow-hidden border border-slate-800 bg-slate-950 flex items-center justify-center">
+                      <div style={{ height: '150px', background: '#000', borderRadius: '8px', overflow: 'hidden', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                         {shot.videoUrl ? (
-                          <video src={shot.videoUrl} autoPlay loop muted playsInline className="h-full w-full object-cover" />
+                          <video src={shot.videoUrl} autoPlay loop muted playsInline style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         ) : shot.sourceStillUrl ? (
-                          <img src={shot.sourceStillUrl} alt={shot.title} className="h-full w-full object-cover" />
+                          <img src={shot.sourceStillUrl} alt={shot.title} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                         ) : (
-                          <div className="flex flex-col items-center gap-1 text-slate-600">
-                            <Camera className="h-8 w-8 stroke-[1.5]" />
-                            <span className="text-[11px]">Not Rendered</span>
+                          <div style={{ color: 'var(--muted)', fontSize: '11px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px' }}>
+                            <Camera size={24} />
+                            Not Rendered
                           </div>
                         )}
                       </div>
 
-                      {/* Prompt & Tags */}
-                      <p className="text-xs text-slate-300 line-clamp-2 leading-relaxed">{shot.prompt}</p>
+                      <p style={{ fontSize: '11px', color: 'var(--muted)', margin: 0, lineHeight: 1.4 }}>{shot.prompt}</p>
 
-                      <div className="flex items-center gap-2 text-[10px]">
-                        <span className="rounded bg-slate-800 px-2 py-0.5 text-slate-400 font-medium">
-                          {shot.shotType}
-                        </span>
-                        <span className="rounded bg-slate-800 px-2 py-0.5 text-indigo-300 font-medium">
-                          {shot.cameraMovement.replace('_', ' ')}
-                        </span>
+                      <div style={{ display: 'flex', gap: '6px', fontSize: '9px' }}>
+                        <span className="pill">{shot.shotType}</span>
+                        <span className="pill" style={{ color: 'var(--cyan)' }}>{shot.cameraMovement}</span>
                       </div>
 
-                      {/* Shot Actions */}
                       <button
+                        className="primary mini-btn"
                         onClick={() => handleRenderShot(shot.id)}
                         disabled={Boolean(renderingShotId) || renderingSequence}
-                        className="w-full flex items-center justify-center gap-1.5 rounded-lg bg-slate-800 py-1.5 text-xs font-medium text-slate-200 hover:bg-indigo-600 hover:text-white transition disabled:opacity-50"
+                        style={{ width: '100%', justifyContent: 'center', padding: '6px' }}
                       >
-                        {isRenderingThis ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Film className="h-3 w-3" />}
+                        {isRenderingThis ? <Loader2 size={12} className="spin" /> : <Film size={12} />}
                         {isRenderingThis ? 'Rendering...' : 'Render Shot'}
                       </button>
                     </div>
 
-                    {/* Visual Continuity Handoff Arrow */}
                     {nextShot && (
-                      <div className="flex flex-col items-center justify-center pt-24 text-indigo-400/60">
-                        <ArrowRight className="h-5 w-5" />
-                        <span className="text-[9px] font-mono text-slate-500 mt-1">Handoff</span>
+                      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: 'var(--blue)' }}>
+                        <ArrowRight size={20} />
+                        <span style={{ fontSize: '9px', color: 'var(--muted)', marginTop: '2px' }}>Handoff</span>
                       </div>
                     )}
                   </React.Fragment>
@@ -755,826 +1133,295 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
               })}
 
               {activeStoryboard?.shots.length === 0 && (
-                <div className="py-20 text-center text-xs text-slate-500 w-full">
-                  No shots added to this sequence yet.<br />Click "+ Add Shot" above to create your storyboard.
+                <div style={{ color: 'var(--muted)', padding: '40px', textAlign: 'center', width: '100%' }}>
+                  No shots in this sequence yet. Click "+ Add Shot" in the sidebar to start directing.
                 </div>
               )}
             </div>
           </div>
-        </div>
-      ) : (
-        /* ─── Standard Workspace Layout (Create, Revise, Animate, Cast) ───── */
-        <div className="flex flex-1 overflow-hidden">
-          {/* ─── Left Sidebar: Asset Library ─────────────────────────────────── */}
-          <div className="flex w-64 flex-col border-r border-slate-800 bg-slate-900/50">
-            <div className="flex items-center justify-between border-b border-slate-800 px-4 py-2.5">
-              <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Library</span>
-              <span className="text-xs text-slate-500">{assets.length} assets</span>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
-              {assets.map((asset) => {
-                const activeVer = asset.versions.find((v) => v.versionId === asset.activeVersionId) || asset.versions[0];
-                const isSelected = selectedAsset?.id === asset.id;
-                const hasVideo = asset.versions.some((v) => v.operationType === 'animate');
-                return (
-                  <div
-                    key={asset.id}
-                    onClick={() => {
-                      setSelectedAsset(asset);
-                      setActiveVersionId(asset.activeVersionId || asset.versions[0]?.versionId || 'v1');
+        ) : (
+          /* ─── 2D Canvas / Video Player Viewport ────────────────────────── */
+          <div
+            style={{
+              flex: 1,
+              position: 'relative',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              overflow: 'hidden',
+              cursor: isBrushActive ? 'crosshair' : isPanning ? 'grabbing' : 'grab',
+            }}
+            onMouseDown={(e) => {
+              if (!isBrushActive && e.button === 0) {
+                setIsPanning(true);
+                setStartPan({ x: e.clientX - pan.x, y: e.clientY - pan.y });
+              }
+            }}
+            onMouseMove={(e) => {
+              if (isPanning) {
+                setPan({ x: e.clientX - startPan.x, y: e.clientY - startPan.y });
+              }
+            }}
+            onMouseUp={() => setIsPanning(false)}
+            onMouseLeave={() => setIsPanning(false)}
+          >
+            {activeVersion ? (
+              <div
+                style={{
+                  position: 'relative',
+                  transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
+                  transition: isPanning ? 'none' : 'transform 0.1s ease-out',
+                  borderRadius: '8px',
+                  overflow: 'hidden',
+                  boxShadow: '0 16px 48px rgba(0,0,0,0.5)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                {isVideoVersion && activeVersion.outputUrl.endsWith('.mp4') ? (
+                  <video
+                    src={activeVersion.outputUrl}
+                    controls
+                    autoPlay
+                    loop
+                    playsInline
+                    style={{ maxHeight: '600px', maxWidth: '600px', objectFit: 'contain' }}
+                  />
+                ) : (
+                  <img
+                    src={activeVersion.outputUrl}
+                    alt={activeVersion.changeDescription}
+                    style={{ maxHeight: '600px', maxWidth: '600px', objectFit: 'contain', display: 'block', userSelect: 'none' }}
+                    onLoad={(e) => {
+                      const img = e.currentTarget;
+                      if (maskCanvasRef.current) {
+                        maskCanvasRef.current.width = img.naturalWidth || 1024;
+                        maskCanvasRef.current.height = img.naturalHeight || 1024;
+                      }
                     }}
-                    className={`group flex cursor-pointer items-center gap-3 rounded-lg border p-2 transition ${
-                      isSelected
-                        ? 'border-indigo-500/80 bg-indigo-950/30'
-                        : 'border-slate-800/80 bg-slate-900/60 hover:border-slate-700 hover:bg-slate-800/50'
-                    }`}
-                  >
-                    <div className="relative h-12 w-12 rounded overflow-hidden border border-slate-700/50 bg-slate-950">
-                      <img
-                        src={activeVer?.outputUrl}
-                        alt={asset.title}
-                        className="h-full w-full object-cover"
-                      />
-                      {hasVideo && (
-                        <div className="absolute top-0.5 right-0.5 rounded bg-indigo-600/90 p-0.5 shadow">
-                          <Film className="h-2.5 w-2.5 text-white" />
-                        </div>
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="truncate text-xs font-medium text-slate-200">{asset.title}</p>
-                      <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-400">
-                        <span className="rounded bg-slate-800 px-1 py-0.2">{asset.versions.length} ver</span>
-                        <span>{new Date(asset.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void api(`/api/forge/assets/${asset.id}`, { method: 'DELETE' });
-                        setAssets((prev) => prev.filter((a) => a.id !== asset.id));
-                        if (selectedAsset?.id === asset.id) setSelectedAsset(null);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 text-slate-500 hover:text-rose-400 transition"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                );
-              })}
-              {assets.length === 0 && (
-                <div className="py-12 text-center text-xs text-slate-500">
-                  No assets generated yet.<br />Enter a prompt to create your first visual asset.
-                </div>
-              )}
-            </div>
-          </div>
+                  />
+                )}
 
-          {/* ─── Center Viewport: 2D Canvas & Video Player ─────────────────── */}
-          <div className="relative flex flex-1 flex-col items-center justify-center bg-slate-950 overflow-hidden">
-            {/* Top Canvas Toolbar */}
-            <div className="absolute top-4 left-4 z-20 flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/90 p-1.5 shadow-lg backdrop-blur">
-              <button
-                onClick={() => setZoom((z) => Math.min(3, z + 0.2))}
-                className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-                title="Zoom In"
-              >
-                <ZoomIn className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))}
-                className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-                title="Zoom Out"
-              >
-                <ZoomOut className="h-4 w-4" />
-              </button>
-              <button
-                onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}
-                className="rounded p-1.5 text-slate-400 hover:bg-slate-800 hover:text-white"
-                title="Reset View"
-              >
-                <RotateCcw className="h-4 w-4" />
-              </button>
-              {!isVideoVersion && (
-                <>
-                  <div className="h-4 w-px bg-slate-800" />
-                  <button
-                    onClick={() => setIsBrushActive(!isBrushActive)}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-xs font-medium transition ${
-                      isBrushActive ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800 hover:text-white'
-                    }`}
-                    title="Paint Inpaint Mask"
-                  >
-                    <Paintbrush className="h-3.5 w-3.5" />
-                    <span>Mask Brush</span>
-                  </button>
-                  {isBrushActive && (
-                    <>
-                      <input
-                        type="range"
-                        min="10"
-                        max="100"
-                        value={brushSize}
-                        onChange={(e) => setBrushSize(Number(e.target.value))}
-                        className="w-16 h-1 bg-slate-700 rounded cursor-pointer"
-                        title={`Brush size: ${brushSize}px`}
-                      />
-                      <button
-                        onClick={clearMask}
-                        className="rounded p-1 text-slate-400 hover:text-rose-400"
-                        title="Clear Inpaint Mask"
-                      >
-                        <Undo className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  )}
-                  <div className="h-4 w-px bg-slate-800" />
-                  <button
-                    onClick={handleSaveAsEntity}
-                    disabled={!selectedAsset}
-                    className="flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-amber-300 hover:bg-amber-950/40 hover:text-amber-200 transition"
-                    title="Save this version into Cast & Props Reference Roster"
-                  >
-                    <BookmarkPlus className="h-3.5 w-3.5" />
-                    <span>Save as Character</span>
-                  </button>
-                </>
-              )}
-            </div>
-
-            {/* Main Display Area (Image or Video) */}
-            <div
-              className="relative flex items-center justify-center w-full h-full cursor-grab active:cursor-grabbing select-none"
-              style={{
-                transform: `scale(${zoom}) translate(${pan.x}px, ${pan.y}px)`,
-                transition: isPanning ? 'none' : 'transform 0.1s ease-out',
-              }}
-              onMouseDown={(e) => {
-                if (!isBrushActive && e.button === 0) {
-                  setIsPanning(true);
-                  setStartPan({ x: e.clientX - pan.x, y: e.clientY - pan.y });
-                }
-              }}
-              onMouseMove={(e) => {
-                if (isPanning) {
-                  setPan({ x: e.clientX - startPan.x, y: e.clientY - startPan.y });
-                }
-              }}
-              onMouseUp={() => setIsPanning(false)}
-              onMouseLeave={() => setIsPanning(false)}
-            >
-              {activeVersion ? (
-                <div className="relative rounded-lg shadow-2xl overflow-hidden border border-slate-800">
-                  {isVideoVersion && activeVersion.outputUrl.endsWith('.mp4') ? (
-                    <video
-                      src={activeVersion.outputUrl}
-                      controls
-                      autoPlay
-                      loop
-                      playsInline
-                      className="max-h-[600px] max-w-[600px] object-contain rounded"
-                    />
-                  ) : (
-                    <img
-                      src={activeVersion.outputUrl}
-                      alt={activeVersion.changeDescription}
-                      className="max-h-[600px] max-w-[600px] object-contain pointer-events-none rounded"
-                      onLoad={(e) => {
-                        const img = e.currentTarget;
-                        if (maskCanvasRef.current) {
-                          maskCanvasRef.current.width = img.naturalWidth || 1024;
-                          maskCanvasRef.current.height = img.naturalHeight || 1024;
-                        }
-                      }}
-                    />
-                  )}
-
-                  {/* Inpainting Mask Paint Canvas Overlay (Only for still images) */}
-                  {!isVideoVersion && (
-                    <canvas
-                      ref={maskCanvasRef}
-                      className={`absolute inset-0 h-full w-full opacity-60 ${isBrushActive ? 'cursor-crosshair z-10' : 'pointer-events-none'}`}
-                      onMouseDown={startDrawing}
-                      onMouseMove={draw}
-                      onMouseUp={stopDrawing}
-                      onMouseLeave={stopDrawing}
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className="flex flex-col items-center gap-3 text-slate-600">
-                  <Sparkles className="h-12 w-12 stroke-[1.5]" />
-                  <p className="text-sm font-medium">Select an asset from the library or create a new one.</p>
-                </div>
-              )}
-            </div>
-
-            {/* Bottom Active Version Pill */}
-            {activeVersion && (
-              <div className="absolute bottom-4 z-20 flex items-center gap-3 rounded-full border border-slate-800 bg-slate-900/90 px-4 py-1.5 text-xs text-slate-300 backdrop-blur shadow-lg">
-                <span className="font-semibold text-indigo-400">{activeVersion.versionId}</span>
-                <span>•</span>
-                <span className="truncate max-w-xs">{activeVersion.changeDescription}</span>
-                {activeVersion.fps && (
-                  <>
-                    <span>•</span>
-                    <span className="text-indigo-300 font-medium">{activeVersion.fps} FPS</span>
-                  </>
+                {/* Inpainting Mask Canvas Overlay */}
+                {!isVideoVersion && (
+                  <canvas
+                    ref={maskCanvasRef}
+                    style={{
+                      position: 'absolute',
+                      top: 0,
+                      left: 0,
+                      width: '100%',
+                      height: '100%',
+                      opacity: 0.6,
+                      pointerEvents: isBrushActive ? 'auto' : 'none',
+                    }}
+                    onMouseDown={startDrawing}
+                    onMouseMove={draw}
+                    onMouseUp={stopDrawing}
+                    onMouseLeave={stopDrawing}
+                  />
                 )}
               </div>
-            )}
-          </div>
-
-          {/* ─── Right Sidebar: Controls, Revisions, Animations & Cast ───────── */}
-          <div className="flex w-96 flex-col border-l border-slate-800 bg-slate-900/60 overflow-y-auto">
-            {mode === 'entities' ? (
-              /* ─── Phase 3: Cast & Props Roster ──────────────────────────────── */
-              <div className="p-4 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-sm font-semibold text-slate-200">Cast & Props Roster</h2>
-                    <p className="text-xs text-slate-400 mt-0.5">Recurring characters & items locked across scenes.</p>
-                  </div>
-                  <button
-                    onClick={() => setShowNewEntityModal(true)}
-                    className="flex items-center gap-1 rounded bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white shadow hover:bg-indigo-500 transition"
-                  >
-                    <UserPlus className="h-3.5 w-3.5" />
-                    New
-                  </button>
-                </div>
-
-                {/* Entity List */}
-                <div className="space-y-3">
-                  {entities.map((ent) => (
-                    <div
-                      key={ent.id}
-                      className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-2"
-                    >
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <div className="h-8 w-8 rounded-full overflow-hidden border border-slate-700 bg-slate-900">
-                            {ent.referenceImages[0] ? (
-                              <img src={ent.referenceImages[0].imageUrl} alt={ent.name} className="h-full w-full object-cover" />
-                            ) : (
-                              <Users className="h-4 w-4 m-2 text-slate-500" />
-                            )}
-                          </div>
-                          <div>
-                            <h3 className="text-xs font-semibold text-slate-200">{ent.name}</h3>
-                            <span className="rounded bg-indigo-950 px-1.5 py-0.2 text-[10px] font-medium text-indigo-300 border border-indigo-800/50">
-                              {ent.category}
-                            </span>
-                          </div>
-                        </div>
-                        <button
-                          onClick={() => {
-                            setSelectedEntityId(selectedEntityId === ent.id ? '' : ent.id);
-                            setMode('create');
-                          }}
-                          className={`rounded px-2 py-0.5 text-xs font-medium transition ${
-                            selectedEntityId === ent.id
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                          }`}
-                        >
-                          {selectedEntityId === ent.id ? 'Attached' : 'Use in Scene'}
-                        </button>
-                      </div>
-
-                      {ent.description && <p className="text-[11px] text-slate-400">{ent.description}</p>}
-                      {ent.triggerWord && (
-                        <div className="text-[10px] text-slate-500">
-                          Trigger: <code className="text-indigo-300">{ent.triggerWord}</code>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                  {entities.length === 0 && (
-                    <div className="py-8 text-center text-xs text-slate-500">
-                      No characters or props saved yet.<br />Generate a character and click "Save as Character" above.
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : mode === 'create' ? (
-              /* ─── Create Form ──────────────────────────────────────────────── */
-              <div className="p-4 space-y-4">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-200">Create New Asset</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">Generate a high-fidelity image from a text prompt.</p>
-                </div>
-
-                {/* Character Reference Attachment */}
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">
-                    Attach Character / Prop (IP-Adapter)
-                  </label>
-                  <select
-                    value={selectedEntityId}
-                    onChange={(e) => setSelectedEntityId(e.target.value)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
-                  >
-                    <option value="">None (Standard Generation)</option>
-                    {entities.map((ent) => (
-                      <option key={ent.id} value={ent.id}>
-                        {ent.name} ({ent.category}) {ent.referenceImages.length > 0 ? '✓' : '(No Image)'}
-                      </option>
-                    ))}
-                  </select>
-
-                  {selectedEntityId && (
-                    <div className="mt-2 space-y-1">
-                      <div className="flex justify-between text-[11px] text-slate-400">
-                        <span>Identity Lock Weight</span>
-                        <span className="text-indigo-400">{entityWeight.toFixed(2)}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0.2"
-                        max="1.0"
-                        step="0.05"
-                        value={entityWeight}
-                        onChange={(e) => setEntityWeight(Number(e.target.value))}
-                        className="w-full h-1 bg-slate-800 rounded cursor-pointer accent-indigo-500"
-                      />
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Prompt</label>
-                  <textarea
-                    value={prompt}
-                    onChange={(e) => setPrompt(e.target.value)}
-                    placeholder="e.g. A vintage red sports car parked in front of a modern neon diner at night"
-                    className="w-full h-24 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-100 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Negative Prompt</label>
-                  <input
-                    type="text"
-                    value={negativePrompt}
-                    onChange={(e) => setNegativePrompt(e.target.value)}
-                    placeholder="e.g. blurry, distorted, bad anatomy, text"
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Style Preset</label>
-                  <select
-                    value={stylePreset}
-                    onChange={(e) => setStylePreset(e.target.value)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
-                  >
-                    <option value="photorealistic">Photorealistic PBR (1024×1024)</option>
-                    <option value="cinematic">Cinematic 35mm Film</option>
-                    <option value="digital_art">Digital Concept Art</option>
-                    <option value="anime">Anime / Stylized Illustration</option>
-                  </select>
-                </div>
-
-                <button
-                  onClick={handleGenerate}
-                  disabled={!prompt.trim() || generating}
-                  className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
-                >
-                  {generating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {generating ? 'Generating Asset...' : selectedEntityId ? 'Generate with Character Lock' : 'Generate Asset'}
-                </button>
-              </div>
-            ) : mode === 'animate' ? (
-              /* ─── Phase 2: Animate (Image-to-Video) Form ───────────────────────── */
-              <div className="p-4 space-y-4">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-200">Animate Version (I2V)</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Generate continuous temporal motion from the selected image still.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Camera & Motion Prompt</label>
-                  <textarea
-                    value={animationPrompt}
-                    onChange={(e) => setAnimationPrompt(e.target.value)}
-                    placeholder="e.g. cinematic camera slow pan right, wheels spinning smoothly, headlights illuminating road"
-                    className="w-full h-20 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-100 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Video Model</label>
-                  <select
-                    value={videoModel}
-                    onChange={(e) => setVideoModel(e.target.value as any)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
-                  >
-                    <option value="ltx-video">LTX-Video 2B Distilled (Primary Fast I2V, ~25s)</option>
-                    <option value="wan2.1-1.3b">Wan 2.1 1.3B (Motion Quality Tier, ~60s)</option>
-                  </select>
-                </div>
-
-                <button
-                  onClick={handleAnimate}
-                  disabled={animating || !selectedAsset}
-                  className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
-                >
-                  {animating ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Film className="h-4 w-4" />}
-                  {animating ? 'Rendering Video Animation...' : 'Render Animation (I2V)'}
-                </button>
-
-                {/* Version History */}
-                <div className="border-t border-slate-800 pt-4">
-                  <div className="flex items-center justify-between mb-2.5">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Version History</span>
-                    <span className="text-xs text-slate-500">{selectedAsset?.versions.length} versions</span>
-                  </div>
-
-                  <div className="space-y-2">
-                    {selectedAsset?.versions.map((ver) => {
-                      const isActive = ver.versionId === activeVersionId;
-                      const isAnim = ver.operationType === 'animate';
-                      return (
-                        <div
-                          key={ver.versionId}
-                          onClick={() => setActiveVersionId(ver.versionId)}
-                          className={`flex cursor-pointer items-center justify-between rounded-lg border p-2.5 transition ${
-                            isActive
-                              ? 'border-indigo-500/80 bg-indigo-950/30'
-                              : 'border-slate-800/80 bg-slate-950 hover:border-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            {isAnim ? (
-                              <Film className={`h-3.5 w-3.5 ${isActive ? 'text-indigo-400' : 'text-slate-500'}`} />
-                            ) : (
-                              <span className={`text-xs font-bold ${isActive ? 'text-indigo-400' : 'text-slate-500'}`}>
-                                {ver.versionId}
-                              </span>
-                            )}
-                            <div className="min-w-0">
-                              <p className="truncate text-xs font-medium text-slate-200">{ver.changeDescription}</p>
-                              <span className="text-[10px] text-slate-500">{ver.operationType}</span>
-                            </div>
-                          </div>
-
-                          {!isActive && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleRevert(ver.versionId);
-                              }}
-                              className="text-[11px] font-medium text-slate-400 hover:text-indigo-400 px-1.5 py-0.5 rounded bg-slate-800/80"
-                            >
-                              Revert
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
             ) : (
-              /* ─── Revise Form (Targeted Edit & Lineage) ───────────────────────── */
-              <div className="p-4 space-y-5">
-                <div>
-                  <h2 className="text-sm font-semibold text-slate-200">Targeted Revision</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Preserve everything; change only what was requested.
-                  </p>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Revision Request</label>
-                  <input
-                    type="text"
-                    value={revisionPrompt}
-                    onChange={(e) => setRevisionPrompt(e.target.value)}
-                    placeholder="e.g. Make the car red, or add a sword to his hand"
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder-slate-600 focus:border-indigo-500 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-medium text-slate-300 mb-1.5">Edit Scope</label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      onClick={() => { setEditScope('localized'); setDenoise(0.85); }}
-                      className={`rounded-lg border p-2 text-left transition ${
-                        editScope === 'localized'
-                          ? 'border-indigo-500 bg-indigo-950/40 text-white'
-                          : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="text-xs font-semibold">Localized Inpaint</div>
-                      <div className="text-[10px] text-slate-500 mt-0.5">Mask-bounded surgical edit</div>
-                    </button>
-                    <button
-                      onClick={() => { setEditScope('structural'); setDenoise(0.45); }}
-                      className={`rounded-lg border p-2 text-left transition ${
-                        editScope === 'structural'
-                          ? 'border-indigo-500 bg-indigo-950/40 text-white'
-                          : 'border-slate-800 bg-slate-950 text-slate-400 hover:border-slate-700'
-                      }`}
-                    >
-                      <div className="text-xs font-semibold">Structural Img2Img</div>
-                      <div className="text-[10px] text-slate-500 mt-0.5">Locked composition & pose</div>
-                    </button>
-                  </div>
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-xs font-medium text-slate-300 mb-1">
-                    <span>Denoising Strength</span>
-                    <span className="text-indigo-400">{denoise.toFixed(2)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.10"
-                    max="0.95"
-                    step="0.05"
-                    value={denoise}
-                    onChange={(e) => setDenoise(Number(e.target.value))}
-                    className="w-full h-1.5 bg-slate-800 rounded cursor-pointer accent-indigo-500"
-                  />
-                </div>
-
-                <button
-                  onClick={handleRevise}
-                  disabled={!revisionPrompt.trim() || revising}
-                  className="w-full flex items-center justify-center gap-2 rounded-lg bg-indigo-600 py-2.5 text-xs font-semibold text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-500 disabled:opacity-50 transition"
-                >
-                  {revising ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Wand2 className="h-4 w-4" />}
-                  {revising ? 'Applying Targeted Revision...' : 'Apply Revision (Non-Destructive)'}
-                </button>
-
-                {/* ─── Version History DAG ────────────────────────────────────── */}
-                <div className="border-t border-slate-800 pt-4">
-                  <div className="flex items-center justify-between mb-2.5">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Version History</span>
-                    <span className="text-xs text-slate-500">{selectedAsset?.versions.length} versions</span>
-                  </div>
-
-                  <div className="space-y-2">
-                    {selectedAsset?.versions.map((ver) => {
-                      const isActive = ver.versionId === activeVersionId;
-                      const isAnim = ver.operationType === 'animate';
-                      return (
-                        <div
-                          key={ver.versionId}
-                          onClick={() => setActiveVersionId(ver.versionId)}
-                          className={`flex cursor-pointer items-center justify-between rounded-lg border p-2.5 transition ${
-                            isActive
-                              ? 'border-indigo-500/80 bg-indigo-950/30'
-                              : 'border-slate-800/80 bg-slate-950 hover:border-slate-700'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            {isAnim ? (
-                              <Film className={`h-3.5 w-3.5 ${isActive ? 'text-indigo-400' : 'text-slate-500'}`} />
-                            ) : (
-                              <span className={`text-xs font-bold ${isActive ? 'text-indigo-400' : 'text-slate-500'}`}>
-                                {ver.versionId}
-                              </span>
-                            )}
-                            <div className="min-w-0">
-                              <p className="truncate text-xs font-medium text-slate-200">{ver.changeDescription}</p>
-                              <span className="text-[10px] text-slate-500">{ver.operationType}</span>
-                            </div>
-                          </div>
-
-                          {!isActive && (
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                void handleRevert(ver.versionId);
-                              }}
-                              className="text-[11px] font-medium text-slate-400 hover:text-indigo-400 px-1.5 py-0.5 rounded bg-slate-800/80"
-                            >
-                              Revert
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* ─── Gemma 12B Vision Quality & Drift Review ───────────────── */}
-                <div className="border-t border-slate-800 pt-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Gemma Vision QA</span>
-                    <button
-                      onClick={triggerCreationReview}
-                      disabled={reviewing}
-                      className="text-[11px] font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1 disabled:opacity-50"
-                    >
-                      {reviewing ? <RefreshCw className="h-3 w-3 animate-spin" /> : <Eye className="h-3 w-3" />}
-                      Inspect Version
-                    </button>
-                  </div>
-
-                  {activeVersion?.review ? (
-                    <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 space-y-2.5 text-xs">
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-slate-300">Overall Score</span>
-                        <span className={`rounded px-2 py-0.5 font-bold ${
-                          activeVersion.review.score >= 70 ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-amber-950 text-amber-300 border border-amber-800'
-                        }`}>
-                          {activeVersion.review.score}/100 ({activeVersion.review.verdict.toUpperCase()})
-                        </span>
-                      </div>
-
-                      <p className="text-slate-400 text-xs leading-relaxed">{activeVersion.review.critique}</p>
-
-                      {activeVersion.review.revisionMetrics && (
-                        <div className="space-y-1.5 pt-2 border-t border-slate-900">
-                          <div className="flex justify-between text-[11px] text-slate-400">
-                            <span>Change Success</span>
-                            <span className="text-slate-200">{activeVersion.review.revisionMetrics.requestedChangeSuccess}%</span>
-                          </div>
-                          <div className="flex justify-between text-[11px] text-slate-400">
-                            <span>Identity Lock</span>
-                            <span className="text-slate-200">{activeVersion.review.revisionMetrics.identityPreservation}%</span>
-                          </div>
-                          <div className="flex justify-between text-[11px] text-slate-400">
-                            <span>Composition Lock</span>
-                            <span className="text-slate-200">{activeVersion.review.revisionMetrics.compositionPreservation}%</span>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-slate-800 p-3 text-center text-xs text-slate-500">
-                      No visual review performed on this version yet.<br />Click Inspect Version to run Gemma QA.
-                    </div>
-                  )}
-                </div>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '8px', color: 'var(--muted)' }}>
+                <Sparkles size={36} className="accent" />
+                <strong style={{ color: 'var(--text)' }}>Forge Canvas Ready</strong>
+                <span style={{ fontSize: '12px' }}>Enter a prompt on the left to generate your first image.</span>
               </div>
             )}
           </div>
-        </div>
-      )}
+        )}
 
-      {/* ─── Modal: Add Shot to Storyboard (Phase 4) ───────────────────────── */}
-      {showAddShotModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-2xl space-y-4">
-            <h2 className="text-sm font-semibold text-white">Add Shot to Sequence</h2>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Visual Prompt</label>
-              <textarea
-                value={newShotPrompt}
-                onChange={(e) => setNewShotPrompt(e.target.value)}
-                placeholder="e.g. Captain Marcus looks up at the towering neon skybridge as flying vehicles streak past"
-                className="w-full h-20 rounded-lg border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
-              />
+        {/* ─── Bottom Viewport Overlay: Version DAG & Quality Review ───────── */}
+        {selectedAsset && mode !== 'storyboard' && (
+          <div className="viewport-overlay-panel">
+            {/* Version DAG Pill Strip */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px',
+                background: 'rgba(15, 23, 42, 0.85)',
+                backdropFilter: 'blur(12px)',
+                border: '1px solid var(--border)',
+                borderRadius: '8px',
+                padding: '6px 12px',
+                overflowX: 'auto',
+              }}
+            >
+              <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Version Lineage:</span>
+              {selectedAsset.versions.map((ver) => {
+                const isActive = ver.versionId === activeVersionId;
+                return (
+                  <button
+                    key={ver.versionId}
+                    type="button"
+                    className={`mode-btn ${isActive ? 'active' : ''}`}
+                    onClick={() => setActiveVersionId(ver.versionId)}
+                    style={{ fontSize: '11px', padding: '3px 8px', borderRadius: '4px' }}
+                  >
+                    {ver.operationType === 'animate' ? <Film size={10} /> : ver.versionId}
+                    <span>{ver.changeDescription.slice(0, 18)}</span>
+                  </button>
+                );
+              })}
+              {activeVersionId !== 'v1' && (
+                <button
+                  type="button"
+                  className="mini-btn secondary"
+                  onClick={() => handleRevert(activeVersionId)}
+                  style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: '10px' }}
+                >
+                  <RotateCcw size={10} /> Revert to this
+                </button>
+              )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            {/* Gemma Vision Review Bar */}
+            <div className="vision-critique-card">
+              <div className="critique-header">
+                <Eye size={14} className="accent" />
+                <strong>Gemma Vision QA Review</strong>
+                <button
+                  type="button"
+                  className="mini-btn secondary"
+                  onClick={triggerCreationReview}
+                  disabled={reviewing}
+                  style={{ marginLeft: 'auto', padding: '2px 8px', fontSize: '10px' }}
+                >
+                  {reviewing ? <Loader2 size={10} className="spin" /> : <Eye size={10} />}
+                  Inspect Active Version
+                </button>
+                {activeVersion?.review && (
+                  <span className={`review-tag ${activeVersion.review.verdict === 'pass' ? 'pass' : 'warning'}`} style={{ marginLeft: '8px' }}>
+                    {activeVersion.review.score}/100 {activeVersion.review.verdict.toUpperCase()}
+                  </span>
+                )}
+              </div>
+              {activeVersion?.review ? (
+                <p style={{ margin: '4px 0 0', fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                  {activeVersion.review.critique}
+                </p>
+              ) : (
+                <small style={{ color: 'var(--muted)' }}>
+                  Click "Inspect Active Version" above to trigger an independent multimodal quality critique.
+                </small>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ─── Modal: Add Shot (Phase 4) ────────────────────────────────────── */}
+      {showAddShotModal && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+          <div style={{ width: '100%', maxWidth: '420px', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ margin: 0, fontSize: '14px' }}>Add Shot to Storyboard</h3>
+            <div>
+              <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Visual Prompt</label>
+              <textarea
+                rows={2}
+                placeholder="e.g. Captain Marcus looks up at the skybridge as vehicles streak past..."
+                value={newShotPrompt}
+                onChange={(e) => setNewShotPrompt(e.target.value)}
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
+              />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Shot Type</label>
+                <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Shot Type</label>
                 <select
                   value={newShotType}
                   onChange={(e) => setNewShotType(e.target.value as any)}
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                  style={{ width: '100%', padding: '6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
                 >
-                  <option value="establishing">Establishing Shot</option>
-                  <option value="wide">Wide Shot</option>
-                  <option value="medium">Medium Shot</option>
-                  <option value="close_up">Close-Up Shot</option>
-                  <option value="over_the_shoulder">Over the Shoulder</option>
+                  <option value="establishing">Establishing</option>
+                  <option value="wide">Wide</option>
+                  <option value="medium">Medium</option>
+                  <option value="close_up">Close-Up</option>
                   <option value="action">Action / Tracking</option>
                 </select>
               </div>
-
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">Camera Movement</label>
+                <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Camera Movement</label>
                 <select
                   value={newShotCamera}
                   onChange={(e) => setNewShotCamera(e.target.value as any)}
-                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                  style={{ width: '100%', padding: '6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
                 >
-                  <option value="static">Static Locked Off</option>
+                  <option value="static">Static Locked</option>
                   <option value="pan_right">Pan Right</option>
                   <option value="pan_left">Pan Left</option>
-                  <option value="tilt_up">Tilt Up</option>
-                  <option value="tilt_down">Tilt Down</option>
-                  <option value="zoom_in">Slow Zoom In</option>
-                  <option value="zoom_out">Slow Zoom Out</option>
+                  <option value="zoom_in">Zoom In</option>
                   <option value="tracking">Forward Tracking</option>
                 </select>
               </div>
             </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Character / Prop Lock (Optional)</label>
-              <select
-                value={newShotEntityId}
-                onChange={(e) => setNewShotEntityId(e.target.value)}
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
-              >
-                <option value="">None (Generic Subject)</option>
-                {entities.map((ent) => (
-                  <option key={ent.id} value={ent.id}>
-                    {ent.name} ({ent.category})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowAddShotModal(false)}
-                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleAddShot}
-                disabled={!newShotPrompt.trim()}
-                className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white shadow hover:bg-indigo-500 disabled:opacity-50"
-              >
-                Add to Sequence
-              </button>
+            {entities.length > 0 && (
+              <div>
+                <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Attach Character / Prop</label>
+                <select
+                  value={newShotEntityId}
+                  onChange={(e) => setNewShotEntityId(e.target.value)}
+                  style={{ width: '100%', padding: '6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
+                >
+                  <option value="">None (Generic)</option>
+                  {entities.map((ent) => (
+                    <option key={ent.id} value={ent.id}>{ent.name} ({ent.category})</option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '6px' }}>
+              <button className="secondary" onClick={() => setShowAddShotModal(false)}>Cancel</button>
+              <button className="primary" onClick={handleAddShot} disabled={!newShotPrompt.trim()}>Add Shot</button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ─── Modal: New Custom Entity (Phase 3) ─────────────────────────────── */}
+      {/* ─── Modal: New Cast Entity (Phase 3) ──────────────────────────────── */}
       {showNewEntityModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-          <div className="w-full max-w-md rounded-xl border border-slate-800 bg-slate-900 p-5 shadow-2xl space-y-4">
-            <h2 className="text-sm font-semibold text-white">Add Entity to Cast & Props Roster</h2>
-
+        <div style={{ position: 'fixed', inset: 0, zIndex: 50, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px' }}>
+          <div style={{ width: '100%', maxWidth: '420px', background: 'var(--panel)', border: '1px solid var(--border)', borderRadius: '12px', padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <h3 style={{ margin: 0, fontSize: '14px' }}>Add Character or Prop to Roster</h3>
             <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Name</label>
+              <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Name</label>
               <input
                 type="text"
+                placeholder="e.g. Captain Marcus"
                 value={newEntityName}
                 onChange={(e) => setNewEntityName(e.target.value)}
-                placeholder="e.g. Captain Marcus, Cyberpunk Hovercar"
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
+                style={{ width: '100%', padding: '8px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
               />
             </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Category</label>
-              <select
-                value={newEntityCategory}
-                onChange={(e) => setNewEntityCategory(e.target.value as any)}
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
-              >
-                <option value="character">Character</option>
-                <option value="vehicle">Vehicle</option>
-                <option value="prop">Prop</option>
-                <option value="environment">Environment / Location</option>
-              </select>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+              <div>
+                <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Category</label>
+                <select
+                  value={newEntityCategory}
+                  onChange={(e) => setNewEntityCategory(e.target.value as any)}
+                  style={{ width: '100%', padding: '6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
+                >
+                  <option value="character">Character</option>
+                  <option value="vehicle">Vehicle</option>
+                  <option value="prop">Prop</option>
+                  <option value="environment">Environment</option>
+                </select>
+              </div>
+              <div>
+                <label style={{ fontSize: '10px', fontWeight: 700, color: 'var(--muted)', textTransform: 'uppercase' }}>Trigger Word</label>
+                <input
+                  type="text"
+                  placeholder="e.g. cmarcus_man"
+                  value={newEntityTrigger}
+                  onChange={(e) => setNewEntityTrigger(e.target.value)}
+                  style={{ width: '100%', padding: '6px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '11px' }}
+                />
+              </div>
             </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Trigger Word (Optional)</label>
-              <input
-                type="text"
-                value={newEntityTrigger}
-                onChange={(e) => setNewEntityTrigger(e.target.value)}
-                placeholder="e.g. cmarcus_man, neon_hovercar_99"
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">Description</label>
-              <textarea
-                value={newEntityDesc}
-                onChange={(e) => setNewEntityDesc(e.target.value)}
-                placeholder="Distinct visual traits, clothing, hair color, markings..."
-                className="w-full h-20 rounded-lg border border-slate-800 bg-slate-950 p-2.5 text-xs text-white focus:border-indigo-500 focus:outline-none"
-              />
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowNewEntityModal(false)}
-                className="rounded-lg bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleCreateEntity}
-                disabled={!newEntityName.trim()}
-                className="rounded-lg bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white shadow hover:bg-indigo-500 disabled:opacity-50"
-              >
-                Save Entity
-              </button>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '6px' }}>
+              <button className="secondary" onClick={() => setShowNewEntityModal(false)}>Cancel</button>
+              <button className="primary" onClick={handleCreateEntity} disabled={!newEntityName.trim()}>Save Entity</button>
             </div>
           </div>
         </div>
