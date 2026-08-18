@@ -618,7 +618,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
   const assetDir = join(FORGE_ASSETS_DIR, asset.id);
 
   const scope: EditScope = options.scope || (options.maskBase64 ? 'localized' : 'structural');
-  const denoise = typeof options.denoise === 'number' ? options.denoise : (scope === 'localized' ? 0.85 : 0.45);
+  const denoise = typeof options.denoise === 'number' ? options.denoise : (scope === 'localized' ? 0.85 : 0.70);
 
   let resultBuffer: Buffer;
   const nextVerPath = join(assetDir, `${nextVerId}.png`);
@@ -642,7 +642,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
       // (FLUX checkpoints don't bundle VAE, so SDXL inpaint graph fails)
       const fluxResult = await executeFluxImg2Img({
         sourceImage: sourceFilename,
-        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        prompt: `${options.revisionPrompt}, ${parentVer.params.prompt}`,
         negativePrompt: parentVer.params.negativePrompt,
         unetName: activeCkpt,
         clip1: 't5xxl_fp8_e4m3fn.safetensors',
@@ -660,7 +660,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
       const inpaint = await executeSdxlInpaint({
         sourceImage: sourceFilename,
         maskImage: maskFilename,
-        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        prompt: `${options.revisionPrompt}, ${parentVer.params.prompt}`,
         negativePrompt: parentVer.params.negativePrompt,
         ckptName: activeCkpt,
         seed: parentVer.params.seed,
@@ -682,7 +682,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
       // (FLUX checkpoints don't bundle VAE, so SDXL img2img graph fails)
       const fluxResult = await executeFluxImg2Img({
         sourceImage: sourceFilename,
-        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        prompt: `${options.revisionPrompt}, ${parentVer.params.prompt}`,
         negativePrompt: parentVer.params.negativePrompt,
         unetName: activeCkpt,
         clip1: 't5xxl_fp8_e4m3fn.safetensors',
@@ -699,7 +699,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     } else {
       const img2img = await executeSdxlImg2Img({
         sourceImage: sourceFilename,
-        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        prompt: `${options.revisionPrompt}, ${parentVer.params.prompt}`,
         negativePrompt: parentVer.params.negativePrompt,
         ckptName: activeCkpt,
         seed: parentVer.params.seed,
@@ -719,7 +719,7 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     changeDescription: options.revisionPrompt,
     params: {
       ...parentVer.params,
-      prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+      prompt: `${options.revisionPrompt}, ${parentVer.params.prompt}`,
       denoise,
       sourceImagePath: parentVer.outputPath,
     },

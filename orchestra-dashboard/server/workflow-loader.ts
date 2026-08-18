@@ -523,7 +523,7 @@ export function buildFluxImg2ImgWorkflow(params: FluxImg2ImgParams): Record<stri
     if (params.steps) workflow['8'].inputs.steps = params.steps;
     if (params.samplerName) workflow['8'].inputs.sampler_name = params.samplerName;
     if (params.scheduler) workflow['8'].inputs.scheduler = params.scheduler;
-    workflow['8'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.45;
+    workflow['8'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.70;
   }
 
   return workflow;
