@@ -473,3 +473,58 @@ export function buildFluxTxt2ImgWorkflow(params: FluxTxt2ImgParams): Record<stri
   return workflow;
 }
 
+export interface FluxImg2ImgParams {
+  sourceImage: string;
+  prompt: string;
+  negativePrompt?: string;
+  unetName?: string;
+  clip1?: string;
+  clip2?: string;
+  vaeName?: string;
+  steps?: number;
+  guidance?: number;
+  samplerName?: string;
+  scheduler?: string;
+  seed?: number;
+  denoise?: number;
+}
+
+export function buildFluxImg2ImgWorkflow(params: FluxImg2ImgParams): Record<string, any> {
+  const workflow = loadWorkflowJson('flux-img2img.json');
+
+  if (workflow['1']?.inputs && params.unetName) {
+    if ('ckpt_name' in workflow['1'].inputs) {
+      workflow['1'].inputs.ckpt_name = params.unetName;
+    } else {
+      workflow['1'].inputs.unet_name = params.unetName;
+    }
+  }
+  if (workflow['2']?.inputs) {
+    if (params.clip1) workflow['2'].inputs.clip_name1 = params.clip1;
+    if (params.clip2) workflow['2'].inputs.clip_name2 = params.clip2;
+  }
+  if (workflow['3']?.inputs && params.vaeName) {
+    workflow['3'].inputs.vae_name = params.vaeName;
+  }
+  if (workflow['4']?.inputs && typeof params.guidance === 'number') {
+    workflow['4'].inputs.guidance = params.guidance;
+  }
+  if (workflow['5']?.inputs) {
+    workflow['5'].inputs.text = params.prompt.trim();
+  }
+  if (workflow['6']?.inputs && params.negativePrompt) {
+    workflow['6'].inputs.text = params.negativePrompt.trim();
+  }
+  if (workflow['7']?.inputs) {
+    workflow['7'].inputs.image = params.sourceImage;
+  }
+  if (workflow['8']?.inputs) {
+    workflow['8'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['8'].inputs.steps = params.steps;
+    if (params.samplerName) workflow['8'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['8'].inputs.scheduler = params.scheduler;
+    workflow['8'].inputs.denoise = typeof params.denoise === 'number' ? params.denoise : 0.45;
+  }
+
+  return workflow;
+}

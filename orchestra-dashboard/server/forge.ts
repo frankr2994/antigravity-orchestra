@@ -9,6 +9,7 @@ import {
   executeSdxlInpaint,
   executeSdxlIpAdapter,
   executeFluxTxt2Img,
+  executeFluxImg2Img,
   executeLtxImg2Vid,
   executeWanImg2Vid,
   findComfyInstallation,
@@ -634,17 +635,39 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     writeFileSync(join(installation.inputDir, maskFilename), maskBuffer);
 
     const activeCkpt = parentVer.params.checkpoint || resolveActiveImageCheckpoint().ckptName;
+    const isFlux = /flux/i.test(activeCkpt);
 
-    const inpaint = await executeSdxlInpaint({
-      sourceImage: sourceFilename,
-      maskImage: maskFilename,
-      prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
-      negativePrompt: parentVer.params.negativePrompt,
-      ckptName: activeCkpt,
-      seed: parentVer.params.seed,
-      denoise,
-    });
-    resultBuffer = inpaint.buffer;
+    if (isFlux) {
+      // FLUX inpainting: use FLUX img2img with high denoise as fallback
+      // (FLUX checkpoints don't bundle VAE, so SDXL inpaint graph fails)
+      const fluxResult = await executeFluxImg2Img({
+        sourceImage: sourceFilename,
+        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        negativePrompt: parentVer.params.negativePrompt,
+        unetName: activeCkpt,
+        clip1: 't5xxl_fp8_e4m3fn.safetensors',
+        clip2: 'clip_l.safetensors',
+        vaeName: 'ae.safetensors',
+        guidance: /schnell/i.test(activeCkpt) ? 1.0 : 3.5,
+        steps: /schnell/i.test(activeCkpt) ? 4 : 20,
+        samplerName: 'euler',
+        scheduler: 'simple',
+        seed: parentVer.params.seed,
+        denoise,
+      });
+      resultBuffer = fluxResult.buffer;
+    } else {
+      const inpaint = await executeSdxlInpaint({
+        sourceImage: sourceFilename,
+        maskImage: maskFilename,
+        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        negativePrompt: parentVer.params.negativePrompt,
+        ckptName: activeCkpt,
+        seed: parentVer.params.seed,
+        denoise,
+      });
+      resultBuffer = inpaint.buffer;
+    }
   } else {
     // Structural img2img revision
     await stageGpuForStep('img2img');
@@ -652,16 +675,38 @@ export async function runForgeRevision(options: ForgeRevisionOptions): Promise<F
     copyFileSync(parentVer.outputPath, join(installation.inputDir, sourceFilename));
 
     const activeCkpt = parentVer.params.checkpoint || resolveActiveImageCheckpoint().ckptName;
+    const isFlux = /flux/i.test(activeCkpt);
 
-    const img2img = await executeSdxlImg2Img({
-      sourceImage: sourceFilename,
-      prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
-      negativePrompt: parentVer.params.negativePrompt,
-      ckptName: activeCkpt,
-      seed: parentVer.params.seed,
-      denoise,
-    });
-    resultBuffer = img2img.buffer;
+    if (isFlux) {
+      // FLUX img2img: separate DualCLIPLoader + VAELoader
+      // (FLUX checkpoints don't bundle VAE, so SDXL img2img graph fails)
+      const fluxResult = await executeFluxImg2Img({
+        sourceImage: sourceFilename,
+        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        negativePrompt: parentVer.params.negativePrompt,
+        unetName: activeCkpt,
+        clip1: 't5xxl_fp8_e4m3fn.safetensors',
+        clip2: 'clip_l.safetensors',
+        vaeName: 'ae.safetensors',
+        guidance: /schnell/i.test(activeCkpt) ? 1.0 : 3.5,
+        steps: /schnell/i.test(activeCkpt) ? 4 : 20,
+        samplerName: 'euler',
+        scheduler: 'simple',
+        seed: parentVer.params.seed,
+        denoise,
+      });
+      resultBuffer = fluxResult.buffer;
+    } else {
+      const img2img = await executeSdxlImg2Img({
+        sourceImage: sourceFilename,
+        prompt: `${parentVer.params.prompt}, ${options.revisionPrompt}`,
+        negativePrompt: parentVer.params.negativePrompt,
+        ckptName: activeCkpt,
+        seed: parentVer.params.seed,
+        denoise,
+      });
+      resultBuffer = img2img.buffer;
+    }
   }
 
   writeFileSync(nextVerPath, resultBuffer);
