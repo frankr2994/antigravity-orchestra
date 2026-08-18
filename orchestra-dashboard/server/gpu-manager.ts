@@ -1,3 +1,4 @@
+import { unloadLmStudioModel } from './agents.js';
 import { getComfyUrl } from './comfy.js';
 
 export interface GpuMemoryInfo {
@@ -68,7 +69,14 @@ export async function stageGpuForStep(
   endpoint = getComfyUrl()
 ): Promise<void> {
   if (targetStep !== currentStage) {
-    await freeComfyMemory(endpoint);
+    if (targetStep === 'vision_review' || targetStep === 'vision') {
+      // Free ComfyUI models from VRAM so LM Studio has full headroom for Gemma Vision
+      await freeComfyMemory(endpoint);
+    } else if (targetStep !== 'idle') {
+      // Generative task: unload LM Studio first to prevent VRAM over-commit thrashing
+      await unloadLmStudioModel().catch(() => {});
+      await freeComfyMemory(endpoint);
+    }
     currentStage = targetStep;
   }
 }
