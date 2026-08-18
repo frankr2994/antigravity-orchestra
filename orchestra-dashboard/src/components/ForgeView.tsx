@@ -228,6 +228,72 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
     }
   };
 
+  // Automatic Gemma Vision Review Helper
+  const runAutoReview = async (asset: ForgeAsset, versionId: string) => {
+    const version = asset.versions.find((v) => v.versionId === versionId);
+    if (!version) return;
+    try {
+      setReviewing(true);
+      const imgRes = await fetch(version.outputUrl);
+      const blob = await imgRes.blob();
+      const reader = new FileReader();
+      const b64Promise = new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve(String(reader.result).replace(/^data:image\/\w+;base64,/, ''));
+        reader.readAsDataURL(blob);
+      });
+      const imageBase64 = await b64Promise;
+
+      let review: VisualReview;
+      if (version.parentVersionId && version.changeDescription) {
+        const parentVersion = asset.versions.find((v) => v.versionId === version.parentVersionId);
+        if (parentVersion) {
+          const parentRes = await fetch(parentVersion.outputUrl);
+          const parentBlob = await parentRes.blob();
+          const parentReader = new FileReader();
+          const parentB64 = await new Promise<string>((resolve) => {
+            parentReader.onloadend = () => resolve(String(parentReader.result).replace(/^data:image\/\w+;base64,/, ''));
+            parentReader.readAsDataURL(parentBlob);
+          });
+          review = await api<VisualReview>('/api/forge/review/revision', {
+            method: 'POST',
+            body: JSON.stringify({
+              requestedChange: version.changeDescription,
+              originalImageBase64: parentB64,
+              revisedImageBase64: imageBase64,
+            }),
+          });
+        } else {
+          review = await api<VisualReview>('/api/forge/review/creation', {
+            method: 'POST',
+            body: JSON.stringify({
+              prompt: version.params.prompt,
+              imageBase64,
+            }),
+          });
+        }
+      } else {
+        review = await api<VisualReview>('/api/forge/review/creation', {
+          method: 'POST',
+          body: JSON.stringify({
+            prompt: version.params.prompt,
+            imageBase64,
+          }),
+        });
+      }
+
+      const updated: ForgeAsset = {
+        ...asset,
+        versions: asset.versions.map((v) => (v.versionId === versionId ? { ...v, review } : v)),
+      };
+      setSelectedAsset(updated);
+      setAssets((prev) => prev.map((a) => (a.id === updated.id ? updated : a)));
+    } catch (err) {
+      console.warn('Auto-review completed with warning:', err);
+    } finally {
+      setReviewing(false);
+    }
+  };
+
   // Generation Handler
   const handleGenerate = async () => {
     if (!prompt.trim() || generating) return;
@@ -252,6 +318,8 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
       setActiveVersionId('v1');
       setMode('revise');
       setPrompt('');
+      // Trigger automatic Gemma Vision QA review right after generation
+      runAutoReview(asset, 'v1');
     } catch (err) {
       setError(`Generation failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -288,6 +356,8 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
       setActiveVersionId(updatedAsset.activeVersionId);
       setRevisionPrompt('');
       clearMask();
+      // Trigger automatic Gemma Vision QA review right after surgical revision
+      runAutoReview(updatedAsset, updatedAsset.activeVersionId);
     } catch (err) {
       setError(`Revision failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
