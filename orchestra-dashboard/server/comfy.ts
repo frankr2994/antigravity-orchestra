@@ -10,6 +10,7 @@ import {
   buildLtxImg2VidWorkflow,
   buildWanTxt2VidWorkflow,
   buildWanImg2VidWorkflow,
+  buildFluxTxt2ImgWorkflow,
   type ConceptGenParams,
   type SdxlTxt2ImgParams,
   type SdxlImg2ImgParams,
@@ -18,6 +19,7 @@ import {
   type LtxImg2VidParams,
   type WanTxt2VidParams,
   type WanImg2VidParams,
+  type FluxTxt2ImgParams,
 } from './workflow-loader.js';
 import { sanitizeAndExportGlb, type MeshQAStats } from './mesh-qa.js';
 
@@ -523,6 +525,36 @@ export async function executeSdxlIpAdapter(
 
   if (!existsSync(localPath)) {
     throw new Error(`IP-Adapter output image not found at expected path: ${localPath}`);
+  }
+
+  const buffer = readFileSync(localPath);
+  return { filename, localPath, buffer };
+}
+
+export async function executeFluxTxt2Img(
+  params: FluxTxt2ImgParams,
+  endpoint = getComfyUrl()
+): Promise<{ filename: string; localPath: string; buffer: Buffer }> {
+  const installation = findComfyInstallation();
+  if (!installation) {
+    throw new Error('ComfyUI installation directory could not be located on this system.');
+  }
+
+  const workflow = buildFluxTxt2ImgWorkflow(params);
+  const { promptId } = await submitComfyPrompt(workflow, endpoint);
+  const history = await pollComfyHistory(promptId, 300000, endpoint);
+
+  const images = history.outputs?.['10']?.images;
+  if (!images || !images.length) {
+    throw new Error('FLUX text-to-image generation completed without producing image output.');
+  }
+
+  const filename = images[0].filename as string;
+  const subfolder = images[0].subfolder || '';
+  const localPath = join(installation.outputDir, subfolder, filename);
+
+  if (!existsSync(localPath)) {
+    throw new Error(`FLUX output image not found at expected path: ${localPath}`);
   }
 
   const buffer = readFileSync(localPath);

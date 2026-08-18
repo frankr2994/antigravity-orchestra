@@ -157,6 +157,84 @@ const AVAILABLE_MODELS: ModelChoice[] = [
   },
 ];
 
+const FLUX_COMPANIONS = [
+  {
+    id: 't5xxl_fp8_e4m3fn.safetensors',
+    depId: 'flux-t5xxl-fp8',
+    name: 'FLUX T5-XXL Text Encoder (FP8)',
+    targetDir: 'models/clip/',
+    size: '4.9 GB',
+    badge: 'Required for FLUX',
+    description: 'LLM-grade language understanding model for natural language prompt interpretation.',
+  },
+  {
+    id: 'clip_l.safetensors',
+    depId: 'flux-clip-l',
+    name: 'FLUX CLIP-L Text Encoder',
+    targetDir: 'models/clip/',
+    size: '246 MB',
+    badge: 'Required for FLUX',
+    description: 'Secondary text encoder for multimodal token alignment and aesthetic guidance.',
+  },
+  {
+    id: 'ae.safetensors',
+    depId: 'flux-vae',
+    name: 'FLUX Official Autoencoder (VAE)',
+    targetDir: 'models/vae/',
+    size: '335 MB',
+    badge: 'Required for FLUX',
+    description: 'Autoencoder neural decoder that converts FLUX latent representations into crisp 1024px PNG images.',
+  },
+];
+
+const TOOL_COMPANIONS = [
+  {
+    id: 'inpaint_v26.fooocus.patch',
+    depId: 'fooocus-inpaint-patch',
+    name: 'Fooocus Inpaint Conditioning Patch (SDXL)',
+    targetDir: 'models/inpaint/',
+    size: '640 MB',
+    badge: 'Surgical Inpainting',
+    description: 'Allows seamless localized masking and inpaint repairs on any SDXL model.',
+  },
+  {
+    id: 'ip-adapter-plus_sdxl_vit-h.safetensors',
+    depId: 'sdxl-ipadapter',
+    name: 'SDXL IP-Adapter Plus',
+    targetDir: 'models/ipadapter/',
+    size: '853 MB',
+    badge: 'Cast & Identity Lock',
+    description: 'Injects reference character/prop images directly into generation for visual identity locking.',
+  },
+  {
+    id: 'clip_vision_vit_h.safetensors',
+    depId: 'clip-vision-vit-h',
+    name: 'CLIP Vision Encoder (ViT-H)',
+    targetDir: 'models/clip_vision/',
+    size: '2.5 GB',
+    badge: 'Visual Embeddings',
+    description: 'Neural vision encoder used by IP-Adapter to compute high-dimensional visual reference embeddings.',
+  },
+  {
+    id: 'sdxl_vae.safetensors',
+    depId: 'sdxl-vae',
+    name: 'SDXL Official VAE',
+    targetDir: 'models/vae/',
+    size: '335 MB',
+    badge: 'SDXL Latent VAE',
+    description: 'Official stability VAE for clean, artifact-free SDXL latent decoding.',
+  },
+  {
+    id: 'u2net.onnx',
+    depId: 'rembg-model',
+    name: 'rembg Segmentation Weights (u2net.onnx)',
+    targetDir: 'models/background_removal/',
+    size: '176 MB',
+    badge: '3D Background Removal',
+    description: 'Neural salient object segmenter for isolating 3D concept silhouettes in Forge 3D.',
+  },
+];
+
 const STYLE_PRESETS = [
   { id: 'photorealistic', name: 'Photorealistic PBR', promptSuffix: ', highly detailed photorealistic 8k, professional photography, 50mm f/1.8, cinematic lighting' },
   { id: 'cinematic', name: 'Cinematic 35mm', promptSuffix: ', cinematic movie still, 35mm film grain, anamorphic lens flare, moody atmosphere, masterpiece' },
@@ -203,6 +281,7 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
   const [selectedStyle, setSelectedStyle] = useState('photorealistic');
   const [selectedModel, setSelectedModel] = useState<string>('RealVisXL_V5.0.safetensors');
   const [showModelManager, setShowModelManager] = useState(false);
+  const [modelModalTab, setModelModalTab] = useState<'checkpoints' | 'flux_companions' | 'tools'>('checkpoints');
   const [generating, setGenerating] = useState(false);
 
   // Revision Inputs
@@ -741,27 +820,40 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
         {/* Setup Banner */}
         {setupStatus && setupStatus.missingCount > 0 && (
           <div className="forge-setup-banner">
-            <div className="setup-header">
-              <HardDriveDownload size={16} className="accent" />
-              <strong>Recommended Models ({setupStatus.missingCount} available)</strong>
+            <div className="setup-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <HardDriveDownload size={15} className="accent" />
+                <strong>Model & Dependency Center</strong>
+              </div>
+              <button
+                type="button"
+                className="mini text-btn"
+                onClick={() => setShowModelManager(true)}
+                style={{ fontSize: '11px', color: 'var(--accent)', cursor: 'pointer', background: 'none', border: 'none', padding: 0 }}
+              >
+                View All ({setupStatus.missingCount})
+              </button>
             </div>
             <div className="setup-list">
-              {setupStatus.items.filter((i) => !i.installed).slice(0, 2).map((dep) => (
-                <div key={dep.id} className="setup-row">
-                  <div className="setup-meta">
-                    <span>{dep.name}</span>
-                    <small>{dep.sizeBytes ? `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Custom Model'}</small>
+              {setupStatus.items
+                .filter((i) => !i.installed)
+                .slice(0, 3)
+                .map((dep) => (
+                  <div key={dep.id} className="setup-row">
+                    <div className="setup-meta">
+                      <span>{dep.name}</span>
+                      <small>{dep.sizeBytes ? `${(dep.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Tool / Package'}</small>
+                    </div>
+                    <button
+                      className="mini primary"
+                      onClick={() => handleInstallDep(dep.id)}
+                      disabled={Boolean(installingDep)}
+                    >
+                      {installingDep === dep.id ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                      Install
+                    </button>
                   </div>
-                  <button
-                    className="mini primary"
-                    onClick={() => handleInstallDep(dep.id)}
-                    disabled={Boolean(installingDep)}
-                  >
-                    {installingDep === dep.id ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
-                    Install
-                  </button>
-                </div>
-              ))}
+                ))}
             </div>
           </div>
         )}
@@ -1695,78 +1787,230 @@ export const ForgeView: React.FC<ForgeViewProps> = ({ api }) => {
               </button>
             </div>
 
+            {/* Modal Category Tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', background: 'var(--bg)', padding: '0 20px' }}>
+              <button
+                type="button"
+                className={`tab-btn ${modelModalTab === 'checkpoints' ? 'active' : ''}`}
+                onClick={() => setModelModalTab('checkpoints')}
+                style={{ borderRadius: 0, borderBottom: modelModalTab === 'checkpoints' ? '2px solid var(--accent)' : 'none', padding: '10px 16px', fontSize: '12px' }}
+              >
+                🌟 Diffusion Checkpoints
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${modelModalTab === 'flux_companions' ? 'active' : ''}`}
+                onClick={() => setModelModalTab('flux_companions')}
+                style={{ borderRadius: 0, borderBottom: modelModalTab === 'flux_companions' ? '2px solid var(--accent)' : 'none', padding: '10px 16px', fontSize: '12px' }}
+              >
+                🧠 FLUX Text Encoders & VAE
+              </button>
+              <button
+                type="button"
+                className={`tab-btn ${modelModalTab === 'tools' ? 'active' : ''}`}
+                onClick={() => setModelModalTab('tools')}
+                style={{ borderRadius: 0, borderBottom: modelModalTab === 'tools' ? '2px solid var(--accent)' : 'none', padding: '10px 16px', fontSize: '12px' }}
+              >
+                🎨 Inpainting, Cast & Tools
+              </button>
+            </div>
+
             <div style={{ padding: '16px 20px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              {AVAILABLE_MODELS.map((m) => {
-                const depItem = setupStatus?.items.find((i) => i.id === m.depId);
-                const isInstalled = depItem?.installed ?? (m.id.includes('v1-5') || false);
-                const isSelected = selectedModel === m.id;
+              {modelModalTab === 'checkpoints' && (
+                AVAILABLE_MODELS.map((m) => {
+                  const depItem = setupStatus?.items.find((i) => i.id === m.depId);
+                  const isInstalled = depItem?.installed ?? (m.id.includes('v1-5') || false);
+                  const isSelected = selectedModel === m.id;
 
-                return (
-                  <div
-                    key={m.id}
-                    style={{
-                      padding: '14px',
-                      background: isSelected ? 'rgba(99, 102, 241, 0.08)' : 'var(--bg)',
-                      border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
-                      borderRadius: '10px',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: '8px',
-                    }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <strong style={{ fontSize: '13px', color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
-                            {m.name}
-                          </strong>
-                          <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(99, 102, 241, 0.2)', color: 'var(--accent)', fontWeight: 600 }}>
-                            {m.badge}
-                          </span>
+                  return (
+                    <div
+                      key={m.id}
+                      style={{
+                        padding: '14px',
+                        background: isSelected ? 'rgba(99, 102, 241, 0.08)' : 'var(--bg)',
+                        border: `1px solid ${isSelected ? 'var(--accent)' : 'var(--border)'}`,
+                        borderRadius: '10px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px',
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <strong style={{ fontSize: '13px', color: isSelected ? 'var(--accent)' : 'var(--text)' }}>
+                              {m.name}
+                            </strong>
+                            <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(99, 102, 241, 0.2)', color: 'var(--accent)', fontWeight: 600 }}>
+                              {m.badge}
+                            </span>
+                          </div>
+                          <span style={{ fontSize: '11px', color: 'var(--muted)' }}>{m.subtitle}</span>
                         </div>
-                        <span style={{ fontSize: '11px', color: 'var(--muted)' }}>{m.subtitle}</span>
+
+                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                          {isInstalled ? (
+                            <button
+                              type="button"
+                              className={`mini ${isSelected ? 'primary' : 'secondary'}`}
+                              onClick={() => {
+                                setSelectedModel(m.id);
+                                setShowModelManager(false);
+                              }}
+                              style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                            >
+                              <CheckCircle2 size={12} /> {isSelected ? 'Active Model' : 'Select'}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="mini primary"
+                              onClick={() => handleInstallDep(m.depId)}
+                              disabled={Boolean(installingDep)}
+                              style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                            >
+                              {installingDep === m.depId ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                              {installingDep === m.depId ? 'Downloading...' : `Install (${depItem?.sizeBytes ? `${(depItem.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Download'})`}
+                            </button>
+                          )}
+                        </div>
                       </div>
 
-                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                        {isInstalled ? (
-                          <button
-                            type="button"
-                            className={`mini ${isSelected ? 'primary' : 'secondary'}`}
-                            onClick={() => {
-                              setSelectedModel(m.id);
-                              setShowModelManager(false);
-                            }}
-                            style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                          >
-                            <CheckCircle2 size={12} /> {isSelected ? 'Active Model' : 'Select'}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="mini primary"
-                            onClick={() => handleInstallDep(m.depId)}
-                            disabled={Boolean(installingDep)}
-                            style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
-                          >
-                            {installingDep === m.depId ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
-                            {installingDep === m.depId ? 'Downloading...' : `Install (${depItem?.sizeBytes ? `${(depItem.sizeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB` : 'Download'})`}
-                          </button>
-                        )}
+                      <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                        {m.description}
+                      </p>
+
+                      <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--muted)', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
+                        <span><Cpu size={12} style={{ display: 'inline', verticalAlign: '-1px', marginRight: '4px' }} /><strong>VRAM:</strong> {m.vram}</span>
+                        <span>⚡ <strong>Speed (2080 Ti):</strong> {m.speed}</span>
+                        <span>📁 <strong>Filename:</strong> <code style={{ fontSize: '10px' }}>{m.id}</code></span>
                       </div>
                     </div>
+                  );
+                })
+              )}
 
-                    <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
-                      {m.description}
-                    </p>
-
-                    <div style={{ display: 'flex', gap: '16px', fontSize: '11px', color: 'var(--muted)', paddingTop: '4px', borderTop: '1px solid rgba(255,255,255,0.05)' }}>
-                      <span><Cpu size={12} style={{ display: 'inline', verticalAlign: '-1px', marginRight: '4px' }} /><strong>VRAM:</strong> {m.vram}</span>
-                      <span>⚡ <strong>Speed (2080 Ti):</strong> {m.speed}</span>
-                      <span>📁 <strong>Filename:</strong> <code style={{ fontSize: '10px' }}>{m.id}</code></span>
-                    </div>
+              {modelModalTab === 'flux_companions' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <div style={{ padding: '12px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: '8px', fontSize: '11px', color: 'var(--text)', lineHeight: 1.5 }}>
+                    <strong>ℹ️ Why FLUX Needs Companion Encoders:</strong> FLUX.1 splits language comprehension and latent decoding into separate modular weights. Install the 3 companion files below to activate full 12B FLUX text-to-image synthesis.
                   </div>
-                );
-              })}
+
+                  {FLUX_COMPANIONS.map((item) => {
+                    const depItem = setupStatus?.items.find((i) => i.id === item.depId);
+                    const isInstalled = depItem?.installed || false;
+
+                    return (
+                      <div
+                        key={item.id}
+                        style={{
+                          padding: '14px',
+                          background: 'var(--bg)',
+                          border: `1px solid ${isInstalled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                          borderRadius: '10px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <strong style={{ fontSize: '13px' }}>{item.name}</strong>
+                              <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: isInstalled ? 'rgba(34, 197, 94, 0.2)' : 'rgba(234, 179, 8, 0.2)', color: isInstalled ? 'var(--green)' : 'var(--yellow)', fontWeight: 600 }}>
+                                {isInstalled ? '✓ Installed' : item.badge}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Folder: <code>{item.targetDir}</code> • Size: {item.size}</span>
+                          </div>
+
+                          <div>
+                            {isInstalled ? (
+                              <span style={{ fontSize: '11px', color: 'var(--green)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                                <CheckCircle2 size={14} /> Ready
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="mini primary"
+                                onClick={() => handleInstallDep(item.depId)}
+                                disabled={Boolean(installingDep)}
+                                style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                {installingDep === item.depId ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                                {installingDep === item.depId ? 'Downloading...' : `Install (${item.size})`}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                          {item.description}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {modelModalTab === 'tools' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  {TOOL_COMPANIONS.map((item) => {
+                    const depItem = setupStatus?.items.find((i) => i.id === item.depId);
+                    const isInstalled = depItem?.installed || false;
+
+                    return (
+                      <div
+                        key={item.id}
+                        style={{
+                          padding: '14px',
+                          background: 'var(--bg)',
+                          border: `1px solid ${isInstalled ? 'rgba(34, 197, 94, 0.3)' : 'var(--border)'}`,
+                          borderRadius: '10px',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '8px',
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                          <div>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <strong style={{ fontSize: '13px' }}>{item.name}</strong>
+                              <span style={{ fontSize: '10px', padding: '2px 6px', borderRadius: '4px', background: 'rgba(99, 102, 241, 0.2)', color: 'var(--accent)', fontWeight: 600 }}>
+                                {item.badge}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '11px', color: 'var(--muted)' }}>Folder: <code>{item.targetDir}</code> • Size: {item.size}</span>
+                          </div>
+
+                          <div>
+                            {isInstalled ? (
+                              <span style={{ fontSize: '11px', color: 'var(--green)', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 600 }}>
+                                <CheckCircle2 size={14} /> Installed
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="mini primary"
+                                onClick={() => handleInstallDep(item.depId)}
+                                disabled={Boolean(installingDep)}
+                                style={{ padding: '4px 10px', fontSize: '11px', display: 'flex', alignItems: 'center', gap: '4px' }}
+                              >
+                                {installingDep === item.depId ? <Loader2 size={12} className="spin" /> : <Download size={12} />}
+                                {installingDep === item.depId ? 'Downloading...' : `Install (${item.size})`}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        <p style={{ margin: 0, fontSize: '11px', color: 'var(--muted)', lineHeight: 1.4 }}>
+                          {item.description}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             <div style={{ padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--panel)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

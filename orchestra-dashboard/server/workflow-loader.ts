@@ -417,3 +417,55 @@ export function buildSdxlIpAdapterWorkflow(params: SdxlIpAdapterParams): Record<
   return workflow;
 }
 
+export interface FluxTxt2ImgParams {
+  prompt: string;
+  negativePrompt?: string;
+  unetName?: string;
+  clip1?: string;
+  clip2?: string;
+  vaeName?: string;
+  width?: number;
+  height?: number;
+  steps?: number;
+  guidance?: number;
+  samplerName?: string;
+  scheduler?: string;
+  seed?: number;
+}
+
+export function buildFluxTxt2ImgWorkflow(params: FluxTxt2ImgParams): Record<string, any> {
+  const workflow = loadWorkflowJson('flux-txt2img.json');
+
+  if (workflow['1']?.inputs && params.unetName) {
+    workflow['1'].inputs.unet_name = params.unetName;
+  }
+  if (workflow['2']?.inputs) {
+    if (params.clip1) workflow['2'].inputs.clip_name1 = params.clip1;
+    if (params.clip2) workflow['2'].inputs.clip_name2 = params.clip2;
+  }
+  if (workflow['3']?.inputs && params.vaeName) {
+    workflow['3'].inputs.vae_name = params.vaeName;
+  }
+  if (workflow['4']?.inputs && typeof params.guidance === 'number') {
+    workflow['4'].inputs.guidance = params.guidance;
+  }
+  if (workflow['5']?.inputs) {
+    workflow['5'].inputs.text = params.prompt.trim();
+  }
+  if (workflow['6']?.inputs && params.negativePrompt) {
+    workflow['6'].inputs.text = params.negativePrompt.trim();
+  }
+  if (workflow['7']?.inputs) {
+    if (params.width) workflow['7'].inputs.width = params.width;
+    if (params.height) workflow['7'].inputs.height = params.height;
+  }
+  if (workflow['8']?.inputs) {
+    workflow['8'].inputs.seed = params.seed ?? Math.floor(Math.random() * 1000000000000);
+    if (params.steps) workflow['8'].inputs.steps = params.steps;
+    if (params.samplerName) workflow['8'].inputs.sampler_name = params.samplerName;
+    if (params.scheduler) workflow['8'].inputs.scheduler = params.scheduler;
+  }
+
+  return workflow;
+}
+

@@ -8,6 +8,7 @@ import {
   executeSdxlImg2Img,
   executeSdxlInpaint,
   executeSdxlIpAdapter,
+  executeFluxTxt2Img,
   executeLtxImg2Vid,
   executeWanImg2Vid,
   findComfyInstallation,
@@ -424,8 +425,9 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
     const cfg = options.cfg || 7.0;
 
     let resultBuffer: Buffer;
-    const { ckptName, isSdxl } = resolveActiveImageCheckpoint();
-    let workflowType = isSdxl ? 'sdxl-txt2img' : 'concept-gen';
+    const { ckptName, isSdxl } = resolveActiveImageCheckpoint(options.checkpoint);
+    const isFlux = /flux/i.test(ckptName);
+    let workflowType = isFlux ? 'flux-txt2img' : isSdxl ? 'sdxl-txt2img' : 'concept-gen';
 
     if (boundEntity && boundEntity.referenceImages.length > 0) {
       job.status = 'staging_gpu';
@@ -455,6 +457,51 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       });
       resultBuffer = gen.buffer;
       workflowType = 'sdxl-ipadapter';
+    } else if (isFlux) {
+      const clipDir = join(installation.comfyCoreDir, 'models', 'clip');
+      const vaeDir = join(installation.comfyCoreDir, 'models', 'vae');
+      const textEncDir = join(installation.comfyCoreDir, 'models', 'text_encoders');
+      const hasT5 = existsSync(join(clipDir, 't5xxl_fp8_e4m3fn.safetensors')) || existsSync(join(textEncDir, 't5xxl_fp8_e4m3fn.safetensors'));
+      const hasClipL = existsSync(join(clipDir, 'clip_l.safetensors')) || existsSync(join(textEncDir, 'clip_l.safetensors'));
+      const hasVae = existsSync(join(vaeDir, 'ae.safetensors'));
+
+      if (!hasT5 || !hasClipL || !hasVae) {
+        const missing = [
+          !hasT5 && 'T5-XXL (t5xxl_fp8_e4m3fn.safetensors)',
+          !hasClipL && 'CLIP-L (clip_l.safetensors)',
+          !hasVae && 'VAE (ae.safetensors)',
+        ].filter(Boolean);
+        throw new Error(
+          `FLUX.1 requires companion text encoders & VAE before generating. Missing: ${missing.join(', ')}. Please click 'Model Library & VRAM' in Forge Studio to 1-click install them, or select RealVisXL / Juggernaut for instant standalone generation.`
+        );
+      }
+
+      job.status = 'staging_gpu';
+      job.progress = 25;
+      job.message = `Staging GPU for FLUX generation (${ckptName})...`;
+      await stageGpuForStep('txt2img');
+
+      job.status = 'generating';
+      job.progress = 50;
+      job.message = 'Executing 12B Flow Transformer synthesis...';
+
+      const gen = await executeFluxTxt2Img({
+        prompt: promptWithEntity,
+        negativePrompt: options.negativePrompt,
+        unetName: ckptName,
+        clip1: 't5xxl_fp8_e4m3fn.safetensors',
+        clip2: 'clip_l.safetensors',
+        vaeName: 'ae.safetensors',
+        guidance: /schnell/i.test(ckptName) ? 1.0 : 3.5,
+        width: options.width || 1024,
+        height: options.height || 1024,
+        steps: options.steps || (/schnell/i.test(ckptName) ? 4 : 20),
+        samplerName: 'euler',
+        scheduler: 'simple',
+        seed,
+      });
+      resultBuffer = gen.buffer;
+      workflowType = 'flux-txt2img';
     } else if (isSdxl) {
       job.status = 'staging_gpu';
       job.progress = 25;
