@@ -86,7 +86,7 @@ interface ModelChoice {
 
 const AVAILABLE_MODELS: ModelChoice[] = [
   {
-    id: 'RealVisXL_V5.0.safetensors',
+    id: 'RealVisXL_V5.0_fp16.safetensors',
     depId: 'sdxl-realvis',
     name: 'RealVisXL v5.0',
     subtitle: 'SDXL Raw DSLR & 35mm Photography',
@@ -106,14 +106,14 @@ const AVAILABLE_MODELS: ModelChoice[] = [
     description: 'Flagship cinematic model with high-contrast Hollywood lighting, environmental depth, vehicles, and architecture.',
   },
   {
-    id: 'CyberRealisticXL_v2.0.safetensors',
-    depId: 'sdxl-cyberrealistic',
-    name: 'CyberRealistic XL v2.0',
-    subtitle: 'SDXL Human Portrait & Iris Specialist',
+    id: 'DreamShaperXL_Turbo_v2.safetensors',
+    depId: 'sdxl-dreamshaper',
+    name: 'DreamShaper XL Turbo v2',
+    subtitle: 'SDXL Fantasy, Concept & Illustration',
     vram: '~6.5 GB VRAM',
-    speed: '~5s (Fast)',
-    badge: 'Portraits & Eyes',
-    description: 'Trained for hyper-detailed human portraits, lifelike eye reflections, hair dynamics, and subsurface skin lighting.',
+    speed: '~4s (Fast)',
+    badge: 'Fantasy & Concept',
+    description: 'Trained for cinematic fantasy art, environment illustrations, stylized characters, and rich atmospheric lighting.',
   },
   {
     id: 'flux1-dev-fp8.safetensors',
@@ -136,14 +136,14 @@ const AVAILABLE_MODELS: ModelChoice[] = [
     description: 'Fast 4-step distilled Flux.1 transformer delivering high anatomy and prompt fidelity in seconds.',
   },
   {
-    id: 'ponyDiffusionV6XL_v6StartWithThisOne.safetensors',
-    depId: 'sdxl-pony',
-    name: 'Pony Diffusion V6 XL',
-    subtitle: 'SDXL Stylized Anime & Digital Art',
+    id: 'animagine-xl-3.1.safetensors',
+    depId: 'sdxl-animagine',
+    name: 'Animagine XL 3.1',
+    subtitle: 'SDXL Stylized Anime & Digital Illustration',
     vram: '~6.5 GB VRAM',
     speed: '~5s (Fast)',
     badge: 'Stylized / Anime',
-    description: 'Premier stylized 2D/3D anime, digital concept art, and tag-controlled character composition.',
+    description: 'SOTA anime and stylized illustration model with pristine linework, vibrant coloring, and accurate character traits.',
   },
   {
     id: 'v1-5-pruned-emaonly.safetensors',
