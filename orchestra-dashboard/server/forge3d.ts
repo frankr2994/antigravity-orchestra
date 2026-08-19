@@ -289,7 +289,7 @@ Respond strictly in valid JSON format:
   "score": <0-100 integer score>,
   "critique": "<2-3 sentence honest critique of what is well-reconstructed and any specific geometry defects>",
   "failureType": "concept" | "geometry" | "texture" | "none",
-  "suggestedPromptRefinements": "<specific prompt modifiers to fix any flaws, or empty string if passed>"
+  "suggestedPromptRefinements": "<the complete, rewritten concept image prompt that fixes the identified geometry or concept flaws. Do NOT give meta-instructions — write the actual ready-to-use image generation prompt itself, e.g. 'a low-poly stylized sword with clean sharp edges, white background, orthographic front view, high contrast silhouette'.>"
 }`;
 
   const userContent: any[] = [

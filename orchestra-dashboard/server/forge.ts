@@ -105,6 +105,62 @@ function saveAssetMeta(asset: ForgeAsset): void {
   writeFileSync(join(assetDir, 'meta.json'), JSON.stringify(asset, null, 2));
 }
 
+// ─── LLM Prompt Enrichment ───────────────────────────────────────────────────────
+
+export async function enrichPromptWithLocalLLM(rawPrompt: string): Promise<string> {
+  const lmStudioUrl = config.lmStudioBaseUrl.replace(/\/+$/, '');
+
+  const systemInstruction = `You are an expert Stable Diffusion and FLUX prompt engineer.
+Your ONLY job is to expand the user's short concept into a detailed, richly descriptive prompt optimized for photorealistic AI image generation.
+
+Rules:
+- Output ONLY the enhanced prompt text — no explanation, no quotes, no preamble, no "Here is the prompt:" prefix.
+- Keep the user's original intent and subject matter intact.
+- Add specific details: lighting, camera angle, materials, textures, atmosphere, color palette, composition.
+- Use comma-separated descriptive tags and natural language mixed together (the style FLUX and SD models understand best).
+- Keep it under 200 words.
+- Never add negative prompt terms — only describe what SHOULD be in the image.`;
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+
+    const res = await fetch(`${lmStudioUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: config.lmStudioModel || undefined,
+        messages: [
+          { role: 'system', content: systemInstruction },
+          { role: 'user', content: rawPrompt },
+        ],
+        temperature: 0.7,
+      }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      console.warn(`[Forge] LLM prompt enrichment returned HTTP ${res.status}, using raw prompt.`);
+      return rawPrompt;
+    }
+
+    const data = (await res.json()) as any;
+    const enriched = data.choices?.[0]?.message?.content?.trim();
+
+    if (!enriched || enriched.length < 10) {
+      console.warn('[Forge] LLM returned empty or too-short enrichment, using raw prompt.');
+      return rawPrompt;
+    }
+
+    // Strip any accidental wrapping quotes the LLM might add
+    return enriched.replace(/^["']|["']$/g, '').trim();
+  } catch (err) {
+    console.warn(`[Forge] LLM prompt enrichment unavailable (${err instanceof Error ? err.message : 'timeout'}), using raw prompt.`);
+    return rawPrompt;
+  }
+}
+
 // ─── Gemma 12B Vision Quality & Drift Reviewers ─────────────────────────────────
 
 export async function requestCreationReview(
@@ -129,7 +185,7 @@ Respond strictly in valid JSON:
   "critique": "<2-3 sentence honest critique>",
   "failureType": "composition" | "anatomy" | "artifact" | "style_drift" | "none",
   "defectRegions": ["<specific defects if any>"],
-  "suggestedAction": "<concrete guidance to fix flaw, or empty string if passed>"
+  "suggestedAction": "<the complete, rewritten diffusion prompt that fixes the identified flaws. Do NOT give instructions about what to do — write the actual ready-to-use image generation prompt itself. GOOD example: 'a medieval knight in polished steel armor standing in a misty forest clearing, volumetric fog, dramatic rim lighting, photorealistic'. BAD example: 'try adding more detail to the armor and making the lighting more dramatic'.>"
 }`;
 
   const res = await fetch(`${lmStudioUrl}/chat/completions`, {
@@ -207,7 +263,7 @@ Respond strictly in valid JSON:
   },
   "critique": "<2-3 sentence explanation of what succeeded and any unwanted drift>",
   "failureType": "identity_drift" | "composition" | "style_drift" | "artifact" | "none",
-  "suggestedAction": "<concrete guidance if repair is needed>"
+  "suggestedAction": "<the complete, rewritten diffusion prompt that fixes the identified flaws while preserving what worked. Do NOT give meta-instructions — write the actual ready-to-use image generation prompt itself.>"
 }`;
 
   const res = await fetch(`${lmStudioUrl}/chat/completions`, {
@@ -292,7 +348,7 @@ Respond strictly in valid JSON:
   },
   "critique": "<2-3 sentence honest evaluation of motion and temporal continuity>",
   "failureType": "temporal" | "composition" | "artifact" | "identity_drift" | "none",
-  "suggestedAction": "<concrete guidance if repair is needed, or empty string if passed>"
+  "suggestedAction": "<the complete, rewritten video generation prompt that fixes the identified flaws. Do NOT give meta-instructions — write the actual ready-to-use prompt itself.>"
 }`;
 
   const imageMessages = keyframesBase64.map((b64) => ({
@@ -420,6 +476,13 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
     if (boundEntity?.triggerWord && !promptWithEntity.includes(boundEntity.triggerWord)) {
       promptWithEntity = `${boundEntity.triggerWord}, ${promptWithEntity}`;
     }
+
+    // Enrich the prompt through local LLM for detailed, SD/FLUX-optimized output
+    job.status = 'enriching';
+    job.progress = 15;
+    job.message = 'Enriching prompt with local AI...';
+    const enrichedPrompt = await enrichPromptWithLocalLLM(promptWithEntity);
+    promptWithEntity = enrichedPrompt;
 
     const seed = options.seed ?? Math.floor(Math.random() * 1000000000000);
     const steps = options.steps || 25;
@@ -581,6 +644,7 @@ export async function runForgeGeneration(options: ForgeGenerateOptions): Promise
       type: options.type || 'image',
       title: options.prompt.length > 40 ? options.prompt.slice(0, 37) + '…' : options.prompt,
       originalPrompt: options.prompt,
+      enrichedPrompt: enrichedPrompt !== options.prompt ? enrichedPrompt : undefined,
       activeVersionId: 'v1',
       versions: [v1],
       entityRefs: options.entityId ? [options.entityId] : undefined,

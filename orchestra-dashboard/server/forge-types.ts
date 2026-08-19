@@ -131,6 +131,7 @@ export interface ForgeAsset {
   type: AssetType;
   title: string;
   originalPrompt: string;
+  enrichedPrompt?: string;
   activeVersionId: string;
   versions: AssetVersion[];
   entityRefs?: string[];
@@ -143,7 +144,7 @@ export interface ForgeJob {
   id: string;
   prompt: string;
   type: AssetType;
-  status: 'queued' | 'staging_gpu' | 'generating' | 'evaluating_vision' | 'completed' | 'failed';
+  status: 'queued' | 'enriching' | 'staging_gpu' | 'generating' | 'evaluating_vision' | 'completed' | 'failed';
   currentIteration: number;
   maxIterations: number;
   progress: number;
