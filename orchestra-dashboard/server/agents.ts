@@ -331,8 +331,22 @@ Instructions:
         if (!trimmed || trimmed === 'data: [DONE]') continue;
         if (trimmed.startsWith('data: ')) {
           try {
-            const data = JSON.parse(trimmed.slice(6)) as { choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null; thought?: string | null } }> };
-            const delta = data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.delta?.reasoning_content ?? data.choices?.[0]?.delta?.thought ?? null;
+            const data = JSON.parse(trimmed.slice(6)) as {
+              choices?: Array<{
+                delta?: { content?: string | null; reasoning_content?: string | null; thought?: string | null };
+                text?: string | null;
+                message?: { content?: string | null };
+              }>;
+              response?: string | null;
+            };
+            const delta =
+              data.choices?.[0]?.delta?.content ??
+              data.choices?.[0]?.delta?.reasoning_content ??
+              data.choices?.[0]?.delta?.thought ??
+              data.choices?.[0]?.text ??
+              data.choices?.[0]?.message?.content ??
+              data.response ??
+              null;
             if (delta) {
               accumulated += delta;
               textBuffer += delta;
@@ -350,6 +364,14 @@ Instructions:
 
     if (textBuffer.trim()) {
       input.onOutput?.(textBuffer.trim());
+    }
+
+    if (!accumulated.trim()) {
+      const fallbackText = await callGemma(messages, 4000, 180_000, undefined, true, input.onToolActivity);
+      if (fallbackText) {
+        input.onOutput?.(fallbackText);
+        return fallbackText;
+      }
     }
 
     return accumulated.trim() || 'Gemma completed without response text.';
