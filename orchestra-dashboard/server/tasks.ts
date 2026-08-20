@@ -253,12 +253,16 @@ export class TaskManager {
         if (directAgent === 'gemma') {
           const model = chosenGemma;
           this.emit(taskId, 'gemma', 'agent.started', { phase: 'direct-chat', model });
-          const [status, commits, diff] = await Promise.all([
-            getGitStatus(project.root),
-            getRecentCommits(project.root, 10),
-            getDiff(project.root, 20_000),
-          ]);
-          const evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff, 35_000);
+          const asksAboutRepo = /\b(?:code|file|repo|git|commit|diff|build|test|bug|error|function|class|method|import|export|component|server|src|package|docs|orchestra|agent|architecture|review|why|how)\b/i.test(task.prompt);
+          let evidence: RepositoryEvidence | undefined;
+          if (asksAboutRepo) {
+            const [status, commits, diff] = await Promise.all([
+              getGitStatus(project.root),
+              getRecentCommits(project.root, 5),
+              getDiff(project.root, 4_000),
+            ]);
+            evidence = collectRepositoryEvidence(project.root, task.prompt, status, commits, diff, 8_000);
+          }
           const answer = await runGemmaDirectChat({
             root: project.root,
             model,

@@ -265,16 +265,16 @@ export async function runGemmaDirectChat(input: {
 }): Promise<string> {
   const model = input.model || await getActiveLmStudioModel();
   const system = `You are Gemma, the local AI software engineering assistant in Antigravity Orchestra. You are in a direct 1-on-1 consultation with the developer.
-The authoritative active repository is: ${input.root}.
+The authoritative active repository is: ${input.root}.${input.evidence ? `
 
 Below is the repository evidence, including Git status, recent commit history, and the full contents of key project files:
 
-${input.evidence ? input.evidence.text : 'No repository evidence gathered.'}
+${input.evidence.text}
 
 Instructions:
 - Use the repository evidence above to directly review files, analyze architecture, explain commits, and answer questions.
 - Never claim you lack access to the project files or ask the user to paste files that are present in the evidence.
-- Answer thoroughly and helpfully in GitHub-flavored Markdown with concrete code blocks.`;
+- Answer thoroughly and helpfully in GitHub-flavored Markdown with concrete code blocks.` : ''}`;
 
   const messages: Array<Record<string, unknown>> = [
     { role: 'system', content: system },
