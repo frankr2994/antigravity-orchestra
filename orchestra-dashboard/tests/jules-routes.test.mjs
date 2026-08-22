@@ -80,13 +80,18 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
   const dbPath = join(tmpdir(), `orchestra-rt-disp-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   const vaultPath = join(tmpdir(), `orchestra-rt-vault2-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
   const fixtureDir = join(tmpdir(), `orchestra-rt-repo-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const bareDir = join(tmpdir(), `orchestra-rt-bare-${Date.now()}-${Math.random().toString(36).slice(2)}.git`);
   mkdirSync(fixtureDir, { recursive: true });
+  mkdirSync(bareDir, { recursive: true });
 
   let server;
   let store;
 
   try {
-    // Setup git fixture
+    // Setup bare repo as remote origin
+    await git(['init', '--bare'], bareDir);
+
+    // Setup working repo
     await git(['init'], fixtureDir);
     await git(['config', 'user.name', 'Orchestra Route Test'], fixtureDir);
     await git(['config', 'user.email', 'test@orchestra.local'], fixtureDir);
@@ -94,10 +99,11 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     await git(['add', 'README.md'], fixtureDir);
     await git(['commit', '-m', 'Initial commit'], fixtureDir);
     await git(['branch', '-M', 'main'], fixtureDir);
+
+    // Origin URL is GitHub (for source matching) and Push URL is local bare repository
     await git(['remote', 'add', 'origin', 'https://github.com/frankr2994/antigravity-orchestra.git'], fixtureDir);
-    await git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], fixtureDir);
-    await git(['config', 'branch.main.remote', 'origin'], fixtureDir);
-    await git(['config', 'branch.main.merge', 'refs/heads/main'], fixtureDir);
+    await git(['remote', 'set-url', '--push', 'origin', bareDir], fixtureDir);
+    await git(['push', '-u', 'origin', 'main'], fixtureDir);
 
     store = new Store(dbPath);
     const vault = new CredentialVault(vaultPath);
@@ -176,14 +182,13 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     const port = server.address().port;
     const baseUrl = `http://127.0.0.1:${port}/api`;
 
-    // 1. Dispatch task to cloud (skipPush: true to bypass network push in test)
+    // 1. Dispatch task to cloud (using real bare git push without skipPush)
     const dispatchRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         prompt: 'Add cloud execution router test',
         sessionId: session.id,
-        skipPush: true,
       }),
     });
     assert.equal(dispatchRes.status, 201);
@@ -229,11 +234,22 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     const cancelData = await cancelRes.json();
     assert.equal(cancelData.ok, true);
     assert.equal(remoteCancelled, true);
+
+    // 7. Feature-gated import-pr endpoint returns 501
+    const importRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/import-pr`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prHeadSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }),
+    });
+    assert.equal(importRes.status, 501);
+    const importData = await importRes.json();
+    assert.equal(importData.code, 'FEATURE_GATED');
   } finally {
     if (server) server.close();
     if (store) store.close();
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(vaultPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
+    try { rmSync(bareDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
   }
 });

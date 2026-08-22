@@ -61,7 +61,6 @@ export async function routeTask(input: TaskRoutingInput): Promise<RoutingDecisio
       projectRoot,
       vault,
       julesClient,
-      skipPush: true,
     });
 
     if (!preflight.ok) {
@@ -123,7 +122,6 @@ export async function routeTask(input: TaskRoutingInput): Promise<RoutingDecisio
     projectRoot,
     vault: v,
     julesClient,
-    skipPush: true,
   });
 
   if (!preflight.ok) {

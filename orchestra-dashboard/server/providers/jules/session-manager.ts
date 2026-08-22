@@ -18,7 +18,6 @@ export interface JulesDispatchOptions {
   requirePlanApproval?: boolean;
   vault?: CredentialVault;
   julesClient?: JulesApiClient;
-  skipPush?: boolean;
   onEvent?: (event: { name: string; payload: unknown }) => void;
 }
 
@@ -73,7 +72,6 @@ export class JulesSessionManager {
       projectRoot: options.projectRoot,
       vault,
       julesClient: options.julesClient,
-      skipPush: options.skipPush,
     });
 
     if (!preflight.ok) {

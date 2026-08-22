@@ -13,7 +13,6 @@ export interface JulesPreflightContext {
   projectRoot: string;
   vault?: CredentialVault;
   julesClient?: JulesApiClient;
-  skipPush?: boolean; // For dry-run tests
 }
 
 export interface JulesPreflightResult {
@@ -90,7 +89,7 @@ export async function createAndPushDispatchBranch(
 }
 
 export async function runJulesPreflight(context: JulesPreflightContext): Promise<JulesPreflightResult> {
-  const { taskId, projectRoot, vault, julesClient, skipPush } = context;
+  const { taskId, projectRoot, vault, julesClient } = context;
 
   // 1. Verify project is a Git repository
   const gitStatus = await getGitStatus(projectRoot);
@@ -156,15 +155,13 @@ export async function runJulesPreflight(context: JulesPreflightContext): Promise
   const dispatchBranch = generateDispatchBranchName(taskId, headSha);
 
   // 7. Push immutable dispatch branch to remote origin
-  if (!skipPush) {
-    const pushResult = await createAndPushDispatchBranch(projectRoot, headSha, dispatchBranch);
-    if (!pushResult.pushed) {
-      return {
-        ok: false,
-        reason: pushResult.error || 'Failed to push dispatch branch to remote origin.',
-        resolution: 'Verify your Git credentials have write/push permissions to the remote repository.',
-      };
-    }
+  const pushResult = await createAndPushDispatchBranch(projectRoot, headSha, dispatchBranch);
+  if (!pushResult.pushed) {
+    return {
+      ok: false,
+      reason: pushResult.error || 'Failed to push dispatch branch to remote origin.',
+      resolution: 'Verify your Git credentials have write/push permissions to the remote repository.',
+    };
   }
 
   return {

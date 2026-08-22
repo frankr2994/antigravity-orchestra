@@ -1,4 +1,9 @@
-# Google Jules Integration Plan for Antigravity Orchestra
+# [SUPERSEDED & OBSOLETE] Google Jules Integration Plan for Antigravity Orchestra
+# ================================================================================
+# NOTICE: This document (jules.txt) is historical and OBSOLETE.
+# DO NOT USE THIS DOCUMENT FOR IMPLEMENTATION DECISIONS.
+# Refer exclusively to `julesplan.md` for the authoritative 29-phase implementation plan.
+# ================================================================================
 
 ================================================================================
 ARCHITECTURE OVERVIEW: FOUR-MODEL ORCHESTRA

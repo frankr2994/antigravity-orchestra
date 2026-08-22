@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rmSync, mkdirSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { git } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { JulesSessionManager } from '../dist-server/providers/jules/session-manager.js';
@@ -15,19 +15,25 @@ import { JulesApiClient } from '../dist-server/providers/jules/client.js';
 test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSession lifecycle', async () => {
   const dbPath = join(tmpdir(), `orchestra-sm-db-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   const fixtureDir = join(tmpdir(), `orchestra-sm-fixture-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const bareDir = join(tmpdir(), `orchestra-sm-bare-${Date.now()}-${Math.random().toString(36).slice(2)}.git`);
   mkdirSync(fixtureDir, { recursive: true });
+  mkdirSync(bareDir, { recursive: true });
 
   try {
-    // 1. Initialize git repo fixture
+    // 1. Initialize git bare origin and working repo fixture
+    await git(['init', '--bare'], bareDir);
+
     await git(['init'], fixtureDir);
     await git(['config', 'user.name', 'Orchestra Test'], fixtureDir);
     await git(['config', 'user.email', 'test@orchestra.local'], fixtureDir);
-    await git(['commit', '--allow-empty', '-m', 'Initial commit'], fixtureDir);
+    writeFileSync(join(fixtureDir, 'README.md'), '# Session Manager Test');
+    await git(['add', 'README.md'], fixtureDir);
+    await git(['commit', '-m', 'Initial commit'], fixtureDir);
     await git(['branch', '-M', 'main'], fixtureDir);
+
     await git(['remote', 'add', 'origin', 'https://github.com/frankr2994/antigravity-orchestra.git'], fixtureDir);
-    await git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], fixtureDir);
-    await git(['config', 'branch.main.remote', 'origin'], fixtureDir);
-    await git(['config', 'branch.main.merge', 'refs/heads/main'], fixtureDir);
+    await git(['remote', 'set-url', '--push', 'origin', bareDir], fixtureDir);
+    await git(['push', '-u', 'origin', 'main'], fixtureDir);
 
     // 2. Initialize Store and Project/Task
     const store = new Store(dbPath);
@@ -101,11 +107,10 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     const julesClient = new JulesApiClient({ apiKey: 'test-api-key', fetchFn: mockFetch });
     const manager = new JulesSessionManager(store);
 
-    // 4. Dispatch Session
+    // 4. Dispatch Session (with real bare git push)
     const dispatch = await manager.dispatchSession(task.id, task.prompt, {
       projectRoot: fixtureDir,
       julesClient,
-      skipPush: true,
     });
 
     assert.equal(dispatch.ok, true);
@@ -139,14 +144,17 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     assert.equal(updatedCloud?.prUrl, 'https://github.com/frankr2994/antigravity-orchestra/pull/42');
 
     // 7. Cancel Session
-    const cancelRes = await manager.cancelSession('sess-1234', { julesClient });
-    assert.equal(cancelRes.ok, true);
+    const cancelResult = await manager.cancelSession('sess-1234', { julesClient });
+    assert.equal(cancelResult.ok, true);
+
     const cancelledCloud = store.manager.cloudSessions.getByTaskId(task.id);
     assert.equal(cancelledCloud?.state, 'CANCELLED');
 
-    store.close();
+    const updatedTask = store.getTask(task.id);
+    assert.equal(updatedTask?.state, 'failed');
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
+    try { rmSync(bareDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
   }
 });

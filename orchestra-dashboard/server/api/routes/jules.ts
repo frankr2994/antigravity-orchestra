@@ -182,7 +182,6 @@ export function createJulesRouter(
         projectRoot: project.root,
         requirePlanApproval: Boolean(req.body?.requirePlanApproval ?? true),
         autoPr: Boolean(req.body?.autoPr ?? true),
-        skipPush: Boolean(req.body?.skipPush ?? false),
         vault,
         julesClient: customClient,
       });
@@ -393,9 +392,17 @@ export function createJulesRouter(
     }
   });
 
-  // 12. Import PR & Review
+  // 12. Import PR & Review (Feature-gated until Phase 19)
   router.post('/tasks/:id/jules/import-pr', async (req, res, next) => {
     try {
+      if (process.env.ORCHESTRA_ENABLE_EXPERIMENTAL_PR_IMPORT !== 'true') {
+        res.status(501).json({
+          error: 'PR import and worktree verification are feature-gated until Phase 19.',
+          code: 'FEATURE_GATED',
+        });
+        return;
+      }
+
       const s = requireStore();
       const task = s.getTask(req.params.id);
       if (!task) {
