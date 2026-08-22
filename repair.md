@@ -2026,6 +2026,248 @@ Deferred adjustment:
 - Compose those modules at bootstrap through `ExecutionProvider`; keep Jules-specific DTOs inside the adapter and provider-neutral state/policies in the application/domain layers.
 - Add dependency-direction and module-size checks so later phases extend ports or add modules instead of growing a new lifecycle monolith.
 
+## Phase 11 review
+
+### Review scope
+
+- Reviewed commit: `c4ab60f158d0b1aa49af25906d8590d0730a14b2`
+- Commit subject: `feat(jules): build worktree-isolated pull request review engine (phase 11)`
+- Primary artifacts reviewed: `server/providers/jules/worktree-review.ts`, shared Git/process/verification helpers, focused tests, planned Phases 11 and 19–25 in `julesplan.md`, and official Git/GitHub ref, diff, fetch, and worktree documentation.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that `worktree-review.ts` was unchanged between `c4ab60f` and the review checkout by comparing its Git blob ID (`81ef4cff14e45851532885f632ae7e9d39b180fe`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-worktree-review.test.mjs`: three tests passed with zero failures.
+- Confirmed with `git grep` that the worktree-review functions had no production caller at this commit; only their definitions and focused tests referenced them.
+- An invalid-base probe returned `ok: true`, `verified: true`, an empty diff, and no changed files after Git rejected the nonexistent base.
+- A missing-head probe silently reviewed the primary repository's current `HEAD` and returned success.
+- A local-remote probe fetched one PR head but reviewed a different caller-supplied SHA and still returned success.
+- Path probes showed that a fully stripped task ID resolves to the shared worktree parent and distinct long task IDs can resolve to the same truncated path.
+- A project with no recognized checks returned `verified: true` with zero verification results.
+- Compared three-dot diff semantics, forced fetch refspecs, PR refs, and shared worktree metadata with official Git and GitHub documentation.
+
+### R-077 — The planned Phase 11 source-discovery work remains incomplete
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 11 as source listing, canonical GitHub repository matching, starting-branch visibility, missing-App remediation, stable source persistence, and authorized-repository presentation.
+- Commit `c4ab60f` changes no source-discovery implementation, route, persistence, or frontend file; R-051 through R-057 therefore remain open.
+- The new code instead attempts portions of planned Phase 19 PR import, Phase 20 isolated verification, Phase 24 repository concurrency, and Phase 25 cleanup.
+- The worktree-review module has no production caller at this commit, so the out-of-sequence code does not protect a completed cloud session.
+
+Risk:
+
+- Phase tracking can report repository authorization and source matching complete despite known false matches, malformed-remotes, missing branch checks, absent persistence, and unsafe API exposure.
+- Later phases may build on an unverified source identity while an unrelated review prototype is mistaken for the Phase 11 deliverable.
+
+Deferred adjustment:
+
+- Keep planned Phase 11 open until R-051 through R-057 are resolved and its acceptance criteria are exercised end to end.
+- Track this commit only as partial work toward Phases 19, 20, 24, and 25.
+- Integrate PR review only after source identity, cloud persistence, polling, and exact PR resolution establish a trustworthy input.
+
+### R-078 — Review can target a different or entirely local commit instead of the PR head
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `WorktreeReviewOptions` independently accepts `prNumber`, `headBranch`, and `headSha` without defining precedence or requiring agreement.
+- When `headSha` and `prNumber` are both supplied, the manager fetches `refs/pull/<number>/head` but retains the supplied SHA instead of resolving and comparing the fetched ref.
+- A review probe fetched PR head `4cfb1143672cc0b872d7aa6dac46e342719cf20c`, reviewed supplied SHA `e393cbeb553f4f7190813483830dfe8b6fa07ed0`, and returned `ok: true`.
+- If fetched-ref resolution fails, or if `skipFetch` is true without a head SHA, the code silently resolves the primary repository's current `HEAD` and reviews it.
+- A missing-head probe confirmed that local fallback and returned `ok: true` and `verified: true`.
+- No PR URL/repository validation, GitHub PR metadata lookup, fork handling policy, persisted head identity, or pre-verdict re-fetch exists. A provider-supplied branch can be treated as authoritative contrary to Phase 19.
+
+Risk:
+
+- Orchestra can approve, verify, or later merge code different from the PR the user saw.
+- A force-push or ambiguous input does not invalidate prior evidence, defeating the exact-SHA review invariant.
+
+Deferred adjustment:
+
+- Resolve a validated repository-owned PR number/URL through GitHub metadata, fetch its head into a task-owned ref, and derive the one authoritative full SHA from that ref.
+- Reject missing, contradictory, stale, or changed identities; never fall back to local `HEAD` or a provider branch name.
+- Persist the resolved SHA and compare it again before every verification, verdict, repair cycle, approval, and integration action.
+
+### R-079 — Git failures and ambiguous diff semantics can produce a clean success
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The exit codes from both `git diff` commands are ignored; only stdout is consumed.
+- A probe using a nonexistent base object caused Git to reject the comparison, yet returned `ok: true`, `verified: true`, an empty diff, and an empty changed-file list.
+- Fallback `rev-parse HEAD` also assigns stdout without checking its exit code or validating a full commit object.
+- The implementation describes its result as an exact base-to-head diff but executes `baseSha...HEAD`. Git defines three-dot comparison against the merge base, which can hide divergence between the recorded base and that merge base.
+- Neither full ID is canonicalized with `rev-parse --verify <id>^{commit}`, and no ancestry or expected-base relationship is checked.
+- Changed files are parsed by newline and trimmed rather than using a NUL-delimited format, corrupting legal filenames containing newlines or leading/trailing whitespace.
+
+Risk:
+
+- Invalid, divergent, or missing history can be represented as a verified no-change PR.
+- Review packets and later merge decisions can omit changed files or compare against a base different from the recorded dispatch invariant.
+
+Deferred adjustment:
+
+- Validate exact full commit IDs and the required ancestry/repository relationship before creating a worktree.
+- Check every Git exit code and return typed failure evidence; an empty stdout is never proof of an empty diff.
+- Deliberately choose endpoint-tree or merge-base comparison according to policy, label it accurately, and use `--name-only -z` or `--name-status -z` for filenames.
+
+### R-080 — Fetch mutates shared refs without ownership or repository locking
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- PR fetches force-update `refs/remotes/origin/pr/<number>` and branch fetches force-update `refs/remotes/origin/<headBranch>` through a leading `+` refspec.
+- The branch form can overwrite an ordinary shared tracking ref such as `refs/remotes/origin/main`.
+- Ref names are shared by every task and review cycle rather than namespaced to a durable attempt/review owner.
+- No repository Git-operation lock covers fetch, ref resolution, worktree addition, removal, or pruning as required by Phase 24.
+- Fetched refs are never deleted, and no expected-old-value or post-fetch ownership check detects concurrent movement.
+
+Risk:
+
+- Concurrent completions can overwrite each other's evidence, review a ref after another process moved it, or perturb the repository state observed by users and other Orchestra workflows.
+
+Deferred adjustment:
+
+- Fetch into a unique validated namespace such as `refs/orchestra/reviews/<attempt-id>/head` while holding a repository lock.
+- Resolve and persist the resulting object ID before releasing the lock, then use the immutable ID for the worktree.
+- Remove only owner-recorded temporary refs through idempotent locked cleanup; never force-update normal remote-tracking refs for review.
+
+### R-081 — Worktree path collisions can trigger destructive cross-task cleanup
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `getWorktreePath` strips characters from the task ID and truncates it to 32 characters without rejecting an empty result or adding collision-resistant identity.
+- A probe mapped `../../` to the shared `.orchestra/worktrees` parent itself and mapped two distinct long IDs to the same child path.
+- If that path already exists, `createIsolatedWorktree` ignores `git worktree remove` failure and recursively deletes the path without checking an ownership record.
+- Cleanup similarly suppresses removal/prune/filesystem failures, does not verify a canonical path beneath a configured managed root, and globally runs `git worktree prune` without a lock.
+- The path is placed inside each project rather than the plan's Orchestra-managed data directory.
+- If `git worktree add` partially creates metadata or files but exits nonzero, `runWorktreeReview` has not yet assigned `worktreePath`, so its `finally` block does not attempt cleanup.
+
+Risk:
+
+- One malformed or colliding task can delete the shared worktree directory or another active review's checkout.
+- Silent cleanup failures leave executable untrusted files and shared Git metadata behind with no recovery record.
+
+Deferred adjustment:
+
+- Allocate unpredictable unique directories beneath one canonical managed root and persist an owner token before creation.
+- Resolve and verify containment and ownership before every remove; reject empty, truncated, colliding, reparse-point, or unexpected paths.
+- Perform add/remove/prune under the Git lock, record partial creation before invoking Git, and persist cleanup failures for bounded retry.
+
+### R-082 — Verification executes untrusted PR code on the Orchestra host and can pass without checks
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `verifyProject` executes npm scripts or pytest selected from cloud-generated repository files with the host process's privileges and working environment.
+- `runProcess` explicitly merges the full `process.env`; no secret-reduced environment, filesystem sandbox, network policy, dependency/install-script policy, CPU/memory limit, or aggregate output limit is applied.
+- Process output is accumulated without a bound before only the final stored string is truncated.
+- The reviewer does not install dependencies deterministically from lockfiles, so missing packages can produce misleading failures and existing host/worktree state can influence results.
+- `verified` is computed with `verificationResults.every(...)`; an empty result set, including no supported project or malformed package metadata, therefore passes.
+- A probe confirmed `verified: true` with zero configured verification results. `skipVerification: true` also explicitly returns verified rather than skipped.
+- Verification results are returned in memory but not durably tied to the exact SHA.
+
+Risk:
+
+- A malicious PR can read credentials, modify accessible files, access the network, spawn processes, or exhaust memory during what is presented as review.
+- Users can receive a green verification result when no check ran or when the reviewed environment was not reproducible.
+
+Deferred adjustment:
+
+- Execute untrusted checks in a constrained worker/container with a minimal environment, read-only inputs where possible, explicit network policy, resource/output limits, and reliable process-tree termination.
+- Install dependencies deterministically under an explicit install-script policy and record toolchain/lockfile identity.
+- Model `not_configured`, `skipped`, `passed`, `failed`, `timed_out`, and `infrastructure_error` separately; only `passed` may satisfy the merge gate.
+- Persist structured results with the exact head SHA and invalidate them whenever that SHA changes.
+
+### R-083 — Review evidence is neither durable nor connected to the cloud lifecycle
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `runWorktreeReview` accepts loose caller values and returns a transient object; it reads or writes no cloud session, execution attempt, review cycle, event, or verification record.
+- No transaction connects the resolved head, diff, changed files, checks, verdict state, and task transition.
+- The module has no production caller at this commit and therefore cannot resume after a crash or prevent stale review reuse.
+- Diff and command outputs are returned as potentially large in-memory strings with no durable artifact identity, content hash, or explicit size policy.
+- Cleanup occurs before any caller can independently inspect the worktree, while cleanup failures are suppressed and absent from the result.
+
+Risk:
+
+- Restart recovery cannot prove which commit and evidence were reviewed, and later code can accidentally attach results to a changed PR.
+- Audit data can be lost while stale or incomplete results still influence task state.
+
+Deferred adjustment:
+
+- Introduce a durable review aggregate linked to cloud session, attempt, cycle, base SHA, and exact head SHA.
+- Persist bounded/hash-addressed artifacts and structured verification results before emitting a review-ready transition.
+- Drive review through an idempotent application workflow with explicit states for resolving, fetching, verifying, reviewing, cleanup-pending, and failed/recoverable.
+
+### R-084 — Focused tests bypass every remote and verification safety boundary
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The end-to-end helper test supplies local commits while setting both `skipFetch: true` and `skipVerification: true`.
+- No test calls `fetchPullRequestRef`, uses a bare remote or fork PR, checks fetched-versus-supplied identity, simulates a force-push, or asserts temporary-ref cleanup.
+- No test covers invalid/missing base or head objects, Git nonzero exits, divergent history, three-dot behavior, unusual filenames, ref collisions, concurrent reviews, locks, partial worktree creation, ownership, cleanup failure, or restart.
+- Verification tests cover neither real commands nor no-check/malformed manifests, failure, timeout, cancellation, environment isolation, output limits, child processes, or deterministic dependency setup.
+- All three focused tests passed while the false-success and path-collision probes remained reproducible.
+
+Risk:
+
+- The suite demonstrates basic happy-path Git mechanics but cannot protect the exact-commit, isolation, cleanup, and untrusted-execution guarantees implied by the feature name.
+
+Deferred adjustment:
+
+- Use isolated local bare remotes to test exact PR refs, forks, force-push changes, contradictory identity inputs, and task-owned ref cleanup.
+- Inject Git, worktree storage, verification runner, clock, lock, and persistence ports for deterministic boundary-failure and concurrency tests.
+- Add adversarial path, filename, no-check, malicious-script, resource-limit, crash/restart, and cleanup-retry cases before enabling the workflow.
+
+### R-085 — Worktree review is another monolithic cross-layer provider module
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The 230-line Jules provider file combines task-path policy, filesystem deletion, Git remote strategy, ref mutation, worktree lifecycle, diff construction, verification orchestration, error presentation, and result composition.
+- It imports concrete Git and verification implementations instead of provider-neutral PR-resolution, Git-repository, managed-worktree, and verification-runner ports.
+- Generic GitHub/Git/worktree behavior is placed under the Jules adapter even though it should be reusable for other providers and local review workflows.
+- Public production options include `skipFetch` and `skipVerification`, allowing central safety steps to be bypassed instead of injecting controlled test doubles.
+- No production composition root connects the module to `ExecutionProvider` or an application workflow.
+
+Risk:
+
+- Adding another provider, Git host, verification environment, storage policy, or recovery state requires editing one destructive cross-layer unit and risks disrupting working review behavior.
+- The bypass flags and concrete dependencies make critical failure paths difficult to test without real filesystem and process side effects.
+
+Deferred adjustment:
+
+- Separate PR identity resolution, task-owned ref fetching, managed worktree allocation, diff/artifact generation, verification execution, persistence, transition policy, and cleanup into narrow modules.
+- Keep Jules-specific output mapping in its adapter and place reusable GitHub/Git review services behind provider-neutral application ports.
+- Remove production bypass flags, compose fakes at dependency injection boundaries, and add architecture checks that enforce dependency direction and module responsibility.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:

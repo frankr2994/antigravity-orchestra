@@ -80,11 +80,29 @@ export class CloudSessionRepository {
   }
 
   listNonTerminal(): CloudSessionReference[] {
-    const terminalStates = ['COMPLETED', 'FAILED'];
+    const terminalStates = ['COMPLETED', 'FAILED', 'CANCELLED'];
     const placeholders = terminalStates.map(() => '?').join(',');
     return this.db.prepare(`SELECT * FROM cloud_sessions WHERE state NOT IN (${placeholders}) ORDER BY created_at ASC`)
       .all(...terminalStates)
       .map(mapCloudSession);
+  }
+
+  acquirePollingLease(id: string, leaseDurationMs = 30_000): boolean {
+    const stamp = now();
+    const expiresAt = new Date(Date.now() + leaseDurationMs).toISOString();
+    const result = this.db.prepare(`
+      UPDATE cloud_sessions
+      SET polling_lease_expires_at = ?, updated_at = ?
+      WHERE id = ?
+        AND (polling_lease_expires_at IS NULL OR polling_lease_expires_at < ?)
+    `).run(expiresAt, stamp, id, stamp);
+    return Number(result.changes || 0) > 0;
+  }
+
+  releasePollingLease(id: string) {
+    const stamp = now();
+    this.db.prepare('UPDATE cloud_sessions SET polling_lease_expires_at = NULL, updated_at = ? WHERE id = ?')
+      .run(stamp, id);
   }
 
   update(
