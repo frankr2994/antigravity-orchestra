@@ -29,6 +29,13 @@ Implementation and tests should not be changed during a phase review unless a fi
 | R-010 | 2 | `7574a1f` | Medium | Open | Circular dependencies | The documentation claims circular dependencies are checked, but the architecture suite contains no cycle detection. |
 | R-011 | 2 | `7574a1f` | Medium | Open | State contracts | The documented and tested Orchestra state list is incomplete and disconnected from the production task-state type. |
 | R-012 | 2 | `7574a1f` | Medium | Open | Transition architecture | The document presents the target module layout as current and enforced without defining legacy exceptions or a migration ratchet. |
+| R-013 | 3 | `ff6f8b2` | High | Open | Provider isolation | Jules-specific API types, mapping logic, and session fields are publicly exported from the provider-neutral domain. |
+| R-014 | 3 | `ff6f8b2` | High | Open | Event contracts | `TaskEvent` still uses an unrestricted string type and unknown payload, so canonical event names and payloads are not enforced. |
+| R-015 | 3 | `ff6f8b2` | High | Open | State persistence | Raw or invalid task states remain accepted at runtime because persistence casts database strings into the domain type without validation. |
+| R-016 | 3 | `ff6f8b2` | Medium | Open | State mapping | Provider completion and unknown-state behavior have ambiguous terminal and user-attention semantics. |
+| R-017 | 3 | `ff6f8b2` | Medium | Open | Provider roles | The execution-provider contract permits `auto` providers and treats Codex and Gemma as implementation workers. |
+| R-018 | 3 | `ff6f8b2` | Medium | Open | Contract tests | JavaScript sample-object tests do not compile against or negatively test the TypeScript interfaces they claim to verify. |
+| R-019 | 3 | `ff6f8b2` | Medium | Open | Review invariants | Review verdict and verification interfaces permit internally contradictory combinations. |
 
 ## Phase 1 review
 
@@ -331,6 +338,187 @@ Deferred adjustment:
 - Add a current-state inventory and bounded legacy exception list.
 - Assign each exception a removal phase and prevent the exception count from increasing.
 - Update enforcement claims to match what automated checks actually validate.
+
+## Phase 3 review
+
+### Review scope
+
+- Reviewed commit: `ff6f8b2c6aa3ed4602b5f80c3d8c3e89cf383efa`
+- Commit subject: `feat(domain): extract shared domain contracts and jules state mapper (phase 3)`
+- Primary artifacts reviewed: `server/domain/**`, `server/types.ts`, and `tests/domain-contracts.test.mjs`
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- `npm run build:server`: passed.
+- `node --test tests/domain-contracts.test.mjs`: four tests passed with zero failures.
+- Phase 3 domain source and its focused test were unchanged between `ff6f8b2` and the then-current Phase 4 head, so the focused verification exercised the reviewed implementation.
+
+### R-013 — Jules-specific contracts leak into the provider-neutral domain
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `server/domain/tasks/states.ts:45-57` defines the alpha `JulesSessionState` inside the domain despite saying it is isolated to the provider adapter layer.
+- `server/domain/tasks/states.ts:68-154` places `mapJulesToOrchestraState` and Jules-specific reason text in the domain.
+- `server/domain/execution/attempt.ts:27-45` defines a `CloudSessionReference` fixed to `providerId: 'jules'` with Jules resource names and dispatch metadata.
+- `server/domain/index.ts` publicly re-exports all of these vendor-specific types and functions.
+- `ModelSelection` also adds a Jules model field even though Jules model selection is not part of the provider-neutral task contract.
+
+Risk:
+
+- Jules alpha API changes will force modifications to the supposedly stable domain layer and every consumer of its public exports.
+- Adding another cloud provider will encourage duplicate vendor-specific domain records instead of adapter isolation.
+
+Deferred adjustment:
+
+- Move `JulesSessionState`, Jules response normalization, and Jules-to-provider mapping into `server/providers/jules`.
+- Keep the domain limited to provider-neutral execution state and task-transition decisions.
+- Replace `CloudSessionReference` with a provider-neutral reference containing an opaque provider ID, external session ID, and provider-neutral metadata; persist Jules-specific fields in its adapter/infrastructure record where necessary.
+- Export vendor contracts only from the Jules adapter package.
+
+### R-014 — Task and timeline events are not canonical contracts
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `server/domain/tasks/events.ts:7-14` declares `TaskEvent.type` as any string and `payload` as `unknown`.
+- The persistence layer accepts `agent` and `type` as strings and casts them into `TaskEvent` when reading.
+- The frontend continues to define its own independent `TaskEvent` shape and event-name registry.
+- No discriminated union connects an event name to its required payload.
+
+Risk:
+
+- Misspelled names, invalid payloads, unknown agents, and server/UI event drift all remain compile-time valid.
+- Jules activity translation could emit events that silently fail in the existing UI.
+
+Deferred adjustment:
+
+- Define a canonical event-payload map and derive a discriminated `TaskEvent` union from it.
+- Use the same contract in emitters, persistence repositories, SSE serialization, and the typed frontend client.
+- Add runtime validation at external and persisted-data boundaries.
+- Coordinate this repair with Phase 1 finding R-002.
+
+### R-015 — Task-state separation is not enforced at runtime
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `TaskRecord.state` is narrowed to `OrchestraTaskState` only at the TypeScript level.
+- At commit `ff6f8b2`, `mapTask` reads any SQLite text and casts it directly to `TaskState` without validation.
+- The SQLite task-state column has no check constraint, and state updates do not validate transition membership at runtime.
+- `CloudSessionReference.state` is an unrestricted string rather than a provider-specific or provider-neutral state type.
+- The tests never attempt to persist a raw Jules state in the Orchestra task-state field.
+
+Risk:
+
+- Raw provider states, misspellings, or corrupted historical values can enter the task model while appearing type-safe to downstream code.
+- The Phase 3 acceptance criterion that raw provider state cannot be stored as Orchestra task state is not fully met.
+
+Deferred adjustment:
+
+- Add runtime parsers for Orchestra and provider states at repository and API boundaries.
+- Reject or explicitly quarantine unknown persisted task states instead of casting them.
+- Add database constraints or migration-time validation where compatible with recovery requirements.
+- Store raw provider state in a separate provider-owned field.
+- Add negative persistence tests using raw Jules and malformed state values.
+
+### R-016 — Terminal and unknown-state semantics are ambiguous
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `COMPLETED` maps to `executionState: 'COMPLETED'` but returns `isTerminal: false` because the Orchestra task proceeds to review.
+- The `isTerminal` property does not state whether it describes the provider execution or the Orchestra task.
+- Unknown and empty provider states are reported as `WORKING`, with no required user action; `STATE_UNSPECIFIED` produces no reason.
+
+Risk:
+
+- A poller may continue polling a completed Jules session or stop the wider task at the wrong point, depending on how it interprets `isTerminal`.
+- A new terminal or attention-required Jules state may be hidden as ordinary work and remain stuck indefinitely.
+
+Deferred adjustment:
+
+- Separate `providerTerminal` from `taskTerminal`, or rename the existing flag to state its exact scope.
+- Add an explicit provider-neutral `UNKNOWN` or attention state rather than treating unknown values as confirmed work.
+- Ensure unknown states remain pollable while also surfacing diagnostics and bounded escalation.
+- Test poller decisions for completed, failed, unspecified, and future states.
+
+### R-017 — Execution-provider roles and targets are over-broad
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `WorkerIdentity` includes Antigravity, Jules, Codex, and Gemma.
+- `ExecutionProvider.id` accepts that full union and requires implementation-oriented `preflight`, `start`, and `inspect` methods.
+- `ExecutionProvider.target` accepts `ExecutionTarget`, including `auto`, even though Auto is a routing decision rather than an executable provider location.
+- Phase 7 explicitly requires Codex and Gemma to remain specialist services instead of being forced into an implementation-worker abstraction.
+
+Risk:
+
+- Later phases may implement fake execution methods for specialists or accidentally route work to an `auto` provider.
+- Worker execution and specialist analysis responsibilities become difficult to enforce.
+
+Deferred adjustment:
+
+- Introduce a narrower `ImplementationWorkerIdentity` for Antigravity and Jules.
+- Restrict provider targets to `local` or `cloud`.
+- Keep `auto` in routing requests only.
+- Define separate specialist contracts for classification, analysis, review, and distillation.
+
+### R-018 — Interface contract tests do not exercise TypeScript contracts
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `tests/domain-contracts.test.mjs:98-143` creates untyped JavaScript objects for execution attempts, review verdicts, and verification results.
+- The assertions only confirm values that were assigned in the same test.
+- Those objects are never checked against `ExecutionAttempt`, `ReviewVerdict`, or `VerificationResult` by TypeScript or a runtime validator.
+- No negative test proves raw provider state is rejected from `TaskRecord.state`.
+
+Risk:
+
+- Breaking or weakening an interface can leave every named “contract” test green.
+
+Deferred adjustment:
+
+- Add TypeScript contract fixtures compiled as part of the test suite using `satisfies` and intentional `@ts-expect-error` cases.
+- Add runtime-schema tests for data that crosses API, provider, database, or SSE boundaries.
+- Retain JavaScript runtime tests only for executable behavior such as state mapping.
+
+### R-019 — Review and verification invariants allow contradictions
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `ReviewVerdict` independently stores `verdict` and `blocked`, allowing combinations such as `PASS` with `blocked: true` or `BLOCK` with `blocked: false`.
+- `ReviewVerdictType` contains both `PASS` and `APPROVED` without defining their distinct semantics.
+- `VerificationResult.status` can be `passed` while individual checks are failed, or `not_configured` while populated checks claim execution.
+
+Risk:
+
+- Workflow gates may choose different outcomes depending on which contradictory field they read.
+
+Deferred adjustment:
+
+- Use discriminated unions or constructors that derive `blocked` from the verdict.
+- Define one canonical vocabulary for automated review versus user approval.
+- Derive aggregate verification status from checks, or validate consistency at construction and persistence boundaries.
 
 ## Future phase review template
 
