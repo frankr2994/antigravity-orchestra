@@ -958,6 +958,189 @@ Deferred adjustment:
 - Remove the duplicate-prefix route.
 - Add a route-manifest test that rejects unintended paths and duplicates.
 
+## Phase 6 review
+
+### Review scope
+
+- Reviewed commit: `a47a23379ca0505b960f43e2915b0956c15194f4`
+- Commit subject: `feat(jules): build isolated google jules api client and contract tests (phase 6)`
+- Primary artifacts reviewed: `server/providers/jules/**`, `tests/jules-client.test.mjs`, the Phase 6 and Phase 9 requirements in `julesplan.md`, and the official Jules REST API reference as available on 2026-08-22.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that the client, error, wire-type, and focused-test blobs are unchanged between `a47a233` and the test checkout.
+- `npm run build:server`: passed.
+- `node --test tests/jules-client.test.mjs`: five tests passed with zero failures after rerunning outside the process sandbox; the first sandboxed run was blocked by `spawn EPERM` before loading the tests.
+- A direct retry probe returned `503` once and then success; `createSession` issued two POST requests.
+- Compared the implementation with the official Jules Sessions, Activities, Sources, Types, and API Overview documentation.
+- Confirmed that `server/tasks.ts` was unchanged from Phase 5 and remained 891 lines in this commit.
+
+### R-036 — The commit does not implement the planned Phase 6
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 6 as decomposing the local `TaskManager` workflow into focused submission, routing, execution, failover, review, repair, verification, Git finalization, monitoring, recovery, and steering services.
+- Commit `a47a233` changes only Jules client files, its focused test, and the repair tracker; `server/tasks.ts` is unchanged from Phase 5 and remains 891 lines.
+- The work in this commit corresponds to the plan's Phase 9, while the Phase 6 acceptance criteria for independently testable review/repair policy and reusable cloud workflow contracts are not exercised.
+
+Risk:
+
+- Phase tracking can report the monolith as decomposed when the central workflow remains untouched.
+- Later cloud integration may be built around the existing monolith, increasing coupling and making the deferred modularization riskier.
+
+Deferred adjustment:
+
+- Reconcile the implementation ledger with `julesplan.md`; do not mark the planned Phase 6 complete based on this commit.
+- Perform the missing workflow decomposition behind characterization tests before connecting Jules orchestration to `TaskManager` internals.
+- Give each extracted service a narrow port and independent tests so future providers can reuse policy without copying local execution code.
+
+### R-037 — The client calls unsupported operations and omits required ones
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `client.ts:208-210` calls `POST sessions/{id}:sendFeedback` with `{ message }`; the official API specifies `POST sessions/{id}:sendMessage` with a required `{ prompt }` body.
+- `client.ts:214-222` exposes `:pause` and `:resume`, neither of which is documented as a Jules REST session endpoint.
+- The official API and Phase 9 plan require deleting sessions, but the client has no `deleteSession` method and its request method type permits only `GET` and `POST`.
+- The Phase 9 plan requires retrieving sources, and the official API provides `GET /sources/{sourceId}`, but the client only lists sources.
+- The focused test asserts the incorrect `:sendFeedback` URL, so it passes while preserving the incompatibility.
+
+Risk:
+
+- User feedback will fail against the real service, while callers are offered pause/resume capabilities that the API does not provide.
+- Session cleanup and direct source retrieval cannot be implemented through this client without bypassing or expanding it ad hoc.
+
+Deferred adjustment:
+
+- Replace `sendFeedback`'s wire operation with the documented `:sendMessage` endpoint and `{ prompt }` body while retaining a provider-neutral application-level name if desired.
+- Add `DELETE` support, `deleteSession`, and `getSource` with exact resource-name handling.
+- Remove unsupported pause/resume methods unless a dated official contract or capability probe establishes them.
+- Build endpoint tests from sanitized official-response fixtures rather than implementation-authored expectations.
+
+### R-038 — Wire types contradict the documented Jules schemas
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `types.ts:48` models `Session.outputs` as one object; the API returns an array of `SessionOutput` values.
+- `JulesPullRequestOutput` invents `headBranch`, `baseBranch`, and `headCommitSha`, omits the documented `description`, and conflicts with the plan's explicit warning not to assume PR branch names or commit SHAs.
+- `JulesActivity` uses generic `type` and `plan` properties, but the documented activity shape uses `originator` and event-specific fields such as `planGenerated`, `agentMessaged`, `progressUpdated`, `sessionCompleted`, and `sessionFailed`.
+- The generic artifact `{ type, uri, metadata }` does not represent the documented `changeSet`, `bashOutput`, and `media` variants.
+- `githubRepo.defaultBranch` is typed as a string even though the API returns a branch object, and session fields such as `url` and `automationMode` are absent.
+
+Risk:
+
+- Valid API responses appear type-safe but are read through the wrong shape, causing completed outputs, plans, messages, branches, and artifacts to be lost or misinterpreted.
+- Invented fields encourage downstream code to depend on data the service does not promise.
+
+Deferred adjustment:
+
+- Rebuild provider-local DTOs from the current official alpha schema, including arrays and event/artifact variants.
+- Remove undocumented output fields and derive any Git metadata through a separate verified GitHub integration.
+- Keep wire DTOs isolated from provider-neutral domain models and explicitly map only validated values.
+
+### R-039 — Typed response validation and fixture-based contract tests are absent
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `client.ts:126` casts `await response.json()` to generic `T` without performing any runtime validation.
+- List methods use fallbacks such as `res.sources || []`, allowing malformed payloads to masquerade as valid empty pages.
+- `JulesSession.state` is declared as `JulesSessionState | string`, which simplifies to an unrestricted string and provides no wire-state constraint.
+- `tests/jules-client.test.mjs` uses hand-authored mock objects and contains no recorded, sanitized fixtures, despite the plan requiring typed validation and recorded contract fixtures.
+- The mocks omit or encode the same shapes that are wrong in production, so all five tests pass despite R-037 and R-038.
+
+Risk:
+
+- Alpha API drift, error envelopes returned with an unexpected status, and malformed successful payloads can enter orchestration as trusted data.
+- Contract regressions remain green because the tests validate the implementation against itself.
+
+Deferred adjustment:
+
+- Validate every successful response at the provider boundary and raise a typed, redacted contract error containing endpoint and correlation context.
+- Preserve unknown enum values as explicit unknown variants rather than accepting arbitrary strings silently.
+- Add sanitized fixtures for sources, every session state, outputs, activities/artifacts, pagination, empty responses, and Google RPC errors.
+- Add negative tests proving malformed payloads are rejected.
+
+### R-040 — Pagination tokens are discarded for sources and activities
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `listSources` and `listActivities` accept a `pageToken`, but return only their item arrays and discard the response's `nextPageToken`.
+- A caller therefore cannot discover the token needed to request the next page through the public client API.
+- `listSessions` returns its response envelope, creating an inconsistent pagination contract across list methods.
+- No helper follows pages, bounds collection, or tests multi-page behavior even though pagination is a Phase 9 requirement.
+
+Risk:
+
+- Repositories and activity history beyond the first page are silently invisible.
+- Monitoring can miss user-action requests, failures, completion events, or output artifacts and leave orchestration in the wrong state.
+
+Deferred adjustment:
+
+- Use one consistent page result such as `{ items, nextPageToken }` for every list operation.
+- Optionally add a bounded async iterator or explicit collect-all helper above the single-page methods.
+- Test token propagation, empty intermediate pages, multiple pages, caller aborts, and maximum-page safeguards.
+
+### R-041 — Retry and abort behavior can duplicate mutations or ignore cancellation
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The generic request loop retries every transient status and network failure regardless of method, including `createSession`, messaging, and plan approval POSTs.
+- A direct probe with one `503` followed by success caused `createSession` to issue two POST requests; no idempotency key or reconciliation step is present.
+- `429` is retried using local jitter only; a server `Retry-After` value is not read.
+- A signal already aborted before the call is not checked, and the caller's abort listener is removed before transient-response backoff. The sleep is not abortable, so an abort during backoff can still be followed by another request.
+
+Risk:
+
+- A lost response or transient failure can create duplicate Jules sessions or repeat user-visible mutations.
+- Shutdown and user cancellation can be delayed or ignored, while rate-limit recovery may retry earlier than the service requests.
+
+Deferred adjustment:
+
+- Default automatic retries to safe reads; define and test an explicit idempotency/reconciliation policy before retrying mutations.
+- Honor valid bounded `Retry-After` guidance for `429` and applicable service errors.
+- Check `signal.throwIfAborted()` before every attempt and make backoff abortable.
+- Inject delay and jitter functions so retry, timeout, and cancellation behavior can be tested deterministically.
+
+### R-042 — Secret exposure remains possible despite message redaction
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `JulesApiClient.apiKey` is a public enumerable property, and the constructor test explicitly reads it back.
+- `JulesApiError.details` retains the raw Google RPC detail objects without recursive redaction.
+- The redaction tests cover selected URL, Google-key, GitHub-token, and bearer-token patterns, but do not test structured error details or serialization of the client/error objects.
+
+Risk:
+
+- Generic object serialization, diagnostics, or structured error logging can disclose a Jules credential or a sensitive value echoed in error details.
+
+Deferred adjustment:
+
+- Keep credentials in a private, non-serializable field and expose no getter for the raw value.
+- Sanitize or omit structured upstream error details before attaching them to throwable/loggable objects.
+- Add serialization and nested-detail leakage tests, coordinated with R-009, R-022, and R-033.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:
