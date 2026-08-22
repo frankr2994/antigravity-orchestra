@@ -2,7 +2,22 @@
 
 開発環境に関するルール。
 
-## 推奨ツール
+## リポジトリ既定ツールを優先
+
+既存プロジェクトでは、リポジトリが選択済みのツールとロックファイルを使う。
+明示的な移行判断なしにパッケージマネージャー、ロックファイル、テストランナー、
+フォーマッターを追加・置換しない。
+
+- `package-lock.json` → npm（クリーンインストールは `npm ci`）
+- `pnpm-lock.yaml` → pnpm
+- `yarn.lock` → Yarn
+- `uv.lock` → uv
+- `poetry.lock` → Poetry
+- `requirements*.txt` → 既存の pip 系ワークフロー
+
+以下は、新規プロジェクトで選択肢が未決定の場合の推奨値とする。
+
+## 新規プロジェクトの推奨ツール
 
 ### Python プロジェクト
 
@@ -57,7 +72,7 @@ DATABASE_URL=your-database-url-here
 
 ## 依存関係の管理
 
-### Python
+### Python（uv を採用済みの場合）
 
 ```bash
 # uv を使用
@@ -65,7 +80,7 @@ uv pip install package-name
 uv pip freeze > requirements.txt
 ```
 
-### Node.js
+### Node.js（pnpm を採用済みの場合）
 
 ```bash
 # pnpm を使用

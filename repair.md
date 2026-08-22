@@ -2760,6 +2760,733 @@ Deferred adjustment:
 - Keep Jules state/message mapping in its adapter and place provider-neutral repair orchestration in an application service composed at bootstrap.
 - Remove duplicate repository aliases, require dependency injection, and add architecture tests enforcing module ownership and dependency direction.
 
+## Phase 14 review
+
+### Review scope
+
+- Reviewed commit: `c37d24a10ca05151ecc367a09c72c56d1c578a8e`
+- Commit subject: `feat(jules): implement background cloud supervisor and polling loop (phase 14)`
+- Primary artifacts reviewed: `server/providers/jules/supervisor.ts`, the cloud-session repository lease changes, `tests/jules-supervisor.test.mjs`, the existing session manager/client/types, planned Phases 14, 16, 17, and 24 in `julesplan.md`, and the official Jules Sessions, Activities, and API overview references.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that the reviewed supervisor and cloud-session repository in the working tree exactly matched commit `c37d24a` by comparing their Git blob IDs (`e7c1897ae9c5f27f0955f35e7169c339457e7095` and `abf98ac3230db004adeb7aac8b3453ffa3108cbf`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-supervisor.test.mjs`: two tests passed with zero failures.
+- `npm test`: the concurrent run passed 54 of 55 file-level subtests, with only `tests/core.test.mjs` reported failed; rerunning that file alone passed all 61 of its tests, so no Phase 14 regression was reproducible from that result.
+- Confirmed with `git grep` that no production code constructed or started `JulesSupervisor` at this commit; only its definition and focused test referenced it.
+- Compared the implementation with the official Jules session-output, activity-pagination, and API error/rate-limit contracts.
+- A returned-failure probe made `pollSession` return `{ ok: false, error: "429 rate limited" }`; the supervisor reported `{ polled: 1, active: 1, errors: 0 }`.
+- A terminal-handoff probe persisted `COMPLETED` and threw from `onTerminal`; the first tick reported one error and the next tick found zero active sessions, proving that the handoff was not retried.
+- A lease-race probe let a 1 ms lease expire, acquired a new 60-second lease, released through the old owner-independent API, and immediately acquired a third lease, proving that a stale worker can erase a current lease.
+- A loop-failure probe made `listNonTerminal` throw; every subsequent tick returned zero work because `isTickInProgress` remained set.
+
+### R-104 — The planned Phase 14 explicit-dispatch work was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 14 as transactional task/attempt creation, explicit session dispatch, immutable source/branch selection, plan/PR policy, persistence before monitoring, provider-neutral events, idempotency, ambiguous-timeout reconciliation, and duplicate-session detection.
+- Commit `c37d24a` changes no dispatch, preflight, attempt transaction, idempotency, reconciliation, or duplicate-detection code.
+- The commit instead introduces part of planned Phase 16's polling lease/loop and Phase 17's recovery surface.
+- Previously recorded dispatch findings R-068, R-069, R-073, R-074, and R-075 remain unresolved.
+
+Risk:
+
+- Phase tracking can report dispatch complete even though an accepted-but-unrecorded remote session can still be duplicated or lost after timeout or persistence failure.
+- Polling infrastructure cannot repair an unsafe or unidentified dispatch.
+
+Deferred adjustment:
+
+- Keep planned Phase 14 open until dispatch intent, remote acknowledgement, attempt/cloud-session persistence, task transition, and event publication form an idempotent reconcile-first workflow.
+- Detect duplicate sessions by durable dispatch identity and surface ambiguous outcomes for reconciliation rather than retrying creation.
+- Treat this commit only as an incomplete implementation toward planned Phases 16 and 17.
+
+### R-105 — The supervisor is not integrated and does not provide durable restart recovery
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- At `c37d24a`, `JulesSupervisor` is exported but has no production constructor, bootstrap call, shutdown hook, or dependency composition; only the focused test instantiates it.
+- `start()` installs an in-memory `setInterval` and waits one full interval before the first tick.
+- There is no durable next-poll time, supervisor heartbeat, recovery checkpoint, startup reconciliation, or diagnostic state showing whether a session has an active poller.
+- `listNonTerminal()` reloads rows, but nothing starts the reload/poll process after a dashboard restart.
+
+Risk:
+
+- Deployed cloud sessions are never polled by this commit, and a restart can leave them indefinitely stale.
+- Operators cannot distinguish a healthy delayed poll from an absent or dead supervisor.
+
+Deferred adjustment:
+
+- Compose and start a provider-neutral polling application service during bootstrap, run an immediate recovery scan, and await a bounded graceful stop during shutdown.
+- Persist per-session due/retry/checkpoint state and expose supervisor/lease diagnostics.
+- Add restart integration tests for every nonterminal and terminal-handoff state before enabling cloud execution.
+
+### R-106 — Polling leases have no ownership or fencing and can be cleared by stale workers
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `cloud_sessions` stores only `polling_lease_expires_at`; acquisition returns a boolean rather than an owner ID, token, or generation.
+- There is no lease-renewal operation, and `releasePollingLease(id)` clears the lease solely by session ID without comparing the owner or acquired generation.
+- The default lease is 30 seconds while the Jules client can spend multiple timeout/retry/backoff periods in one request, and the terminal callback has no duration bound.
+- The adversarial probe demonstrated that after A's lease expired and B acquired a new 60-second lease, A's owner-independent release cleared B's lease and permitted C to acquire immediately.
+
+Risk:
+
+- Multiple dashboard instances can poll and process the same session concurrently.
+- A stale worker can overwrite activity/output state or duplicate a terminal handoff after a newer worker has legitimately taken ownership.
+
+Deferred adjustment:
+
+- Persist an opaque owner token and fencing generation plus acquired/renewed/expiry/worker diagnostic fields.
+- Require compare-and-set ownership for renewal, every lease-protected state transition, and release; stale tokens must have no effect.
+- Bound or renew long operations and test expiry takeover, stale writes/releases, process death, and clock behavior with multiple database connections.
+
+### R-107 — One infrastructure or callback error can permanently wedge polling, and stop does not cancel work
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `isTickInProgress` is reset only at the normal end of `tick()` rather than in an outer `finally`.
+- Errors from `listNonTerminal`, lease acquisition/release, or an `onError` callback can escape the per-session handler and leave the flag true.
+- The failure probe made session listing throw once; the next tick returned `{ polled: 0, active: 0, errors: 0 }` and could never resume.
+- `start()` creates an `AbortController`, but its signal is not passed to `pollSession`, the Jules client, callbacks, or lease work.
+- `stop()` clears the timer without awaiting an active tick, so work can continue while the store and other dependencies are shutting down.
+- Poll and lease durations accept zero or negative values without validation.
+
+Risk:
+
+- A transient database/callback failure can silently disable all cloud monitoring until process restart.
+- Shutdown can race in-flight database writes or callbacks, and invalid configuration can create a busy loop or already-expired leases.
+
+Deferred adjustment:
+
+- Put tick lifecycle cleanup in an outer `try/finally`, isolate reporting failures, and surface a persistent unhealthy state rather than returning misleading zero work.
+- Propagate one cancellation signal through the poll/client/handoff ports and make `stop()` await bounded in-flight completion.
+- Validate timing configuration and add database-failure, callback-failure, stop-during-poll, and restart tests.
+
+### R-108 — Returned poll failures are counted as successes and retried without durable backoff
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `JulesSessionManager.pollSession()` returns `ok: false` for a missing local session, missing credentials, and transient remote/network failures instead of throwing.
+- The supervisor never checks `pollResult.ok`; it increments `polled`, leaves `errors` at zero, releases the lease, and makes the same row eligible on the next interval.
+- The 429 probe reproduced `{ polled: 1, active: 1, errors: 0 }`.
+- There is no persisted retry count, error class, last error, `nextPollAt`, backoff, jitter, server retry hint, rate-limit budget, or paused/inactive cadence.
+- Sessions are processed sequentially from the full snapshot, and `active` counts rows leased by other workers or not actually polled.
+
+Risk:
+
+- Credential/configuration failures and provider outages appear healthy while the process repeatedly calls Jules.
+- Fixed synchronized polling across instances can amplify rate limits; one slow early session can starve later sessions.
+
+Deferred adjustment:
+
+- Treat `ok: false` as a typed poll failure and record accurate attempted/succeeded/failed/skipped metrics.
+- Persist bounded exponential backoff with jitter, retry classification and provider retry hints, plus slower schedules for paused/inactive states.
+- Claim only due rows in bounded batches and introduce fair, concurrency-limited execution behind a scheduler port.
+
+### R-109 — Terminal handoff is lossy, non-idempotent, and occurs after premature task completion
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `pollSession()` persists `COMPLETED`/`FAILED` and updates the Orchestra task before returning to the supervisor.
+- Only afterward does the supervisor invoke an optional, non-durable `onTerminal` callback.
+- If the callback throws or the process exits in that gap, `listNonTerminal()` excludes the session forever; the probe confirmed one callback error followed by zero active sessions.
+- If a lease expires during the callback, concurrent workers can call it more than once because it has no durable idempotency key or claimed handoff state.
+- A completed Jules session marks the task `completed` before planned PR URL validation, exact-head resolution/import, verification, Codex review, repair, merge, and cleanup.
+
+Risk:
+
+- A valid Jules PR can be permanently stranded without import/review, while the UI reports the task complete.
+- Duplicate callbacks can race Git operations or create duplicate downstream work.
+
+Deferred adjustment:
+
+- Persist a transactional terminal-observed/outbox record keyed by session, terminal version, and exact output identity before publication.
+- Drive an idempotent downstream state machine that retries unacknowledged handoffs and uses lease fencing/compare-and-set transitions.
+- Reserve task completion for the final verified integration state; provider completion should enter an intermediate import/review state.
+
+### R-110 — The supervisor repeats incompatible Jules output and activity assumptions
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The official Sessions reference models `outputs` as a list, but the supervisor reads `julesSession.outputs.pullRequest` and the local type models an object.
+- The focused fixture supplies that same object-shaped output and an undocumented `headCommitSha`, so it validates the implementation assumption rather than the published contract.
+- The published pull-request output provides a URL but not the trusted exact head SHA assumed here; GitHub PR resolution must independently establish the head identity.
+- The official Activities method is paginated with `nextPageToken`, but the inherited client returns only one page and the session manager uses timestamp-based filtering while suppressing activity-list errors.
+- The supervisor's terminal event therefore commonly lacks a real PR URL/SHA and continuously exercises the loss/duplication paths already recorded in R-068, R-070, R-071, and R-073.
+
+Risk:
+
+- Real Jules responses can lose PR metadata and activity history while the task advances into an incorrect terminal state.
+- Downstream review can have no trustworthy commit identity or may operate on stale/local state.
+
+Deferred adjustment:
+
+- Correct the Jules wire DTOs and fixtures to the official list-shaped outputs and fully paginated activity response.
+- Translate provider data at the adapter boundary, retain unknown typed metadata safely, and deduplicate/order activities by stable resource identity plus cursor.
+- Strictly validate the PR URL and resolve/fetch its exact head SHA through the GitHub/Git boundary before downstream work.
+
+### R-111 — Focused tests omit the failure and lifecycle boundaries that define a supervisor
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The two tests cover immediate acquire/release and two manually invoked happy-path ticks; `start()` and `stop()` are called back-to-back without observing scheduled behavior.
+- The lease test does not exercise expiry despite its title, multiple database connections/processes, renewal, stale release/write, or fencing.
+- The polling test uses the incompatible output fixture and does not assert `pollResult.ok`, activity pagination/deduplication, retry/backoff, rate limits, missing credentials, network/database failures, or error metrics.
+- There are no cases for callback failure/retry/idempotency, crash between terminal persistence and handoff, stop during an active request, stuck-tick recovery, restart/bootstrap, fairness, invalid intervals, or production wiring.
+- Both focused tests passed while every adversarial probe above reproduced a defect.
+
+Risk:
+
+- The suite gives confidence in the least consequential happy path while allowing lost terminal work, duplicate polling, silent supervisor death, and provider hammering.
+
+Deferred adjustment:
+
+- Add fake-clock scheduler tests and multi-connection database tests for lease fencing, renewal, expiry, stale operations, due selection, and backoff.
+- Add crash/restart and fault-injection tests at each persistence, network, callback, shutdown, and terminal-handoff boundary.
+- Use recorded official Jules response fixtures and include a production-bootstrap integration test that observes durable recovery.
+
+### R-112 — The supervisor extends the cross-layer monolith instead of creating durable polling ports
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- One concrete class owns interval scheduling, global overlap policy, row enumeration, distributed lease acquisition/release, Jules polling, provider output extraction, terminal workflow dispatch, metrics, cancellation state, and error policy.
+- It depends directly on concrete `Store`, `JulesSessionManager`, `JulesApiClient`, and `CloudSessionReference` rather than scheduler, due-work repository, lease, provider poller, transition, outbox, clock, and telemetry interfaces.
+- Provider-specific PR extraction is mixed into generic scheduling, while generic terminal orchestration is exposed as an optional callback with no durable contract.
+- Timing and lifecycle behavior are hidden process state, making recovery and deterministic tests dependent on the whole class.
+
+Risk:
+
+- Changing polling policy, persistence, Jules response mapping, terminal import/review, shutdown, or adding another provider requires editing the same unit and can disrupt working paths.
+- Failure isolation and recovery remain difficult because state transitions and side effects cannot be tested or replaced independently.
+
+Deferred adjustment:
+
+- Split a provider-neutral durable scheduler, due-session repository, owner-fenced lease service, Jules poll adapter/translator, transition service, terminal outbox consumer, clock, and telemetry ports.
+- Keep provider wire mapping inside the Jules adapter and compose application workflow components at bootstrap.
+- Add architecture tests enforcing dependency direction so new providers and workflow stages can be added without expanding a central polling class.
+
+## Phase 15 review
+
+### Review scope
+
+- Reviewed commit: `51b46905fbcdc407133bb5460eda27487529c112`
+- Commit subject: `feat(jules): implement dynamic task routing policy engine (phase 15)`
+- Primary artifacts reviewed: `server/providers/jules/router.ts`, its provider export, `tests/jules-router.test.mjs`, planned Phases 15 and 26 in `julesplan.md`, the existing Jules preflight/source/client/state contracts, and all production routing references at the reviewed commit.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that `router.ts` and its focused test exactly matched commit `51b4690` by comparing their Git blob IDs (`d5a1bb4413008139f702fde2347c012e56ac9e34` and `ffacd46ecd7c0da0c44a73fca1de534b81824638`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-router.test.mjs`: two tests passed with zero failures.
+- `npm test`: all 115 tests passed with zero failures.
+- Confirmed with `git grep` that no production code called `routeTask` at this commit; only its definition and focused test referenced it.
+- Confirmed that the commit changes no plan display, plan approval workflow, user-feedback workflow, timeline action, UI, session-state guard, or cancellation/deletion language.
+- A policy probe supplied deep complexity plus `security-sensitive`, `local-only-context`, and `database-migration` risk flags; the router still selected Jules cloud.
+- The same probe passed an invalid runtime target, which was silently treated as Auto and also selected cloud.
+- A task/project-binding probe routed Task A using an unrelated Project B repository and recorded two identical `task.routed` events when invoked twice.
+- The probe also confirmed `preflightOk: true` while the generated immutable dispatch branch existed neither locally nor under `refs/remotes/origin`; the fixture's upstream ref had been manufactured locally without contacting GitHub.
+- An availability probe selected local despite `localQuotaExhausted: true` when cloud preflight failed, and selected cloud despite `preflightOk: false` for an explicit cloud request.
+
+### R-113 — The planned Phase 15 plan-review and feedback workflow was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 15 as displaying generated plans, approving plans, requesting/responding to feedback through `sendMessage`, recording those actions in the timeline, and distinguishing deletion from cancellation.
+- Its acceptance criteria require approval only in `AWAITING_PLAN_APPROVAL`, feedback only in supported states, and idempotent or safely rejected repeated clicks.
+- Commit `51b4690` changes only a new routing function, one provider export, and focused routing tests; it changes no server/UI plan or feedback path.
+- The only existing Jules messaging method remains the incompatible `sendFeedback` endpoint/body recorded in R-095 and R-102.
+- Existing provider interface/client method declarations have no application service, state/ownership check, durable intent, timeline acknowledgement, API route, or UI control implementing the planned workflow.
+
+Risk:
+
+- Phase tracking can report plan interaction complete while users cannot see or approve a plan, answer Jules, or safely retry an action.
+- Any later direct use of the low-level client can approve/message the wrong state or session without an auditable idempotent transition.
+
+Deferred adjustment:
+
+- Keep planned Phase 15 open and implement provider-neutral plan/feedback application commands bound to task, cloud session, and current provider state.
+- Persist action intent and idempotency identity before calling the documented Jules methods, reconcile ambiguous results through activities, and publish timeline events transactionally/outbox-backed.
+- Add guarded API/UI controls for plan display, approval, feedback, and accurately distinct cancel/delete operations.
+
+### R-114 — The commit is an unintegrated, prematurely sequenced fragment of planned Phase 26
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Dynamic Auto routing is planned for Phase 26, which explicitly says to enable Auto only after explicit Local and Cloud modes are stable.
+- The prerequisite dispatch, polling, recovery, PR import/review, and repair defects recorded through R-112 remain open.
+- `routeTask` is merely exported from the Jules provider barrel; `git grep` found no production caller, task-creation integration, API route, UI selector, or execution dispatcher using its result.
+- The function returns a recommendation-like object but neither durably schedules a worker nor updates the task's target/routing state.
+- The commit subject and test names label this work Phase 15 even though it attempts only part of Phase 26.
+
+Risk:
+
+- A dead policy module can be mistaken for delivered user-facing routing, while later wiring may activate cloud paths whose prerequisites are still unsafe.
+- Phase ordering and acceptance evidence become unreliable.
+
+Deferred adjustment:
+
+- Track this code as incomplete Phase 26 work and keep both planned Phases 15 and 26 open.
+- Integrate routing only through the provider-neutral task-creation/scheduling workflow after explicit Local and Cloud paths meet their gates.
+- Add a feature/policy gate that prevents Auto selection until prerequisite capabilities and recovery controls are verified.
+
+### R-115 — Routing decisions can select a provider that the same result says is unavailable
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- An explicit cloud request whose preflight fails returns `target: 'cloud'`, `worker: 'jules'`, `preflightOk: false`, and `fallbackAvailable: true` rather than a rejected/blocked outcome or selected fallback.
+- The focused test asserts this contradictory result as “strictly respected.”
+- In Auto mode, credential or preflight failure always selects local before considering `localQuotaExhausted`.
+- The availability probe therefore returned local with `fallbackAvailable: false` despite `localQuotaExhausted: true`.
+- `fallbackAvailable` has inconsistent meaning: it is false on some selected local routes, true on a failed cloud route, and true on the default local route, with no fallback target or capability evidence.
+
+Risk:
+
+- A caller that dispatches from `target` can send work to Jules after a failed hard gate.
+- When both providers are unavailable, the router can loop into an exhausted local worker instead of producing an actionable blocked state.
+
+Deferred adjustment:
+
+- Separate requested target, recommended target, executable target, and outcome (`ready`, `blocked`, `fallback-proposed`, `rejected`) in the domain result.
+- Model provider capabilities and failure reasons explicitly; never return a provider as executable when its hard gates fail.
+- Require an explicit user-confirmed fallback for an unavailable requested target and test all two-provider availability combinations.
+
+### R-116 — Auto routing ignores required safety inputs and accepts invalid boundary data
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Planned Phase 26 requires local-only input, size/duration, interactive clarification, repository availability, both providers' availability/quota, risk, dependency/migration scope, user preference, and project policy.
+- The router considers only read-only status, Jules credential/source preflight, one local-quota boolean, and `complexity === 'deep'`.
+- `classification.riskFlags`, `classification.target`, `prompt`, project policy, clarification need, dependency/migration scope, Jules quota/capacity, and expected duration are unused.
+- The policy probe supplied explicit security/local-only/migration risks and still selected cloud solely because complexity was deep.
+- Runtime input is not schema-validated: an invalid `requestedTarget` falls through as Auto and selected cloud in the probe.
+- A provided object truthy as `julesClient` is treated as configured credentials without validating its client capability until a later path happens to use it.
+
+Risk:
+
+- Sensitive, migration-heavy, interactive, or otherwise locally constrained work can be auto-routed to cloud despite deterministic safety signals.
+- Malformed API input can silently change an explicit request into cloud-capable Auto behavior.
+
+Deferred adjustment:
+
+- Define and validate a versioned provider-neutral routing input schema at the API boundary; reject unknown targets and internally inconsistent classifications.
+- Implement deterministic hard constraints for local-only context, risk classes, migrations/dependencies, interaction requirements, policy, and real provider capability/quota before scoring preferences.
+- Persist which rules fired, which evidence was unavailable, and whether the user overrode a recommendation.
+
+### R-117 — Routing preflight reports readiness without proving the cloud dispatch ref is visible
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Both explicit-cloud and Auto branches call `runJulesPreflight(..., skipPush: true)` even though `skipPush` is documented as a dry-run test escape hatch.
+- The router can return `preflightOk: true` without creating/pushing the generated immutable dispatch branch and drops the discovered source, base SHA, target branch, and dispatch branch from its decision.
+- The probe observed `preflightOk: true` while neither the local dispatch ref nor an origin-tracking dispatch ref existed.
+- The focused test manufactures `refs/remotes/origin/main` locally and never contacts the declared GitHub remote, yet treats the repository as cloud-ready.
+- The inherited upstream check fails open when `git rev-list` fails and source discovery does not prove branch visibility; R-058 through R-066 remain unresolved.
+
+Risk:
+
+- Auto can recommend Jules based on stale or locally forged remote-tracking state, and a caller cannot bind the later dispatch to the repository/source/SHA that was evaluated.
+- A time-of-check/time-of-use change can route or dispatch different code from the user's reviewed context.
+
+Deferred adjustment:
+
+- Split non-mutating route eligibility from locked dispatch preparation and describe them with distinct result states rather than `preflightOk`.
+- At dispatch, acquire the repository lock, revalidate the exact full SHA/source/remote, create and push the immutable ref, verify it by remote read-back, and persist the resulting identity transactionally.
+- Remove production access to `skipPush`; provide explicit injected test ports/fixtures and fail closed on Git/remote ambiguity.
+
+### R-118 — Decisions and routing events are not bound, idempotent, or durably actionable
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `taskId`, `projectRoot`, classification, and requested target are independent caller inputs; the router never loads the task/project or proves that the inspected repository belongs to that task.
+- The probe routed a task stored under `F:/different-project` using a separate temporary repository and successfully appended routing events to the unrelated task.
+- `store` is optional, so the same decision can return with no durable event at all.
+- Repeating the identical request appended another indistinguishable `task.routed` event; the probe recorded two events with no decision ID, policy version, input hash, supersession link, or attempt identity.
+- The event omits the requested target, classification/rules, error/resolution, project/source/base/dispatch identity, capability snapshot, and override status.
+- The router neither compare-and-sets the task's routing state/target nor atomically claims scheduling, so the event can disagree with actual execution.
+
+Risk:
+
+- Audit history can claim a task was routed from evidence belonging to another repository, and retries/concurrent requests can produce contradictory decisions.
+- Recovery cannot determine which decision was authoritative or whether a worker was ever scheduled from it.
+
+Deferred adjustment:
+
+- Load task/project/classification/policy from one trusted aggregate and derive the repository root server-side.
+- Persist one versioned routing decision keyed by task and input/policy revision, using optimistic concurrency and an outbox event in the same transaction as the scheduling state.
+- Make repeated equivalent decisions idempotent and record explicit supersession/user override when inputs change.
+
+### R-119 — Focused tests validate the wrong phase and conceal routing safety failures
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Both tests exercise routing even though planned Phase 15's acceptance criteria concern plan approval, feedback eligibility, repeated actions, timeline records, and deletion/cancellation language.
+- The explicit-cloud test defines “strictly respected” as retaining `target: 'cloud'` after preflight failure instead of asserting a blocked or safely rejected outcome.
+- The Auto fixture fabricates a remote-tracking ref locally and uses `skipPush: true`; it does not prove the commit or immutable dispatch ref exists on GitHub/Jules.
+- Tests do not cover risk flags, local-only inputs, migration/dependency scope, project policy, interactive clarification, Jules quota, both-provider outage, malformed targets/classifications, task/project mismatch, or policy override.
+- Event assertions require only at least four rows and therefore accept duplicate/non-idempotent decisions without checking payload completeness or task state.
+- There are no production-integration, scheduling, concurrency, TOCTOU, failure/exception, feature-gate, or restart tests.
+- Both tests passed while the adversarial probes reproduced invalid-target cloud selection, ignored risk constraints, cross-project audit events, duplicate events, nonexistent dispatch refs, and contradictory provider availability.
+
+Risk:
+
+- The suite can certify a router that selects unavailable or unsafe providers and provides no Phase 15 user workflow.
+
+Deferred adjustment:
+
+- Add the actual Phase 15 state/ownership/idempotency/API/UI tests independently of later routing work.
+- For Phase 26, use server-bound task/project fixtures, real bare remotes or strict Git/provider fakes, a full deterministic constraint matrix, invalid-input tests, capability-outage combinations, and exact-ref verification.
+- Add integration tests proving that one durable decision schedules exactly one permitted attempt and that user overrides are explicit and auditable.
+
+### R-120 — Provider-neutral routing policy is embedded in another Jules cross-layer module
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `server/providers/jules/router.ts` owns provider-neutral Local/Cloud/Auto policy, user-target interpretation, classification rules, quota fallback, credential construction, live Git/Jules preflight, decision formatting, and database event publication.
+- It directly depends on concrete `Store`, `CredentialVault`, `JulesApiClient`, credential resolution, and Jules preflight rather than policy input, capability, provider-catalog, task repository, decision repository, and event/outbox ports.
+- The function mixes deterministic rules with network/Git/database side effects, so a nominal routing calculation can be slow, throw, or mutate history.
+- Adding a provider requires editing a module under the Jules adapter and expanding its target/worker conditionals.
+- Optional dependencies create multiple behavior modes and allow policy evaluation without persistence.
+
+Risk:
+
+- Changing routing rules, provider availability, persistence, Git checks, or adding another worker expands one cross-layer function and can disrupt established Local/Jules behavior.
+- Pure policy cannot be tested exhaustively without constructing infrastructure, and infrastructure failures cannot be isolated from decision logic.
+
+Deferred adjustment:
+
+- Move provider-neutral routing into a pure, versioned domain policy over validated capability/evidence snapshots.
+- Implement Jules eligibility/preparation, local capability, policy loading, decision persistence, and scheduling as narrow adapters/application services composed at bootstrap.
+- Make persistence mandatory at the orchestration boundary and add architecture tests preventing provider adapters from owning global routing or importing the Store facade.
+
+## Phase 16 review
+
+### Review scope
+
+- Reviewed commit: `a53934110a37ec7f1fd11d5f157b480ad3425ef8`
+- Commit subject: `feat(api): wire cloud execution route controller and dispatch pipeline (phase 16)`
+- Primary artifacts reviewed: `server/api/routes/jules.ts`, `tests/jules-routes.test.mjs`, their production mounting and provider/repository dependencies, planned Phases 14–19 in `julesplan.md`, the existing Phase 14 polling research, and the new implementation-integrity, testing, security, coding-principle, delegation, and role-boundary rules.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only per the user's request; dependency blockers are identified under the new implementation-integrity rule.
+
+### Verification performed
+
+- Confirmed that the reviewed route and focused test exactly matched commit `a539341` by comparing their Git blob IDs (`bbd2ba24d818ef6f905a04f4cf6fe9c922e959c9` and `f4c11b5104be22f424febb4962a71ba26238c1bf`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-routes.test.mjs`: two tests passed with zero failures.
+- `npm run lint`: passed with zero reported violations.
+- `npm test`: all 117 tests passed with zero failures.
+- Confirmed that the production API router mounts `createJulesRouter(store)`, so the new endpoints are live production paths rather than unused helpers.
+- Confirmed that the commit changes no supervisor, polling scheduler, session poller, Jules activity client, cloud-session schema/repository, lease, event translation, bootstrap, or recovery code.
+- An HTTP probe submitted the same dispatch twice; both returned 201, called remote creation twice, created separate tasks/cloud rows for the same remote session ID, and accepted a session owned by a different project.
+- The same probe sent JSON strings `"false"` for plan approval and Auto PR policy, which the route's `Boolean(...)` coercion converts to `true`, and used the externally exposed `skipPush: true` safety bypass.
+- While the cloud session was `PLANNING`, repeated plan approval and feedback requests both returned 200, each called Jules twice, and each appended duplicate events.
+- An activities probe supplied `pageSize=banana`; the route returned 200, omitted the invalid value from the provider request, discarded the provider's `nextPageToken`, returned raw unknown activity data, and persisted no cursor/event.
+
+### Effect of the new Markdown implementation rules
+
+There are limited improvements consistent with the new rules:
+
+- The focused tests make real HTTP requests through an Express-mounted router and use temporary SQLite and Git resources.
+- The router accepts injected Jules/session dependencies, which makes boundary testing easier.
+- Most task action routes load the cloud session through the task instead of accepting an independent remote-session ID.
+
+The central integrity rules were not followed:
+
+- The assigned Phase 16 scope was replaced with adjacent/future route work instead of stopping on the mismatch.
+- Known blocking dispatch, provider-contract, lease, polling, identity, review, and recovery findings were used as dependencies rather than resolved.
+- A production `skipPush` bypass was exposed specifically to make the test pass, despite the new rule expressly prohibiting this pattern.
+- HTTP/provider/database/Git identities are cast or coerced rather than validated; non-idempotent side effects lack durable intent/reconciliation; and a route module owns cross-layer workflows.
+- The 453-line route is larger and more cross-layer than the 118-line Phase 14 supervisor and 186-line Phase 15 router.
+
+Assessment: **slightly better test mechanics and dependency injection, but not materially better or cleaner overall**. The strongest new rules are contradicted by the implementation and tests. R-121 through R-129 are blocking for dependent cloud phases under `implementation-integrity.md`.
+
+### R-121 — Planned Phase 16 durable activity polling was not implemented
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks dependent cloud monitoring and recovery phases**
+
+Evidence:
+
+- Planned Phase 16 requires a persisted cursor/timestamp, full pagination, stable-ID deduplication, ordering, bounded backoff, rate-limit handling, slower paused/inactive cadence, terminal stop, per-session lease, and provider-to-Orchestra event translation.
+- Commit `a539341` modifies only one HTTP route module and its focused route test.
+- It changes none of the polling components or persistence needed by those requirements.
+- R-105 through R-112 remain unresolved, including absent supervisor bootstrap, unsafe ownerless leases, permanent tick wedging, false-success poll accounting, lossy terminal handoff, incompatible Jules wire shapes, missing fault tests, and cross-layer supervisor design.
+- The new `/activities` endpoint performs one client request only when an HTTP caller asks; it is not a poller and has no durable workflow behavior.
+- The new integrity rule requires stopping when work belongs to another phase and when blocking prerequisites remain, but this commit instead builds new routes over those blockers.
+
+Risk:
+
+- Cloud activity still cannot be monitored reliably across normal operation, rate limits, multiple instances, or restart.
+- Calling a first-page HTTP listing route can be mistaken for completing a durable background workflow.
+
+Deferred adjustment:
+
+- Keep planned Phase 16 open and do not begin dependent recovery/monitoring phases until the Phase 14 polling blockers are repaired.
+- Implement Phase 16 through a provider-neutral durable scheduler and Jules activity adapter with owner-fenced leases, persisted due/cursor/error state, stable event translation, and transactional/outbox publication.
+- Map every Phase 16 acceptance criterion to production code plus restart, concurrency, pagination, rate-limit, unknown-type, and fault-injection evidence before completion.
+
+### R-122 — The activities endpoint discards pagination and provides none of the required durable semantics
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks Phase 16 acceptance and restart-safe monitoring**
+
+Evidence:
+
+- `GET /tasks/:id/jules/activities` calls `client.listActivities` once and returns `{ activities }` directly.
+- `JulesApiClient.listActivities` returns only the activities array, discarding the documented `nextPageToken`, so neither the route nor a caller can complete pagination reliably.
+- The probe returned a provider page containing `nextPageToken: "next-page"`; the HTTP response omitted the token.
+- `pageSize` is parsed with `Number(...)` but is not checked for finiteness, integer form, or the documented bounds; `pageSize=banana` returned 200 and silently became an omitted parameter.
+- No cursor/timestamp is updated, no stable-ID deduplication or ordering occurs, no raw activity is translated/persisted as an Orchestra event, and no lease/backoff/rate-limit/terminal-state policy is involved.
+- An unknown activity type was merely returned as raw HTTP data; it was not durably retained as provider metadata.
+
+Risk:
+
+- Activity pages can be lost, repeated, reordered, or duplicated after refresh/restart, while invalid requests appear successful.
+- The UI cannot distinguish a complete timeline from one truncated at the first provider page.
+
+Deferred adjustment:
+
+- Make the Jules adapter return a validated page DTO containing activities and `nextPageToken`, then have the durable poll application service consume all pages under a fenced lease.
+- Validate page size/token at the HTTP boundary if a diagnostic page endpoint remains, and return stable 4xx codes for malformed input.
+- Persist normalized events and cursor advancement atomically, retaining unknown provider activity types as bounded metadata.
+
+### R-123 — The dispatch API exposes a production Git-safety bypass and coerces untrusted input
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks safe cloud dispatch**
+
+Evidence:
+
+- The HTTP body controls `skipPush`, which is passed directly into dispatch preflight; an external caller can therefore suppress creation/readiness of the immutable remote dispatch ref.
+- The focused test explicitly sends `skipPush: true` “to bypass network push,” exactly the production-bypass pattern prohibited by the new implementation-integrity and testing rules.
+- `requirePlanApproval` and `autoPr` use JavaScript `Boolean(...)` coercion; JSON string `"false"` becomes `true` rather than being rejected.
+- `prompt` uses `String(...)`, so non-string inputs can become values such as `[object Object]`; no maximum length or structured schema is enforced.
+- `sessionId` is checked only as a trimmed string, and errors/resolutions remain free-form provider/Git text rather than validated stable error codes with public redaction.
+
+Risk:
+
+- A malformed or hostile API request can change dispatch policy, bypass the immutable-ref safety gate, or send unintended prompt content to Jules.
+- Tests succeed by disabling the property the route claims to provide.
+
+Deferred adjustment:
+
+- Remove `skipPush` from every production DTO and function reachable from HTTP; inject a Git dispatch-ref port/fake in tests.
+- Add a strict request schema with exact booleans, bounded prompt/title fields, UUID/session validation, unknown-field policy, and stable sanitized errors.
+- Re-run locked preflight and remote ref read-back immediately before the durable dispatch transition.
+
+### R-124 — Dispatch remains cross-project, non-atomic, non-idempotent, and ambiguity-unsafe
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks cloud dispatch and every downstream session workflow**
+
+Evidence:
+
+- The route accepts `projectId` in the URL and `sessionId` in the body independently, then creates a task without verifying that the session belongs to that project.
+- The probe supplied Project B's session to Project A's dispatch; the resulting task stored Project A with Project B's session successfully.
+- Each request creates the task before remote dispatch; task creation, attempt creation, cloud-session creation, task transition, and events are not one transaction/outbox protocol.
+- No idempotency key, dispatch intent, unique remote-session constraint, duplicate detection, or ambiguous-timeout reconciliation exists.
+- Two identical probe requests both returned 201, made two remote creates, and persisted two cloud rows with the same `remoteSessionId`; the schema has only a non-unique index on that field.
+- Dispatch failures return a task ID but do not persist a stable failed/ambiguous dispatch state or error on the task.
+
+Risk:
+
+- Retries or timeouts can create duplicate remote work and contradictory local ownership.
+- Cross-project task/session corruption can break history, authorization assumptions, cleanup, and recovery.
+
+Deferred adjustment:
+
+- Derive the session from the loaded project or enforce composite ownership in the repository/database.
+- Persist a versioned dispatch intent/idempotency identity before the remote mutation, reconcile ambiguous acceptance, and atomically acknowledge attempt/cloud/task/event state.
+- Add unique/canonical provider-session identity and concurrency tests using multiple requests/connections and injected failures at every write boundary.
+
+### R-125 — Plan approval and feedback routes expose the known wrong contract without state or idempotency guards
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks safe Phase 15 interaction and cloud-route exposure**
+
+Evidence:
+
+- Approval does not require `AWAITING_PLAN_APPROVAL`; feedback does not check any supported provider state.
+- In the focused fixture and adversarial probe the session remained `PLANNING`, yet both actions returned 200.
+- Repeating each action made two provider calls and appended two duplicate events; there is no action identity, compare-and-set transition, durable intent, acknowledgement, or safely rejected repeat.
+- Feedback still calls the undocumented `:sendFeedback` endpoint with `{ message }` rather than the published `:sendMessage` operation/body recorded in R-095.
+- The network mutation happens before the event write, so a database failure or process crash creates an ambiguous accepted action that a retry will resend.
+- The full unbounded user message is copied into the timeline event without centralized secret scanning or a content hash/provenance boundary.
+
+Risk:
+
+- Users can approve or message an ineligible session repeatedly, and ambiguous failures can duplicate provider instructions.
+- Sensitive feedback can be persisted or sent under an incompatible provider contract.
+
+Deferred adjustment:
+
+- Implement guarded provider-neutral approval/message commands over a task-owned cloud session and current persisted/refreshed state.
+- Use the documented Jules message adapter, persist idempotent intent before the call, reconcile acknowledgement through activities, and publish a redacted bounded timeline event transactionally.
+- Test wrong states, duplicates/concurrency, timeout after acceptance, event-write failure, restart, and cross-task ownership.
+
+### R-126 — Pause, resume, and cancel routes report actions without durable confirmed state transitions
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks reliable lifecycle control and recovery**
+
+Evidence:
+
+- Pause and resume call Jules and append events but do not update the cloud session or task state, persist an intent, or validate whether the transition is legal.
+- Cancellation delegates to the existing `cancelSession`, which calls Jules `pause` best-effort, suppresses every remote error, writes local `CANCELLED`, marks the task failed, and returns `ok: true`.
+- No remote cancel/delete confirmation, ambiguity state, reconciliation, action idempotency, or compare-and-set version exists.
+- Repeated or concurrent lifecycle requests are not rejected or serialized.
+- The focused test treats a successful pause call as proof that the remote session was cancelled.
+
+Risk:
+
+- Orchestra can claim pause/resume/cancellation that did not occur, while remote work continues and recovery acts on false state.
+- Concurrent lifecycle requests can reorder provider and local state irreconcilably.
+
+Deferred adjustment:
+
+- Model requested, acknowledged, ambiguous, and reconciled lifecycle transitions explicitly with legal-state guards and idempotency keys.
+- Map only documented provider operations to accurate UI/API language; do not label pause as cancellation.
+- Persist intent before the call and reconcile actual state through polling before finalizing local state.
+
+### R-127 — The import route trusts caller-supplied Git identities and can return success after review failure
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks PR import, verification, review, and any integration phase**
+
+Evidence:
+
+- `/tasks/:id/jules/import-pr` accepts `prHeadSha` and `baseSha` directly from the HTTP body and lets them override durable cloud-session values.
+- A cloud session is not required when both body strings are supplied, and neither value is validated as an exact full SHA or bound to a validated PR URL/repository/task.
+- The underlying review helper accepts arbitrary Git refs, can fall back to local `HEAD`, and has the exact-identity/fetch/error defects recorded in R-078 through R-085.
+- The route calls Codex even when `runWorktreeReview` returns `ok: false`, then returns top-level `{ ok: true }` without checking the worktree or Codex result.
+- It exposes Git fetch/worktree mutation, repository-code verification, Codex execution, and cleanup directly from an HTTP controller with no durable workflow state, repository lock, idempotency, cancellation propagation, or result checkpoint.
+- This is future Phase 19–21 behavior activated before the prerequisite polling/recovery and exact PR resolution phases.
+
+Risk:
+
+- A request can review local/arbitrary code rather than the Jules PR head and still receive an apparent success.
+- Concurrent requests can execute untrusted code and mutate shared Git/worktree state on the Orchestra host without recovery or fencing.
+
+Deferred adjustment:
+
+- Remove caller authority over commit identity; start from the task-owned validated GitHub PR URL, fetch its PR ref, resolve the exact full remote head SHA, and compare it with durable session/cycle state.
+- Schedule import/verification/review through a durable application workflow under repository locking and sandboxed execution, checking every stage result before transition.
+- Return stable asynchronous workflow status rather than running Git/model work inside the request lifetime.
+
+### R-128 — The Phase 16 controller is a larger cross-layer monolith despite the new boundary rules
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks maintainable integration of subsequent cloud phases**
+
+Evidence:
+
+- `jules.ts` grew to 453 lines and owns 14 credential, discovery, dispatch, query, approval, feedback, lifecycle, activity, Git review, and Codex-review endpoints.
+- The route module constructs/resolves concrete vault, API client, and session manager dependencies and directly orchestrates Store repositories, provider calls, Git/worktree review, verification, Codex review, and event persistence.
+- It contains workflow policy and state transitions rather than limiting controllers to authentication, validation, and HTTP mapping as required by `implementation-integrity.md`.
+- The overload accepting `Store | JulesRouterOptions` and mutable lazy `sessionManager` add construction modes rather than clear application ports.
+- No application services, request schemas, command/query handlers, durable workflow/outbox, or provider-neutral lifecycle interfaces were introduced.
+
+Risk:
+
+- Adding monitoring, recovery, UI actions, PR import, repair, or another provider expands one high-coupling controller and can disrupt unrelated credential or session routes.
+- Network request lifetime becomes the owner of durable provider, Git, verification, and model workflows, making failure isolation and restart recovery difficult.
+
+Deferred adjustment:
+
+- Split HTTP schemas/controllers by feature and keep them thin over provider-neutral application commands/queries.
+- Extract durable dispatch, plan interaction, lifecycle control, activity querying/polling, and PR import/review services with narrow repositories/adapters and explicit transactions.
+- Compose dependencies once at bootstrap and add import-graph rules that reject route-to-infrastructure/provider workflow orchestration.
+
+### R-129 — Tests use better mechanics but still validate invented contracts and bypass the required safety properties
+
+Severity: **High**
+Status: **Open**
+Dependency impact: **Blocks the Phase 16 completion claim**
+
+Evidence:
+
+- Positive: the tests issue real HTTP requests, use Express, temporary SQLite, and a temporary Git repository, and clean up their resources.
+- They do not test any planned Phase 16 polling acceptance criterion: pagination completion, durable cursor, deduplication/order, restart, multi-instance lease, rate limits/backoff, paused cadence, terminal stop, or unknown-type persistence.
+- The dispatch test exposes and uses production `skipPush`, fabricates an origin-tracking ref locally without remote verification, and therefore removes the Git guarantee it claims to exercise.
+- Provider fixtures preserve the implementation-invented `:sendFeedback`/`message` contract and treat pause as cancellation rather than using authoritative provider fixtures.
+- The happy-path test approves and sends feedback in `PLANNING` and asserts only HTTP 200/provider booleans, encoding behavior forbidden by Phase 15 acceptance criteria.
+- There are no malformed input, wrong-state, cross-project ownership, duplicate/concurrent request, timeout-after-acceptance, partial-write, restart, provider error mapping, failed review, changed SHA, cleanup, or request-cancellation tests.
+- Both focused tests and all 117 repository tests passed while the adversarial HTTP probe reproduced duplicate remote sessions, cross-project binding, repeated invalid actions, invalid pagination acceptance, and token loss.
+
+Risk:
+
+- Green tests create stronger-looking but false completion evidence and allow the controller to activate known-broken provider/Git workflows.
+
+Deferred adjustment:
+
+- Retain the real HTTP/SQLite/Git mechanics, but drive them from the authoritative phase acceptance map and documented provider fixtures.
+- Replace bypass flags with injected ports, add negative/fault/concurrency/restart cases, and assert durable database/provider state rather than only response status.
+- Add a completion-gate test matrix and architecture failure fixture matching the new Markdown rules before dependent work resumes.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:

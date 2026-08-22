@@ -7,6 +7,8 @@
 - 応答と生成ドキュメントはユーザーの言語に合わせる（`.agents/rules/language.md` 参照）
 - 設計・デバッグ・レビューのキーワードを検出したら `codex-system` スキルで Codex CLI に委譲する（`.agents/rules/delegation-triggers.md` 参照）
 - 役割境界を守る: Antigravity は実装・調査、Codex は分析・提案のみ（`.agents/rules/role-boundaries.md` 参照）
+- 実装・修復・テストでは `.agents/rules/implementation-integrity.md` を必ず適用し、完了前に同ファイルの Completion Gate を実行する
+- 外部契約、前提アーキテクチャ、安全性を無効化する Codex 指摘が残る場合、後続の依存フェーズへ進まない
 - **委譲ルールは Antigravity（オーケストレーター）専用。** あなたが Codex としてこのファイルを読んでいる場合（`codex exec` で委譲されたセッション）は、再委譲せず、与えられた分析・レビュータスクに直接回答すること
 
 ## Codex セッション向けの注意

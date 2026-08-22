@@ -1,95 +1,109 @@
 # Testing Rule
 
-テストに関するルール。
+テストは、実装が自分で作った前提ではなく、要求と実運用契約を検証する。
+詳細な完了条件は `implementation-integrity.md` に従う。
 
-## テスト駆動開発（TDD）
+## TDD
 
-### Red-Green-Refactor サイクル
+### Red-Green-Refactor
 
-1. **Red**: 失敗するテストを書く
-2. **Green**: テストを通す最小限のコードを書く
-3. **Refactor**: コードを改善する（テストは通ったまま）
+1. **Red**: 本番コードの欠落または不具合によって失敗するテストを書く
+2. **Green**: 要求を満たす最小限の本番コードを書く
+3. **Refactor**: 同じテストを通したまま責務と構造を改善する
 
-### TDD の原則
+Red の失敗理由を確認する。テスト自身の誤り、存在しない fixture、無関係な環境差で
+失敗する状態を Red と数えない。
 
-- テストを先に書く
-- 一度に1つのテストだけ追加
-- テストが失敗する理由を確認してから実装
+## Production Contract First
 
-## AAA パターン
+- 状態、イベント名、スキーマ、バリデーター、ルート、ポリシーは本番モジュールから
+  import する。テスト内に同じ一覧や型を手書きしない
+- テスト名が API、永続化、Git、SSE、マイグレーション、復旧などの境界を主張する場合、
+  その実際の本番エントリポイントを通す
+- 外部サービスの test double は、公式仕様または記録・サニタイズした fixture に基づく。
+  実装に都合のよい JSON、状態、エンドポイントを発明しない
+- 仕様と実装が同じ定数を共有するだけでは契約テストにならない。独立した権威ある期待値と
+  比較する
+- アーキテクチャテストは実 import graph を検査し、意図的な違反 fixture が確実に失敗する
+  ことを検証する
 
-テストは **Arrange-Act-Assert** の構造で書く：
+## Test Doubles
 
-```python
-def test_user_creation():
-    # Arrange（準備）
-    name = "John"
-    email = "john@example.com"
-    
-    # Act（実行）
-    user = User.create(name=name, email=email)
-    
-    # Assert（検証）
-    assert user.name == name
-    assert user.email == email
-```
+外部依存は置き換えてよいが、テストが証明すると主張する境界や安全条件を mock で消さない。
 
-## テストの種類
+- HTTP transport を fake にする場合も wire fixture は権威ある契約に従う
+- SQLite、Git、filesystem、HTTP server など軽量な境界は、保証の実在性が上がる場合に
+  temporary/local 実装を優先する
+- 時刻、乱数、process runner、network transport は port として注入する
+- `skipPush`、`skipFetch`、`skipVerification`、`disableValidation` のような本番形状の
+  safety bypass をテスト目的で追加しない
 
-| 種類 | 範囲 | 速度 | 割合 |
-|------|------|------|------|
-| Unit | 関数・クラス | 高速 | 70% |
-| Integration | 複数コンポーネント | 中速 | 20% |
-| E2E | システム全体 | 低速 | 10% |
+## Risk-Based Test Layers
 
-## カバレッジ目標
+Unit / integration / contract / end-to-end の固定比率は設けない。変更のリスクに応じて、
+必要な境界を直接検証する。
 
-- 新規コード: 80% 以上
-- 重要なビジネスロジック: 100%
-- ユーティリティ関数: 100%
+最低限の例：
 
-## テストの命名規則
+| 変更 | 必要なテスト証拠 |
+|---|---|
+| 純粋なドメイン規則 | unit、境界値、未知状態、矛盾する入力 |
+| HTTP route | mounted router への実リクエスト、validation、error mapping |
+| database / migration | temporary DB、fresh/legacy parity、途中失敗、transaction rollback |
+| provider API | 公式/記録 fixture、malformed response、pagination、rate limit、abort |
+| Git / worktree | temporary repo/remote、exact SHA、nonzero exit、衝突、cleanup failure |
+| durable workflow | partial write、timeout after acceptance、duplicate、restart、reconciliation |
+| lease / concurrency | concurrent owner、expiry、renewal、stale owner、fencing |
+| untrusted execution | sandbox policy、allowlisted environment、limits、no-check state |
 
-```python
-# パターン: test_{何を}_{条件}_{期待結果}
-def test_login_with_valid_credentials_returns_token():
-    pass
+## Failure Behavior
 
-def test_login_with_invalid_password_raises_error():
-    pass
-```
+安全性、ライフサイクル、耐久性、並行処理に関わる happy-path テストには、関連する
+negative / fault-injection テストを追加する。
 
-## モック・スタブの使用
+必要に応じて以下を検証する：
 
-外部依存はモック化する：
+- malformed / missing / unknown input or response
+- command nonzero exit and partial output
+- timeout before and after remote acceptance
+- duplicate invocation and retry
+- partial database failure
+- crash and restart at durable checkpoints
+- concurrent callers, expired lease, stale owner
+- changed remote SHA or ownership mismatch
+- cancellation ambiguity
+- cleanup failure and corrupt persistence
+- verification commandが一つも設定されていない状態
 
-```python
-from unittest.mock import Mock, patch
+エラー、unknown、empty、not configured を成功として期待するテストを書かない。
 
-@patch('module.external_api')
-def test_with_mocked_api(mock_api):
-    mock_api.return_value = {"status": "ok"}
-    result = function_under_test()
-    assert result == expected
-```
+## Coverage and Naming
 
-## テスト設計は Codex に委譲
+カバレッジ率は診断情報であり、正しさの証明ではない。固定の 70/20/10 比率や、数字だけの
+完了基準より、invariant、state transition、error path、external contract、restart、
+concurrency の未検証箇所を優先する。
 
-テストケースの設計は Codex CLI に委譲する：
+テスト名は実際に通した境界と証明した条件だけを表す。`end-to-end`、`secure`、`isolated`、
+`100% compatible` といった名称を、対応する性質を検証せず使用しない。
 
-```
-/tdd ログイン機能
-```
+## Test Structure
 
-Codex が考慮すること：
-- 正常系
-- 異常系
-- 境界値
-- エッジケース
+Arrange-Act-Assert を基本とし、失敗時にどの契約が壊れたか判別できる assertion を使う。
+テスト間の依存を作らず、各テストは所有する temporary resource を確実に cleanup する。
+
+## Role Boundary
+
+- 重要機能、複雑な workflow、architecture、security、durability、concurrency のテスト戦略は
+  Codex に委譲する
+- Antigravity は戦略を実装し、実装中に判明した明白な regression / failure-path テストを
+  追加する
+- Antigravity は、コードを通すために Codex の受け入れテストを弱めたり、実装側の前提へ
+  書き換えたりしない
 
 ## 禁止事項
 
-- テストなしでコードをマージしない
-- テストをスキップしない（一時的でも）
-- テスト間の依存関係を作らない
-- 本番環境に影響するテストを書かない
+- テストなしで安全性や完了を主張する
+- 理由と期限を記録せずテストを skip する
+- 本番環境や実ユーザーデータへ影響するテストを書く
+- pre-existing failure と今回導入した failure を混同する
+- focused test の成功だけで、未実行の build / lint / integration を成功扱いする

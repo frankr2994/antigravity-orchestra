@@ -178,13 +178,14 @@ my-project/
 │   │   ├── update-design/
 │   │   └── update-lib-docs/
 │   │
-│   └── rules/            # 8 ルール
+│   └── rules/            # 9 ルール
 │       ├── delegation-triggers.md  # 自動振り分け（Hooks代替）
 │       ├── role-boundaries.md      # 役割境界
 │       ├── language.md
 │       ├── codex-delegation.md
 │       ├── coding-principles.md
 │       ├── dev-environment.md
+│       ├── implementation-integrity.md
 │       ├── security.md
 │       └── testing.md
 │
@@ -316,7 +317,7 @@ Claude Code Orchestra の 6つの Hooks を Rules で代替します。
     │
     ▼
 【チェック2】TDDが必要か？
-    → Yes: /tdd を提案（Antigravityは直接テスト設計しない）
+    → Yes: /tdd を提案（Codex が戦略、Antigravity が実装と明白な回帰テストを担当）
     │
     ▼
 【チェック3】デバッグが必要か？
@@ -324,7 +325,7 @@ Claude Code Orchestra の 6つの Hooks を Rules で代替します。
     │
     ▼
 【チェック4】実装が完了したか？
-    → Yes: codex-system スキルでレビューを提案
+    → Yes: 高リスク領域は codex-system レビューを必須ゲートとして実行
     │
     ▼
 Antigravity が直接実行（リサーチ、ファイル編集等）
@@ -334,7 +335,7 @@ Antigravity が直接実行（リサーチ、ファイル編集等）
 
 | Antigravity が行うこと | Codex に委譲すること |
 |----------------------|---------------------|
-| ユーザー対話 | テスト設計（TDD） |
+| ユーザー対話 | 重要機能のテスト戦略（TDD） |
 | ライブラリ調査 | アーキテクチャ設計 |
 | ファイル編集 | トレードオフ分析 |
 | コード実装 | 根本原因分析 |
@@ -347,11 +348,12 @@ Antigravity が直接実行（リサーチ、ファイル編集等）
 | ルール | 内容 |
 |--------|------|
 | language.md | 思考と Codex への質問は英語、応答・生成ドキュメントはユーザーの言語 |
-| codex-delegation.md | Codex への委譲ルール詳細 |
-| coding-principles.md | シンプルさ、単一責任、早期リターン |
-| dev-environment.md | 開発環境設定（uv, ruff, pytest等） |
-| security.md | 機密情報管理、入力検証 |
-| testing.md | TDD、AAA パターン、カバレッジ目標 |
+| codex-delegation.md | Codex への委譲とブロッキングレビューゲート |
+| coding-principles.md | シンプルさ、単一責任、責務による分割 |
+| dev-environment.md | リポジトリのロックファイルに従う開発環境設定 |
+| implementation-integrity.md | フェーズ忠実性、fail-closed、耐久性、所有権、完了証拠 |
+| security.md | 機密情報、全 runtime boundary、未信頼コード/モデル出力 |
+| testing.md | 本番契約、risk-based test、failure injection |
 
 ---
 

@@ -44,7 +44,7 @@ logs/
 
 - `.agents/workflows/*.md` (6ファイル)
 - `.agents/skills/*/SKILL.md` (5スキル)
-- `.agents/rules/*.md` (8ファイル)
+- `.agents/rules/*.md` (9ファイル)
 - `.codex/AGENTS.md`
 - `docs/DESIGN.md`
 
