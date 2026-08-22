@@ -9,3 +9,4 @@ export * from './worktree-review.js';
 export * from './codex-review.js';
 export * from './repair-coordinator.js';
 export * from './supervisor.js';
+export * from './router.js';

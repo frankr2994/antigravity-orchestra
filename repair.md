@@ -2268,6 +2268,498 @@ Deferred adjustment:
 - Keep Jules-specific output mapping in its adapter and place reusable GitHub/Git review services behind provider-neutral application ports.
 - Remove production bypass flags, compose fakes at dependency injection boundaries, and add architecture checks that enforce dependency direction and module responsibility.
 
+## Phase 12 review
+
+### Review scope
+
+- Reviewed commit: `1dc1d322f99e3407480e9d47e169a33097a58346`
+- Commit subject: `feat(jules): implement independent codex review for jules cloud PRs (phase 12)`
+- Primary artifacts reviewed: `server/providers/jules/codex-review.ts`, shared Codex app-server/agent behavior, domain review contracts, focused tests, planned Phases 12 and 21 in `julesplan.md`, and official OpenAI Codex non-interactive automation documentation.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Resolved the unspecified Phase 12 commit from Git history as `1dc1d322f99e3407480e9d47e169a33097a58346`.
+- Confirmed that `codex-review.ts` was unchanged between `1dc1d32` and the review checkout by comparing its Git blob ID (`ff9b0784ff07f2f6c8eb0d86d13fe74b549c75fc`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-codex-review.test.mjs`: four tests passed with zero failures.
+- Confirmed with `git grep` that the Jules Codex-review functions had no production caller at this commit; only their definitions and focused tests referenced them.
+- A contradictory-output probe returned `PASS` and `blocked: false` while also returning a parsed `blocking` finding.
+- A packet-boundary probe reached 100,000 characters and silently omitted the entire diff and final reviewer instructions.
+- The same packet probe retained an `sk-proj-...` credential that the redactor did not recognize.
+- Compared the invocation with official OpenAI guidance for read-only Codex automation, JSONL event output, schema-constrained final output, and automation credential isolation.
+
+### R-086 — The planned Phase 12 cloud persistence model was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 12 as durable cloud execution persistence containing provider/session/source identity, branches, exact base/head SHAs, provider state, activity cursor, polling lease, PR, review/repair cycles, failure data, and lifecycle timestamps.
+- Commit `1dc1d32` adds no schema, migration, cloud-session repository, attempt linkage, polling lease, or recovery behavior.
+- The incomplete persistence and correlation findings already recorded in R-018 through R-024 and R-074 remain unresolved.
+- The new code instead attempts part of planned Phase 21 independent Codex review and has no production caller at this commit.
+
+Risk:
+
+- Phase tracking can mark crash-recoverable cloud persistence complete while review, polling, retry, and PR identity remain dependent on loose in-memory values.
+- Later review and repair code cannot establish one durable execution history or safely resume after restart.
+
+Deferred adjustment:
+
+- Keep planned Phase 12 open until the full cloud-attempt/session/review persistence model and migrations meet every listed acceptance criterion.
+- Make the execution attempt the aggregate root and add versioned linked records for provider session, poll lease/cursor, exact PR identity, review cycle, repair cycle, and failure/recovery state.
+- Integrate Phase 21 only after a transactionally persisted exact head SHA and verification record are available.
+
+### R-087 — A verdict is not bound to the exact PR commit or its worktree
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `runCodexReviewForJules` accepts caller-provided `baseSha`, `headSha`, `diff`, `changedFiles`, verification results, and `projectRoot` without validation or cross-checking.
+- The focused success test passes `base123` and `head456`, which are not Git object IDs, and receives a passing review.
+- The real runner is rooted at `projectRoot`, not explicitly at a detached worktree whose `HEAD` has been verified against `headSha`.
+- Phase 11's worktree helper deletes its isolated checkout before returning, so these two modules cannot currently compose into an exact-head inspection workflow.
+- The review result does not contain `reviewedSha`; the persisted event contains neither base nor head SHA.
+- No pre-review or post-review ref refresh detects a force-push, and no stored version prevents a verdict from being reused after the PR changes.
+
+Risk:
+
+- Codex can inspect surrounding files from the primary workspace while judging a bounded diff from a different commit.
+- Orchestra can approve or repair against stale, fabricated, or mismatched evidence and later apply that verdict to another PR head.
+
+Deferred adjustment:
+
+- Accept only a durable review-record ID, load its validated full base/head IDs, and open the task-owned detached worktree at that exact head.
+- Verify worktree `HEAD`, diff/artifact hashes, and linked verification SHA immediately before invoking Codex.
+- Persist `reviewedSha` on every verdict and invalidate the record atomically when a refreshed PR head differs.
+
+### R-088 — The review packet can omit required evidence and leak secrets
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The Phase 21 plan requires the Jules plan and relevant repository instructions, but neither is accepted or included by `buildJulesReviewPacket`.
+- Changed files are capped at 100 and the diff at its first 70,000 characters without a completeness flag, omitted-file list, hash, or artifact retrieval path.
+- Verification results have no count bound; long changed-file entries, commands, and other sections are assembled before a final `.slice(0, 100_000)`.
+- A probe filled early sections and produced a 100,000-character packet containing neither the diff nor `## Instructions for Independent Reviewer`.
+- `redactSecrets` recognizes only query-string keys, Google API keys, `ghp_` tokens, and Bearer values. A probe retained an `sk-proj-...` credential.
+- Changed filenames, verification command labels, base/head strings, Markdown fences, and headings are not redacted, normalized, or escaped despite being untrusted inputs.
+- Verification output keeps only the last 3,000 characters, which can omit the actual failure origin without saying that content was removed.
+
+Risk:
+
+- Codex can pass a change without receiving the changed code, governing repository instructions, or complete failing-check evidence.
+- Credentials and hostile packet structure can be transmitted to the review service or distort section boundaries and reviewer focus.
+
+Deferred adjustment:
+
+- Allocate an independent byte/token budget to every validated section and include explicit truncation counts, content hashes, and read-only artifact paths.
+- Include the Jules plan and the exact repository instructions applicable to the reviewed worktree.
+- Normalize/escape filenames and Markdown boundaries, validate full SHAs, and use a general centralized secret scanner with tests for OpenAI, GitHub, cloud, private-key, assignment, URL, and high-entropy formats.
+- Fail closed when required evidence does not fit rather than silently deleting later sections.
+
+### R-089 — Markdown parsing can produce internally contradictory or incomplete verdicts
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The reviewer is asked for prose plus a verdict line, then `parseCodexReviewFindings` treats every Markdown bullet as an independent finding.
+- A probe with `VERDICT: PASS` and `- [BLOCKING] ...` returned `verdict: PASS`, `blocked: false`, and a blocking finding; no semantic consistency check forced BLOCK.
+- The parser captures only severity, one simple ASCII-like file token, optional line number, and the remainder of one line as explanation.
+- Required evidence, recommendation, and per-finding blocking status are never parsed even though the domain type and Phase 21 require them.
+- Multiline findings, paths with spaces or many legal characters, line ranges, contextual unchanged files, nested lists, and alternate valid formatting are lost or misclassified.
+- A BLOCK with no parsed findings is not distinguished from missing/invalid structure or an infrastructure failure.
+- The computed finding fingerprint is unused outside its unit test and is not attached to a review cycle or SHA.
+- Official OpenAI automation guidance provides schema-constrained output for stable downstream fields, but no schema or runtime object validation is used here.
+
+Risk:
+
+- A malformed or slightly reformatted model response can open the merge gate despite an explicit blocking defect or discard the evidence needed for repair.
+- Arbitrary prose bullets can become findings while real structured findings disappear, making audit and deduplication unreliable.
+
+Deferred adjustment:
+
+- Request a strict versioned JSON schema containing verdict, summary, reviewed SHA, and complete structured findings; runtime-validate it with bounds and an allow-list.
+- Enforce invariants: any blocking finding forces BLOCK, PASS requires a matching exact SHA and no blocking findings, and invalid/incomplete output becomes a typed non-passing parser failure.
+- Retain the raw response separately, and derive stable fingerprints from canonical structured fields plus review/head identity.
+
+### R-090 — Review evidence is not durably retained for audit or recovery
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Persistence is optional: callers may omit `Store` and receive a verdict with no audit record.
+- When Store is present, the event includes only verdict, blocked, requested model, finding count, and a 500-character prefix of the raw summary.
+- The event omits base/head SHA, review cycle, repair attempt, packet/artifact hashes, verification identity, findings, fingerprints, raw review text, reviewer execution/thread ID, timing, and failure metadata.
+- The plan explicitly requires review output to be retained verbatim; `rawReviewText` is returned in memory but never stored.
+- Repeated calls insert indistinguishable events with no uniqueness/idempotency key and no transaction linking the review to a cloud-session/task-state transition.
+- Runner, parser, or event-write failures are thrown without a durable review-attempt/failure record.
+
+Risk:
+
+- After a restart, Orchestra cannot prove what Codex saw, which commit it reviewed, why it passed/blocked, or whether a review was interrupted.
+- Duplicate or stale verdicts can be consumed as current because there is no canonical versioned review record.
+
+Deferred adjustment:
+
+- Require a durable review attempt before invocation and transactionally persist state changes, exact identities, bounded/hash-addressed packet and raw output, structured findings, and an outbox event.
+- Add idempotency by task/attempt/review-cycle/head-SHA and preserve every superseded verdict for audit.
+- Persist typed timeout, cancellation, parser, model, and storage failures so recovery can retry deterministically.
+
+### R-091 — Cancellation and actual model/execution metadata are not propagated
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `runCodexReviewForJules` creates a new `AbortController` internally and exposes no caller signal, so task cancellation cannot interrupt the real review.
+- The shared runner has a 15-minute timeout, but this wrapper records neither timeout/cancellation state nor start/completion timing.
+- `runCodexReview` can fall back to another model on capacity errors, and the app server can report provider rerouting, but the wrapper supplies no telemetry callback and always returns/persists the originally requested `model`.
+- No Codex thread/turn identity or token/usage telemetry is captured for correlation, budgeting, or diagnosis.
+- Model and effort are arbitrary caller strings at the workflow boundary rather than a recorded policy decision tied to a review attempt.
+
+Risk:
+
+- Cancelled tasks can continue consuming review capacity and later return results into an obsolete workflow.
+- Audit records can name a model that did not produce the verdict, undermining reproducibility and operational diagnosis.
+
+Deferred adjustment:
+
+- Accept and propagate the task/review abort signal through every runner and persist requested, effective, fallback/reroute, effort, thread, turn, timing, and usage metadata.
+- Convert timeout, cancellation, capacity, authentication, and provider failures into typed non-passing review states.
+- Resolve model/effort from durable review policy and record the decision before invocation.
+
+### R-092 — Focused tests bypass the real Codex and exact-SHA boundaries
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The workflow test injects a mock runner that returns a fixed PASS; it never starts the read-only app-server path, checks its root/sandbox, exercises timeout/cancellation, or observes fallback/reroute metadata.
+- That same test uses invalid `base123` and `head456` values, supplies a fabricated diff/filename, and asserts no SHA binding or event payload beyond agent/type.
+- Parser tests cover one ideal BLOCK response only; they omit PASS-with-blocking, conflicting/multiple verdicts, missing structure, multiline findings, hostile bullets, unusual paths, oversized output, and required-field validation.
+- Packet tests cover one Google-style key only and omit OpenAI/GitHub variants, private keys, credentials in filenames/commands, Markdown injection, per-section truncation, missing Jules plan/instructions, and complete-diff evidence.
+- No persistence tests cover raw output/findings, idempotency, event failure, restart, review-cycle versioning, new-head invalidation, or actual model identity.
+- All four tests passed while the contradictory PASS, packet truncation, and secret-leak probes remained reproducible.
+
+Risk:
+
+- The suite protects hand-authored Markdown formatting but not the safety properties required for an automated merge gate.
+
+Deferred adjustment:
+
+- Add schema/parser property tests and adversarial fixtures for every verdict/finding invariant and packet trust boundary.
+- Use an isolated exact-head Git fixture and a fake structured Codex transport that records sandbox/root/signal/model metadata without bypassing application policy.
+- Add durable lifecycle tests for interruption, retry, duplicate calls, model reroute, raw audit retention, force-push invalidation, and restart recovery.
+
+### R-093 — Codex review combines provider, prompt, parsing, execution, policy, and persistence concerns
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The 218-line Jules provider module defines packet formatting, secret handling, truncation policy, verdict/finding parsing, fingerprint policy, model defaults, Codex execution, Store events, and result composition.
+- It imports concrete Store and shared agent runner implementations rather than implementing a provider-neutral review application port.
+- Generic Codex review and Git-review evidence behavior is nested under the Jules adapter even though local and other cloud providers need the same independent-review service.
+- Optional Store and runner callbacks create multiple behavioral modes inside one function rather than isolating persistence and transport behind required interfaces.
+- No production composition root connects it to the exact-worktree, cloud-session, verification, or task-state services.
+
+Risk:
+
+- Changes to models, output schemas, persistence, secret policy, another provider, or repair cycles require editing one cross-layer module and can disrupt an otherwise working review gate.
+- Tests are encouraged to bypass real policy through the callback instead of validating stable module boundaries.
+
+Deferred adjustment:
+
+- Split evidence assembly/artifact storage, secret scanning, structured reviewer transport, schema validation, verdict policy, review repository, and lifecycle orchestration into narrow provider-neutral modules.
+- Keep Jules-specific mapping at the cloud adapter and compose the generic review service through required ports at bootstrap.
+- Add dependency-direction and contract tests so future phases extend review-cycle modules rather than growing another workflow monolith.
+
+## Phase 13 review
+
+### Review scope
+
+- Reviewed commit: `66d65d89928e92ab0c96b9b60c422b4e2f162bf7`
+- Commit subject: `feat(jules): implement dual-engine local/cloud repair loop (phase 13)`
+- Primary artifacts reviewed: `server/providers/jules/repair-coordinator.ts`, the execution-attempt repository alias, Jules client messaging, focused tests, planned Phases 13 and 22 in `julesplan.md`, and official Jules Sessions, Activities, and Types references.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that `repair-coordinator.ts` was unchanged between `66d65d8` and the review checkout by comparing its Git blob ID (`74e5f65df1469f0d3e109a2c0b9e64e81b1cd7ba`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-repair-coordinator.test.mjs`: three tests passed with zero failures.
+- Confirmed with `git grep` that the repair-coordinator functions had no production caller at this commit; only their definitions and focused tests referenced them.
+- Compared the client call with the official `:sendMessage` endpoint, required `prompt` body, session-state descriptions, and activity event contract.
+- A cross-task probe used Task A with Task B's completed cloud session, sent feedback twice for cycle 1, created two Task A attempts, and overwrote Task B's session state to `IN_PROGRESS`.
+- The same probe confirmed that repeating an explicit cycle is not idempotent.
+- A cycle-accounting probe with one original dispatch attempt selected cycle 2 for the first automatic cloud repair and cycle 3/local takeover on the next call.
+
+### R-094 — The planned Phase 13 deterministic preflight was not implemented or repaired
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 13 as deterministic dispatch preflight covering Git repository/origin/upstream identity, exact remote base, dirty/unpushed inputs, Jules source/branch visibility, credentials/quota, repository locking, immutable dispatch ref creation/read-back, and cleanup policy.
+- Commit `66d65d8` changes no preflight, Git remote, source discovery, locking, or dispatch-branch file.
+- R-058 through R-066 therefore remain unresolved, including abbreviated/colliding identities, fail-open upstream checks, unverified mutable branches, missing checks, bypassed tests, unsafe errors, and cross-layer design.
+- The new work instead attempts part of planned Phase 22's repair loop and has no production caller at this commit.
+
+Risk:
+
+- Phase tracking can mark the dispatch safety gate complete while Jules can still start from an unproven or wrong repository state.
+- An unintegrated repair path can appear to compensate for cloud failures that deterministic preflight should have prevented.
+
+Deferred adjustment:
+
+- Keep planned Phase 13 open until R-058 through R-066 and every preflight acceptance criterion are resolved end to end.
+- Track this commit only as partial Phase 22 work.
+- Do not enable repair orchestration until dispatch, cloud persistence, exact PR import, verification, and review establish trustworthy durable inputs.
+
+### R-095 — Cloud repair calls an undocumented Jules endpoint and misclassifies session eligibility
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The official API documents `POST /v1alpha/sessions/{sessionId}:sendMessage` with `{ "prompt": "..." }`.
+- `JulesApiClient.sendFeedback` instead posts to `:sendFeedback` with `{ "message": "..." }`, retaining the incompatible contract in R-038.
+- The focused test recognizes URLs containing `sendFeedback` and never asserts the documented path or body, so it preserves the wrong adapter.
+- `isCloudSessionActive` considers every state other than local-only `CANCELLED` and `FAILED` eligible, including `COMPLETED`, `PAUSED`, `AWAITING_PLAN_APPROVAL`, and `AWAITING_USER_FEEDBACK`.
+- The official message endpoint is described for an active session; the coordinator neither queries current remote state nor models state-specific message capability.
+- After any mocked success, it writes local session state `IN_PROGRESS` without observing a Jules response or activity proving that work resumed.
+
+Risk:
+
+- Real cloud repair requests will fail against the published endpoint, or be sent in a state where Jules cannot apply them.
+- Local state can claim active repair while the remote session remains completed, paused, or waiting for a different action.
+
+Deferred adjustment:
+
+- Replace the adapter with a runtime-validated `sendMessage` operation using the documented `prompt` body and sanitized typed errors.
+- Refresh the remote session and enforce an explicit capability table before messaging; route plan approval and requested feedback through their correct state-specific actions.
+- Confirm message acknowledgement and resumed progress through Activities/session polling before changing the local provider state.
+
+### R-096 — Independent task and session inputs permit cross-task repair corruption
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `executeDualEngineRepair` independently accepts `taskId`, `remoteSessionId`, `baseSha`, and `headSha` from its caller.
+- It fetches the cloud session by remote ID but never checks `cloudSession.taskId === taskId`, stored base/head identity, provider, attempt, review cycle, or repository/project ownership.
+- A probe invoked Task A with Task B's completed remote session; the function sent a message to Task B's provider session, created the attempt under Task A, and changed Task B's cloud-session row to `IN_PROGRESS`.
+- No task-state guard prevents repair of cancelled, completed, unrelated, or already-disputed tasks.
+- If no cloud session exists, the coordinator silently chooses local takeover instead of rejecting the invalid correlation.
+
+Risk:
+
+- A routing bug or hostile caller can send instructions to the wrong repository/session and corrupt two tasks' audit histories and state projections.
+- Arbitrary SHA strings can be attached to an unrelated repair without any Git evidence.
+
+Deferred adjustment:
+
+- Accept one durable repair-cycle ID and load its task, attempt, cloud session, review, repository, base, and exact input-head associations transactionally.
+- Reject every ownership, provider, state, version, or SHA mismatch with a typed non-mutating error.
+- Enforce database foreign keys/unique constraints and legal compare-and-set transitions that make cross-task correlation unrepresentable.
+
+### R-097 — Repair cycle counting and retry limits are neither correct nor idempotent
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- When `cycle` is omitted, the coordinator uses `listByTaskId(taskId).length + 1`, counting initial dispatch, ordinary retries, cloud feedback, and local takeover attempts as though all were repair cycles.
+- A probe with one original dispatch attempt selected cycle 2 for the first automatic repair; after its new attempt, the next call selected cycle 3 and local takeover despite a configured two-cloud-repair budget.
+- Supplying `cycle` bypasses that derivation entirely. Repeating explicit cycle 1 sent two provider messages and created two `WORKING` attempts with no rejection.
+- There is no unique task/review/input-SHA/cycle key, claimed-cycle state, message fingerprint, or compare-and-set transition.
+- Zero, negative, non-integer, and inconsistent `cycle`, `maxCycles`, and `maxCloudAttempts` values are not validated.
+- Strategy ignores finding severity/content and `verificationResults`, although both are accepted as policy inputs.
+
+Risk:
+
+- Repair budgets can be consumed early, bypassed, or repeated indefinitely, producing duplicate remote work and inconsistent escalation.
+- Concurrent callers and restarts can execute the same cycle more than once.
+
+Deferred adjustment:
+
+- Persist a dedicated monotonically versioned repair cycle independent of execution-attempt count.
+- Enforce unique `(task, review cycle, input head SHA, repair cycle)` ownership and atomically claim pending work before side effects.
+- Validate positive bounded policy values and count actual cloud/local repair attempts separately.
+- Base strategy on typed blocking evidence, verification state, provider capability, prior identical outcomes, and user policy.
+
+### R-098 — Remote feedback is sent before durable intent and ambiguous failures start a racing local repair
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The coordinator calls Jules before creating an attempt, event, repair-cycle record, or idempotency marker.
+- Any thrown error is discarded and recursively forces local takeover; timeout-after-acceptance, rate limit, authentication, invalid state, contract error, and definite rejection are treated identically.
+- No event records the failed/ambiguous cloud request, error classification, message hash, provider acknowledgement, or reason for fallback.
+- If Jules accepted a request before a connection failure, local takeover can begin while cloud repair continues.
+- After a successful message, attempt creation, cloud-session update, task update, event insertion, and callback are separate nontransactional operations.
+- A database or callback failure after remote acceptance leaves an unrecorded or partially recorded repair that a retry can resend.
+
+Risk:
+
+- Cloud and local engines can modify the same change concurrently, while retries create duplicate messages and attempts.
+- Recovery cannot distinguish safe retry from reconcile-first ambiguity.
+
+Deferred adjustment:
+
+- Persist and claim a repair-message intent with a stable correlation/message hash before the network call.
+- Classify failures and reconcile ambiguous outcomes through immutable user-message activities before retrying or changing strategy.
+- Transactionally record acknowledgement, attempt/state transitions, and an outbox event; make callback publication post-commit and idempotent.
+- Require explicit fencing/confirmation before local takeover when remote work might still be active.
+
+### R-099 — “Local takeover” reports success without starting or preparing local repair
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The local path only creates a `WORKING` attempt, sets the task target/state, inserts an event, and returns `ok: true`.
+- `projectRoot` is never used; no exact PR head is fetched/imported, no task-owned worktree is created, and no Antigravity process or application workflow is started.
+- `headSha` appears only in the event and is not stored on the new attempt; the attempt records the original base SHA.
+- Review findings and verification failures are reduced to a count and are not persisted or passed to a local worker.
+- Existing cloud/local attempts are not completed, superseded, cancelled, or fenced, and the cloud session is left able to continue.
+
+Risk:
+
+- The dashboard can display a running local repair that has no worker and cannot produce a result.
+- A later worker can start from the wrong code while stale `WORKING` attempts and an active Jules session create concurrent-writer ambiguity.
+
+Deferred adjustment:
+
+- Model takeover as a requested state, then atomically fence/reconcile cloud work and schedule a real local execution through the provider-neutral task runner.
+- Import and verify the exact input PR head into an owned worktree, persist it on the attempt, and pass bounded structured repair instructions to Antigravity.
+- Report success only after durable scheduling/claim; track superseded attempts and cleanup through explicit states.
+
+### R-100 — The required wait-for-new-head repair loop is absent
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The Phase 22 plan requires Gemma distillation, Jules `sendMessage`, resumed polling, waiting for a new PR head, rerunning verification and Codex review, bounded attempts, repeated-failure escalation, and a user stop control.
+- The coordinator ends immediately after sending a message or changing the task target; it implements none of the wait, refresh, verify, review, or cycle-completion states.
+- It never compares an output head with the input `headSha`, so unchanged code can be followed by another manually invoked cycle without detection.
+- No cycle record retains input SHA, output SHA, findings, verification results, message, timestamps, or completion/failure outcome.
+- Finding fingerprints from Phase 12 are unused, so repeated identical failures cannot be detected.
+- There is no pause/stop flag or command preserving prior audit history.
+- No production code invokes the coordinator at this commit.
+
+Risk:
+
+- A “successful” repair request can be mistaken for a completed repair even though no new code was produced or reviewed.
+- Crashes and restarts cannot resume the loop or determine whether to poll, resend, verify, escalate, or wait for the user.
+
+Deferred adjustment:
+
+- Implement a durable repair-cycle state machine from requested through acknowledged, waiting-for-head, verifying, reviewing, completed/blocked, stopped, and disputed.
+- Require a different validated output SHA before verification and review; keep unchanged SHA in a waiting/escalation path.
+- Persist canonical finding fingerprints and detect repeated outcomes under bounded policy.
+- Add an idempotent user stop operation that fences scheduling but preserves all cycle evidence.
+
+### R-101 — Repair instructions are unbounded, incomplete, and cross a prompt-injection/secret boundary
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Phase 22 requires Gemma to distill findings, but raw parsed Codex findings are formatted directly into a Jules instruction message.
+- Only severity, optional file/line, and explanation are included; structured evidence and recommended corrections are dropped.
+- Warning and info findings are labeled as “Required Fixes” with no blocking-policy filter, while empty findings and passing verification can still produce a repair request.
+- Finding file/explanation and verification command strings are not redacted, escaped, normalized, or treated as untrusted content.
+- The provider-specific redactor is applied only to verification output and misses common credentials already demonstrated in R-088.
+- Markdown fences/newlines in findings, filenames, commands, or output can alter the message structure and inject new instructions.
+- There is no message byte/token limit, truncation manifest, exact input-head identity, review-cycle ID, or content hash.
+
+Risk:
+
+- Secrets or malicious text from code, test output, filenames, or model-generated findings can be sent to Jules and influence cloud execution.
+- Jules receives incomplete or misleading repair guidance with no auditable link to the reviewed commit.
+
+Deferred adjustment:
+
+- Validate structured review findings, select only policy-blocking items, and have a constrained distiller produce a schema-validated repair instruction set.
+- Apply centralized secret scanning, normalize/escape every field, and enforce per-section and total message limits with hashes and omission metadata.
+- Include the repair-cycle ID, exact input SHA, bounded evidence, and actionable recommendation while clearly marking all repository/model content as untrusted evidence.
+
+### R-102 — Focused tests encode the wrong provider contract and omit lifecycle failures
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The provider mock sets success only when the URL contains `sendFeedback`, preserving the undocumented endpoint instead of asserting `:sendMessage` with a `prompt` body.
+- The main test supplies explicit cycle values, hiding the incorrect attempt-count-derived cycle behavior.
+- It creates no original dispatch attempt, so the fixture is not representative of a real repairable cloud task.
+- It treats local takeover as successful without asserting that a worker, worktree, exact head, or repair instructions exist.
+- There are no cases for cross-task IDs, terminal/waiting/paused states, missing session, invalid SHAs/policy values, duplicate/concurrent cycle calls, message timeout-after-acceptance, database/event/callback failure, or restart.
+- Tests do not cover waiting for a changed/unchanged PR head, rerun verification/review, repeated finding fingerprints, stop control, cloud fencing, or actual attempt-state closure.
+- All three tests passed while the cross-task corruption, duplicate cycle, and premature cycle-2 probes remained reproducible.
+
+Risk:
+
+- The suite validates state-row insertion while concealing the provider incompatibility and core safety failures of the repair loop.
+
+Deferred adjustment:
+
+- Assert the exact documented provider method/path/body and activity acknowledgement using sanitized fixtures.
+- Add database-backed concurrency/idempotency, cross-ownership, ambiguous-network, partial-write, and crash/restart tests around every cycle transition.
+- Exercise exact-head change, unchanged-head rejection, repeated findings, real local scheduling/fencing, stop/dispute, and bounded policy end to end.
+
+### R-103 — The repair coordinator adds another provider-specific workflow monolith
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The 272-line Jules provider module combines strategy policy, cycle calculation, cloud-session eligibility, credential/client construction, prompt formatting/redaction, network side effects, failure fallback, attempt persistence, task/session transitions, event publication, and local-worker routing.
+- It depends directly on concrete Store, Jules client, credential resolution, provider-specific errors, and legacy verification shapes rather than repair-cycle, reviewer, messenger, scheduler, and execution-provider ports.
+- Generic local takeover and dispute policy are placed inside the Jules adapter even though they must work across providers.
+- Recursive fallback and optional client/callback paths create multiple execution modes inside one function instead of explicit application states.
+- The only repository change outside this provider is a duplicate `listByTaskId` alias, which expands API surface without creating a repair-cycle abstraction.
+
+Risk:
+
+- Changing provider messaging, retry policy, local execution, persistence, review formats, or adding another provider requires editing one cross-layer unit and can disrupt working behavior.
+- Durable recovery and failure isolation remain difficult because policy and side effects cannot be tested independently.
+
+Deferred adjustment:
+
+- Split repair decision policy, durable cycle repository, structured instruction builder, Jules messenger/acknowledgement adapter, exact-head watcher, verification/review scheduler, local takeover service, and event outbox behind narrow interfaces.
+- Keep Jules state/message mapping in its adapter and place provider-neutral repair orchestration in an application service composed at bootstrap.
+- Remove duplicate repository aliases, require dependency injection, and add architecture tests enforcing module ownership and dependency direction.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:
