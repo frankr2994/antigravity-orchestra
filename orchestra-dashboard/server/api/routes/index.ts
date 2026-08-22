@@ -18,7 +18,7 @@ export function createApiRouter(store: Store, tasks: TaskManager): Router {
   router.use(createTasksRouter(store, tasks));
   router.use(createModelsRouter(store));
   router.use(createSettingsRouter(store));
-  router.use(createJulesRouter());
+  router.use(createJulesRouter(store));
 
   return router;
 }

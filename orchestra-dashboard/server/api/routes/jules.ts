@@ -1,12 +1,14 @@
 import { Router } from 'express';
+import type { Store } from '../../db.js';
 import { CredentialVault } from '../../infrastructure/security/vault.js';
 import {
   getJulesCredentialStatus,
   resolveJulesApiKey,
   validateJulesApiKey,
 } from '../../providers/jules/credentials.js';
+import { discoverJulesSource } from '../../providers/jules/source-discovery.js';
 
-export function createJulesRouter(vault?: CredentialVault): Router {
+export function createJulesRouter(store?: Store, vault?: CredentialVault): Router {
   const router = Router();
   const v = vault ?? new CredentialVault();
 
@@ -68,6 +70,26 @@ export function createJulesRouter(vault?: CredentialVault): Router {
       ok: true,
       status: getJulesCredentialStatus(v),
     });
+  });
+
+  // Project to Jules source mapping endpoint
+  router.get('/projects/:id/jules-source', async (req, res, next) => {
+    try {
+      if (!store) {
+        res.status(500).json({ error: 'Store not available for project lookup.' });
+        return;
+      }
+      const project = store.getProject(req.params.id);
+      if (!project) {
+        res.status(404).json({ error: 'Project not found.' });
+        return;
+      }
+
+      const result = await discoverJulesSource(project.root, { vault: v });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
   });
 
   return router;

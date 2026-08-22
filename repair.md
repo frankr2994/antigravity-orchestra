@@ -45,6 +45,13 @@ Implementation and tests should not be changed during a phase review unless a fi
 | R-026 | 4 | `e3d9bfc` | Medium | Open | Migration tests | Tests do not inject migration failure, compare legacy/fresh schema parity, or exercise downgrade and partial-migration behavior. |
 | R-027 | 4 | `e3d9bfc` | Medium | Open | Compatibility tests | The test labeled 100% Store compatibility covers only a small subset of the facade. |
 | R-028 | 4 | `e3d9bfc` | Medium | Open | Persistence boundary | The compatibility facade publicly exposes the raw database connection, allowing future workflows to bypass repositories. |
+| R-029 | 5 | `31c9284` | High | Open | Route boundaries | Business workflows were moved into route files instead of application services and controllers. |
+| R-030 | 5 | `31c9284` | High | Open | API tests | The route test constructs an Express app but never sends an HTTP request or verifies a mounted endpoint. |
+| R-031 | 5 | `31c9284` | High | Open | SSE delivery | Event backfill occurs before subscription, creating a race that can omit live task events from an open stream. |
+| R-032 | 5 | `31c9284` | High | Open | Server lifecycle | Bootstrap resolves before listen success and shutdown does not comprehensively own listeners, streams, collectors, or active tasks. |
+| R-033 | 5 | `31c9284` | Medium | Open | Error handling | The global handler exposes raw error messages and maps nearly every failure to HTTP 400. |
+| R-034 | 5 | `31c9284` | High | Open | Request validation | Validation remains ad hoc, and unvalidated Git revision parameters can be interpreted as command options. |
+| R-035 | 5 | `31c9284` | Low | Open | Route manifest | An accidental `/api` prefix inside the mounted API router creates a redundant `/api/api/...` endpoint. |
 
 ## Phase 1 review
 
@@ -763,6 +770,193 @@ Deferred adjustment:
 - Keep the connection private to persistence infrastructure.
 - Expose narrowly scoped transaction and diagnostic interfaces where required.
 - If temporary compatibility access is unavoidable, document it as a ratcheted legacy exception and add a test preventing new consumers.
+
+## Phase 5 review
+
+### Review scope
+
+- Reviewed commit: `31c9284312df3d1a6333883ffacdd054ab5a93a6`
+- Commit subject: `feat(server): decompose server bootstrap and modularize API routes (phase 5)`
+- Primary artifacts reviewed: `server/api/**`, `server/bootstrap/**`, `server/index.ts`, and `tests/api-routes.test.mjs`
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- `npm run build:server`: passed.
+- `node --test tests/api-routes.test.mjs`: two tests passed with zero failures.
+- Phase 5 API/bootstrap source and its focused test were unchanged between `31c9284` and the then-current Phase 6 head.
+- A route-manifest comparison found every pre-refactor API endpoint represented in the new router tree, plus one unintended duplicate-prefix route.
+
+### R-029 — Route files still implement application workflows
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `sessions.ts` performs active-task locking, prompt validation, continuation recovery, title mutation, direct-agent classification, model selection, task creation, message/event persistence, and enqueueing inside one route handler.
+- `tasks.ts` performs monitoring context assembly, Git push finalization, task-state updates, review-event discovery, and steering generation directly in handlers.
+- `projects.ts` launches a GUI process, performs onboarding, Git inspection, checkpoint creation, and checkpoint rollback directly from routes.
+- Route modules depend on the concrete Store and TaskManager plus agents, Git, process, telemetry, MCP, and configuration modules rather than narrow application-service interfaces.
+- No controller or application-service layer was introduced even though the target architecture and Phase 5 plan call for it.
+
+Risk:
+
+- The original server monolith becomes several endpoint monoliths with business rules coupled to Express.
+- Workflows cannot be reused by Jules, recovery workers, CLI entry points, or tests without fabricating HTTP requests.
+- Adding features still requires editing large route modules and can disrupt unrelated API behavior.
+
+Deferred adjustment:
+
+- Move each use case into an application service with typed input and result contracts.
+- Keep route handlers responsible only for authentication context, schema parsing, service invocation, and response mapping.
+- Inject narrow repository and service ports instead of concrete Store/TaskManager objects.
+- Add a ratchet preventing route modules from importing agents, Git, process, or persistence implementations directly.
+
+### R-030 — API tests do not exercise the API
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The test named `createApp mounts modular routers and handles requests` only calls `createApp` and asserts the returned object is truthy.
+- It then calls Store methods directly; no HTTP request is sent through Express.
+- It does not verify route paths, status codes, response bodies, JSON parsing, host validation, dashboard-token checks, origin validation, error middleware, static fallback, or SSE behavior.
+- It therefore cannot prove the Phase 5 acceptance criterion that API behavior remained unchanged.
+
+Risk:
+
+- Missing, duplicated, remounted, unauthenticated, or behaviorally changed routes can ship with a green focused test.
+
+Deferred adjustment:
+
+- Add HTTP-level tests using a temporary listener or an Express request-testing library.
+- Maintain a method/path compatibility manifest for every pre-refactor endpoint.
+- Test representative success, validation, not-found, internal-error, authentication, origin, host, and streaming cases.
+- Assert that unknown `/api` routes return JSON 404 rather than the frontend application shell.
+
+### R-031 — SSE backfill and subscription have a lost-event race
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `tasks.ts:108-111` reads and writes historical events before registering the live subscription at line 112.
+- An event persisted and emitted between those operations is neither included in the completed backfill nor observed by the not-yet-registered listener.
+- The stream stays open, so the client may not reconnect and request the omitted ID.
+- `Last-Event-ID` and `after` are converted with `Number` but are not checked for finite, non-negative integer values.
+- SSE connections are not registered with the server lifecycle for graceful shutdown.
+
+Risk:
+
+- The dashboard can permanently miss a state transition or completion event while displaying an apparently healthy live connection.
+- Malformed cursors can turn into persistence errors or inconsistent replay behavior.
+
+Deferred adjustment:
+
+- Subscribe before backfill, then replay through a cursor with deduplication, or provide an atomic event-log subscription abstraction.
+- Validate and bound cursor values.
+- Track the last delivered ID per connection and test concurrent emission during connection setup.
+- Register SSE connections for graceful close and reconnection signaling during shutdown.
+
+### R-032 — Bootstrap and shutdown do not provide a reliable lifecycle boundary
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `bootstrapServer` resolves immediately after calling `app.listen`, before the listening callback confirms success.
+- A listen error such as `EADDRINUSE` only logs and sets `process.exitCode`; it does not reject bootstrap, close the Store, or undo initialized resources.
+- Every bootstrap call adds process signal listeners, while the returned `close` function does not remove them.
+- Signal shutdown closes Codex, the HTTP server, and Store but does not explicitly stop active TaskManager work, the Antigravity telemetry collector, or tracked SSE clients.
+- The signal handler calls `process.exit` from the reusable bootstrap module and is not guarded against repeated signals.
+- The programmatic `close` path differs from signal shutdown and has no bounded fallback for long-lived connections.
+
+Risk:
+
+- Tests, embedded use, restart, or port conflicts can leak listeners, database handles, workers, or background collectors.
+- Callers can receive a server instance that never successfully started.
+
+Deferred adjustment:
+
+- Resolve bootstrap only after the server emits `listening`; reject and clean up on `error`.
+- Centralize all resource ownership in an idempotent lifecycle object with reverse-order cleanup.
+- Stop task workers, collectors, Codex, SSE clients, HTTP connections, signal listeners, and Store consistently.
+- Keep direct process termination in the executable entry point rather than the reusable bootstrap service.
+- Add repeated-start, port-conflict, active-SSE, active-task, double-close, and signal-listener tests.
+
+### R-033 — Error middleware leaks details and misclassifies failures
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `errorHandlerMiddleware` returns the raw exception message to the client and writes it directly to the console.
+- Any message containing “not found” becomes 404; every other error becomes 400, including unexpected infrastructure and programming failures.
+- There are no typed application errors, stable error codes, secret/path redaction, request correlation IDs, or production-safe internal error responses.
+
+Risk:
+
+- Filesystem paths, command output, remote URLs, or future provider secrets can leak to the browser and logs.
+- Internal outages appear as client mistakes, making monitoring and retries unreliable.
+
+Deferred adjustment:
+
+- Introduce typed validation, authentication, not-found, conflict, provider, and internal errors.
+- Map them deterministically to status codes and stable public codes.
+- Redact logs and return a generic message for unexpected failures while retaining correlated diagnostics.
+- Coordinate secret handling with R-009 and R-022.
+
+### R-034 — Request validation is incomplete at dangerous boundaries
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- No centralized request-schema middleware was added; handlers rely on `String`, `Boolean`, and hand-written conditional coercion.
+- Checkpoint `:sha` parameters are passed into Git operations without verifying a full object ID or otherwise separating revisions from options.
+- `git show` receives the supplied value after command options, so a revision beginning with `-` can be interpreted as another Git option rather than an object name.
+- The baseline route confirms that both a project and task exist but does not verify that the task belongs to the project in the URL.
+- Settings quota policy, MCP names, model identifiers, query parameters, and several task-control bodies lack structural validation.
+
+Risk:
+
+- Malformed requests can cause cross-project actions, invalid persisted settings, unexpected command behavior, or misleading 400 responses.
+- A Git option accepted through the SHA parameter may alter command behavior or write output unexpectedly.
+
+Deferred adjustment:
+
+- Define reusable schemas for every parameter, query, and body.
+- Accept checkpoint identifiers only in a strict supported hash format and use `--` or verified object resolution where Git permits it.
+- Validate resource ownership relationships before invoking application services.
+- Return field-specific validation errors without echoing sensitive values.
+- Add negative HTTP tests for every mutating endpoint and command-adjacent parameter.
+
+### R-035 — Mounted router contains a duplicate API prefix
+
+Severity: **Low**
+Status: **Open**
+
+Evidence:
+
+- The router is mounted at `/api` by `createApp`.
+- `tasks.ts:45` additionally declares `/api/tasks/:id/monitor/explain`, producing `/api/api/tasks/:id/monitor/explain`.
+- The correct `/tasks/:id/monitor/explain` route is declared again immediately afterward.
+
+Risk:
+
+- The unintended endpoint increases route ambiguity and demonstrates that route mounting is not contract-tested.
+
+Deferred adjustment:
+
+- Remove the duplicate-prefix route.
+- Add a route-manifest test that rejects unintended paths and duplicates.
 
 ## Future phase review template
 
