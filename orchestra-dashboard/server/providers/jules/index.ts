@@ -6,3 +6,4 @@ export * from './source-discovery.js';
 export * from './preflight.js';
 export * from './session-manager.js';
 export * from './worktree-review.js';
+export * from './codex-review.js';

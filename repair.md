@@ -1537,6 +1537,241 @@ Deferred adjustment:
 - Add bounded caching/coalescing and pass request abort signals through Git/provider operations.
 - Return only sanitized repository/source summaries and test unauthorized, cross-origin, repeated, and disconnected-client requests.
 
+## Phase 9 review
+
+### Review scope
+
+- Reviewed commit: `86fc10c2b8a1c2cb17d8bda119a4f91603fa1cb7`
+- Commit subject: `feat(jules): implement git branch safety and preflight for cloud dispatch (phase 9)`
+- Primary artifacts reviewed: `server/providers/jules/preflight.ts`, focused tests, shared Git status behavior, source discovery dependencies, the Phase 9 and Phase 13 requirements in `julesplan.md`, and official Git reference/push/remote documentation.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that the preflight implementation and focused-test blobs were unchanged between `86fc10c` and the test checkout.
+- `node --test tests/jules-preflight.test.mjs`: four tests passed with zero failures after rerunning outside the process sandbox.
+- Confirmed that no runtime server code referenced `runJulesPreflight` at this commit; only its definition and focused test did.
+- A branch-name probe produced the same dispatch branch for distinct task IDs and distinct full SHAs sharing the same seven-character prefix.
+- Inspected the shared Git status implementation and confirmed that it obtains HEAD through `git rev-parse --short HEAD`.
+- Compared abbreviated object IDs, ref validation, refspec update semantics, remote-ref inspection, and force-with-lease behavior with the official Git documentation.
+
+### R-058 — The planned Phase 9 API-client work was not implemented or repaired
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 9 as the complete Jules REST client with supported source/session/activity operations, validation, pagination, bounded retry, `429` handling, redaction, and sanitized recorded fixtures.
+- Commit `86fc10c` changes no client, wire-type, error, or client-test files; R-037 through R-042 therefore remain open.
+- The new code belongs to the plan's Phase 13 deterministic cloud-dispatch preflight.
+- At this commit, `runJulesPreflight` has no runtime caller, so even the out-of-sequence preflight does not protect a production dispatch path yet.
+
+Risk:
+
+- Phase tracking can mark the API client complete despite known incompatible endpoints, schemas, pagination, retry, validation, and secret-handling behavior.
+- A safety component can appear operational before it is integrated into the provider workflow it is intended to guard.
+
+Deferred adjustment:
+
+- Keep the planned Phase 9 open until R-037 through R-042 are resolved and the official alpha contract is revalidated.
+- Track the preflight work as partial Phase 13 implementation.
+- Integrate preflight through the provider/application boundary only after its safety guarantees and durable evidence are complete.
+
+### R-059 — Preflight records an abbreviated base and generates collision-prone branch names
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Shared `getGitStatus` obtains HEAD using `git rev-parse --short HEAD`, not the full object ID.
+- `runJulesPreflight` returns that abbreviated value as `baseSha` and passes it as the source expression to `git push`.
+- `generateDispatchBranchName` keeps only the first eight alphanumeric task-ID characters and the first seven SHA characters.
+- A review probe produced identical branch names for two distinct task IDs and two distinct full SHAs that shared those prefixes.
+- The generated ref is not checked with `git check-ref-format`, and the full commit is not canonicalized with `rev-parse --verify HEAD^{commit}`.
+
+Risk:
+
+- The recorded base is not the exact immutable commit required for dispatch, persistence, review, and audit correlation.
+- Collisions can reuse or move another task's dispatch branch, and future object growth can make a formerly accepted short ID ambiguous.
+
+Deferred adjustment:
+
+- Resolve and persist the repository's full native object ID for `HEAD^{commit}` and compare full IDs end to end.
+- Generate a collision-resistant branch suffix from the stable full task identifier plus enough full-SHA-derived entropy.
+- Validate the complete ref with `git check-ref-format --branch` and retain a durable task-to-ref mapping.
+
+### R-060 — The pushed branch is not proven immutable or even read back from the remote
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `createAndPushDispatchBranch` treats a zero-exit `git push` as success and never queries the resulting remote ref.
+- The Phase 13 plan explicitly requires confirming that the remote branch resolves to the expected SHA and failing safely on mismatch.
+- The push uses an ordinary branch refspec. If a colliding branch already points to an ancestor, Git may fast-forward that existing branch rather than reject reuse.
+- There is no create-only lease, expected-old-value check, branch protection, or second comparison immediately before Jules session creation.
+- A Git branch remains mutable after a successful push, so calling it “immutable” is an unverified convention rather than an enforced invariant.
+
+Risk:
+
+- Jules can start from a different commit if the branch is reused, advanced, or changed between push and session creation.
+- Orchestra can persist a successful preflight result without evidence of what the remote actually advertised.
+
+Deferred adjustment:
+
+- Create the ref with an explicit expected-absence lease or, if it already exists, accept it only after its full remote ID exactly equals the expected base.
+- Query `git ls-remote --refs --exit-code origin refs/heads/<dispatch>` after push and compare the full object ID.
+- Recheck immediately before dispatch and persist the verified remote ID and verification time transactionally with the attempt.
+- Treat any later ref movement as an integrity failure rather than silently continuing.
+
+### R-061 — Upstream and remote-base checks can fail open or inspect the wrong state
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `checkUnpushedCommits` returns `{ unpushedCount: 0, hasUpstream: true }` when `git rev-list` fails and also converts an unparseable count to zero.
+- The comparison uses the local tracking ref `@{upstream}` without fetching or querying the remote, so stale tracking data can be accepted.
+- It checks only commits in `@{upstream}..HEAD`; it does not detect a branch that is behind or diverged from its upstream.
+- It does not require the configured upstream remote to be `origin`, even though the later push and source discovery target `origin`.
+- No command proves that the full local base object was already reachable from the intended remote before the dispatch ref operation.
+
+Risk:
+
+- Git errors are interpreted as “nothing unpushed,” allowing preflight to continue after a failed safety check.
+- A stale, divergent, or different-remote upstream can validate one repository state while the dispatch branch is pushed to another.
+
+Deferred adjustment:
+
+- Fail closed on every Git command or parse failure with a typed diagnostic.
+- Identify the exact intended remote explicitly and query/fetch its advertised target ref under a repository lock.
+- Compute ahead, behind, and divergence from full IDs and apply an explicit policy to each state.
+- Record the remote/base evidence used by preflight rather than returning only a count.
+
+### R-062 — Several mandatory Phase 13 preflight checks are absent
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Source discovery proves only a repository match; neither preflight nor discovery verifies that the selected starting/dispatch branch is visible to Jules (R-053).
+- A focused success fixture contains no branch metadata and still passes.
+- Listing sources exercises a credential but does not check session quota, Orchestra's Jules concurrency policy, or whether dispatch is currently permitted.
+- No repository-level Git-operation lock is acquired around status inspection, branch creation, push, or remote verification.
+- Origin validation and Source matching inherit the malformed-remote and false-match problems in R-051 and R-052.
+- The preflight result contains no structured per-check evidence, so later code cannot tell which safety facts were established.
+
+Risk:
+
+- A green preflight can still dispatch to an unavailable branch, exceed policy/quota, race another Git operation, or use the wrong repository Source.
+
+Deferred adjustment:
+
+- Implement every Phase 13 check as an explicit typed step with recorded evidence and a fail-closed outcome.
+- Verify Jules branch visibility after the dispatch ref is remotely confirmed, with bounded propagation handling.
+- Check credential validity, provider availability, quota/concurrency policy, and feature enablement without creating a session.
+- Hold a repository-scoped lock across mutable Git preflight operations and release it through a tested lifecycle.
+
+### R-063 — A production-shaped `skipPush` flag bypasses the central guarantee and no branch lifecycle exists
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `JulesPreflightContext` publicly exposes `skipPush`; when true, preflight returns `ok: true` and describes the generated branch as ready without creating it remotely.
+- The flag is intended for tests but is part of the same exported runtime API and result shape.
+- No retention period, cleanup queue, deletion method, ownership metadata, or recovery policy exists for branches that are actually pushed.
+- The Phase 13 acceptance criteria explicitly require documented temporary-branch retention and cleanup rules.
+
+Risk:
+
+- Accidental or propagated dry-run configuration can bypass remote preparation while producing a normal success result.
+- Real dispatch branches accumulate indefinitely or are deleted manually without Orchestra knowing, undermining recovery and auditability.
+
+Deferred adjustment:
+
+- Separate pure preflight planning from an execution method that cannot report remote readiness until verification succeeds.
+- Inject a fake Git-remote port in tests instead of carrying a production bypass flag.
+- Persist branch ownership/lifecycle state and implement idempotent cleanup with retention, active-session protection, retry, and audit rules.
+
+### R-064 — Preflight exposes raw Git/provider errors and lacks stable failure codes
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- Push failures interpolate raw `stderr` or `stdout` into the returned error and then into the public preflight reason.
+- Git output can contain remote URLs, usernames, filesystem paths, credential-helper details, or host diagnostics.
+- Source-discovery diagnostics are also inserted directly and retain the upstream-leak risk from R-047/R-054.
+- `JulesPreflightResult` uses optional free-text `reason`, `diagnostic`, and `resolution` rather than stable check/error codes and sanitized structured context.
+
+Risk:
+
+- Secrets or local environment details can flow into API responses, task records, events, or logs.
+- Callers must parse prose to decide whether to retry, request user action, or disable cloud dispatch.
+
+Deferred adjustment:
+
+- Return typed check IDs, failure codes, safe metadata, and retry/user-action classification.
+- Redact remote URLs and provider/Git output before correlated diagnostic logging; never return raw command output to clients.
+- Render user-facing explanations outside the Git/provider adapter.
+
+### R-065 — Focused tests bypass the remote branch safety behavior
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The success test fabricates `refs/remotes/origin/main` locally, points origin at a real GitHub URL, and calls preflight with `skipPush: true`.
+- It therefore performs no push, remote ref creation, remote read-back, exact-SHA comparison, collision handling, or cleanup.
+- `createAndPushDispatchBranch` has no direct test.
+- The branch-name tests cover two happy examples but no empty/colliding task IDs, short/invalid/full object IDs, ref-format validation, or repository hash-format variation.
+- The upstream test calls the live Orchestra checkout and asserts only JavaScript types, not correct ahead/behind/error behavior.
+- There are no tests for command failure, stale/wrong upstream, behind/diverged history, existing mismatched refs, concurrent movement, Jules branch propagation, quota, locking, redaction, or cleanup.
+
+Risk:
+
+- All four tests pass without exercising the properties described as immutable branch safety.
+- Environment dependence and bypass flags conceal regressions in the most consequential paths.
+
+Deferred adjustment:
+
+- Use isolated local bare remotes to exercise create-only push, existing-equal, existing-conflicting, fast-forward collision, read-back, mismatch, and cleanup behavior.
+- Inject deterministic Git/source/quota/lock ports for error and race tests.
+- Assert full object IDs and structured evidence at every successful check.
+
+### R-066 — Preflight is another cross-layer provider module rather than an application workflow port
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `preflight.ts` imports concrete Git commands, project path policy, vault/client types, and source discovery while also generating names, mutating a remote, orchestrating checks, and composing user-facing text.
+- It does not implement the `ExecutionProvider.preflight` interface introduced in Phase 3 and is not consumed by a provider adapter at this commit.
+- Concrete imports and the `skipPush` workaround make the central remote behavior difficult to test without process and network side effects.
+- This repeats the coupling already tracked in R-029 and R-056 instead of advancing the modular provider architecture.
+
+Risk:
+
+- Git policy, provider capability, credential storage, and UI messaging will evolve inside one module and require broad edits for every additional cloud provider.
+- The safety logic cannot be reused or enforced consistently at other dispatch entry points.
+
+Deferred adjustment:
+
+- Move dispatch preflight orchestration into an application service over narrow Git snapshot, remote-ref, repository-lock, source, credential/quota, and persistence ports.
+- Implement the provider-neutral preflight contract through a Jules adapter and keep Git ref preparation as an independently testable infrastructure service.
+- Keep presentation mapping at the API/UI boundary and add architecture checks for these dependency directions.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:
