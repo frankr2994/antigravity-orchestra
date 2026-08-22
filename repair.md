@@ -1326,6 +1326,217 @@ Deferred adjustment:
 - Add HTTP-level tests for authentication, authorization, schema validation, status codes, safe error bodies, cache headers, save/clear semantics, and injected infrastructure failures.
 - Add adversarial vault tests for independent decryption, tampering, corrupt envelopes, permissions, atomic-write failure, migration, and recovery.
 
+## Phase 8 review
+
+### Review scope
+
+- Reviewed commit: `7ee25d6e862cec3a5e8b6870f49dfd91ffd753cd`
+- Commit subject: `feat(jules): add source repository discovery, diagnostic mapping and API route (phase 8)`
+- Primary artifacts reviewed: `server/providers/jules/source-discovery.ts`, the Jules API route changes, `tests/jules-source-discovery.test.mjs`, existing GitHub remote validation, the Phase 8 and Phase 11 requirements in `julesplan.md`, and the official Jules Sources and GitHub remote documentation.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that the source-discovery implementation and focused-test blobs were unchanged between `7ee25d6` and the test checkout.
+- `node --test tests/jules-source-discovery.test.mjs`: four tests passed with zero failures after rerunning outside the process sandbox.
+- The current checkout's `npm run build:server` was blocked by TypeScript errors in the subsequent Phase 9 `session-manager.ts`; those later errors are not attributed to commit `7ee25d6`.
+- Confirmed that `src/App.tsx` was unchanged from Phase 7 and remained 1,791 lines.
+- Adversarial probes showed that HTTP, FTP, credential-bearing HTTPS, custom-port, and extra-path URLs were accepted as GitHub repository identities.
+- A contradictory-source probe returned `connected` when the opaque source name matched locally but `githubRepo.owner/repo` identified a different repository.
+- Compared pagination, source identity, branch metadata, and session source-context behavior with the current official Jules Sources and Types references.
+
+### R-050 — The planned Phase 8 frontend modularization was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 8 as decomposing the frontend application shell, task submission, target selection, monitor, cloud details, projects, checkpoints, MCP, settings, API hooks, shared components, and CSS.
+- Commit `7ee25d6` changes only server-side Jules route/provider files, its focused test, and the repair tracker.
+- `src/App.tsx` has no diff from Phase 7 and remains 1,791 lines.
+- The implemented work belongs primarily to the plan's Phase 11 source-discovery scope.
+
+Risk:
+
+- Phase tracking can report the frontend monolith as resolved while it remains unchanged.
+- Adding Jules UI later will enlarge or disrupt the existing root component instead of landing behind an isolated feature boundary.
+
+Deferred adjustment:
+
+- Keep the planned Phase 8 open in the implementation ledger.
+- Complete the frontend feature and shared-component decomposition behind behavioral and visual characterization tests before adding cloud-session UI.
+- Give Jules UI a dedicated feature module and typed API client so unrelated local-workflow views do not need modification.
+
+### R-051 — Remote parsing accepts malformed URLs and can expose embedded credentials
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `source-discovery.ts:61-78` accepts any URL whose hostname is `github.com` and whose path has at least two segments; it does not restrict protocol, username/password, port, query, fragment, or exact path length.
+- Review probes accepted `http://`, `ftp://`, credential-bearing HTTPS, a custom port, and an extra path segment as GitHub repository identities.
+- The raw input is retained as `GitRemoteInfo.url` and returned as `remoteUrl` in connected and error results. A credential-bearing remote therefore returns its username/token unchanged through the API.
+- `server/git.ts` already contains stricter HTTPS GitHub validation, but source discovery introduces a second, inconsistent parser instead of sharing one canonical repository-identity abstraction.
+- The focused parser test covers only ordinary HTTPS/SSH, one GitLab URL, and one unparseable string; it does not test the Phase 11 requirement to reject lookalike and malformed identities.
+
+Risk:
+
+- A malformed remote can be mapped to the wrong repository identity.
+- Personal access tokens or usernames embedded in legacy remote URLs can leak into HTTP responses, logs, diagnostics, or support captures.
+- Different features can disagree about whether the same remote is safe or valid.
+
+Deferred adjustment:
+
+- Create one canonical GitHub repository-identity parser shared by Git connection, preflight, and source discovery.
+- Accept only explicitly supported GitHub HTTPS and SSH clone forms; reject or deliberately normalize userinfo, unsupported schemes/hosts/ports, query/fragment data, encoded separators, and extra path segments.
+- Return a sanitized canonical identity and remote kind, never the raw credential-bearing URL.
+- Add table-driven adversarial tests for lookalikes, Unicode/encoding, credentials, ports, extra segments, SCP syntax, and supported SSH variants.
+
+### R-052 — Source matching can falsely accept one repository or falsely reject another
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `source-discovery.ts:184-194` first infers owner/repository from the opaque `source.name` and returns a match before checking structured `source.githubRepo` identity.
+- The Jules type contract defines `name` as a resource identifier in the form `sources/{source}`; examples already use differing opaque ID layouts, so its internal text is not a stable repository-identity contract.
+- A review probe supplied a locally matching name with conflicting structured owner/repository data and received `status: connected` for the wrong structured repository.
+- Discovery calls `client.listSources()` once. Because that Phase 6 method returns only the first page and discards `nextPageToken` (R-040), a valid source on a later page is reported as `source_not_installed`.
+- The returned remediation then incorrectly tells the user to install the Jules GitHub App.
+
+Risk:
+
+- A false positive can dispatch work using a Jules source for a different repository.
+- A false negative can block valid cloud execution and prompt unnecessary or confusing GitHub App changes.
+
+Deferred adjustment:
+
+- Runtime-validate each Source and match only the structured, normalized `githubRepo.owner/repo` fields.
+- Treat `source.name` as an opaque stable identifier after identity has been established.
+- Resolve R-040 by traversing all bounded pages or using the documented filter/get operations where a validated resource ID is known.
+- Reject conflicting or duplicate structured identities explicitly and test both false-positive and later-page cases.
+
+### R-053 — Branch verification, source persistence, and authorized-source presentation are missing
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `discoverJulesSource` accepts no selected starting branch and never examines `githubRepo.defaultBranch` or `githubRepo.branches`.
+- The official Jules source shape exposes branch objects, and the Sources reference directs clients to retrieve available branches before creating a session with `githubRepoContext.startingBranch`.
+- No persistence file or repository changes in this commit; the matched stable `sourceName` is returned only in an HTTP response.
+- `availableSources` is returned only on `source_not_installed`; there is no dedicated, authenticated UI/API contract showing all repositories Jules can access, and the planned frontend work is still absent.
+
+Risk:
+
+- Dispatch can proceed with a branch Jules cannot see, failing only after remote work is requested.
+- Restart recovery and later dispatch must rediscover a potentially changed mapping instead of using an audited stable source association.
+- Users cannot reliably review the authorization scope before selecting cloud execution.
+
+Deferred adjustment:
+
+- Require the intended starting branch as discovery/preflight input and compare it case-sensitively with validated source branch metadata.
+- Persist the stable source resource name, normalized repository identity, selected branch, and last verification time through a dedicated repository.
+- Revalidate persisted mappings before dispatch and provide a separate safe authorized-source view through the Jules frontend feature.
+
+### R-054 — Discovery statuses misclassify infrastructure failures and expose upstream errors
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Every exception from listing Jules sources becomes `credentials_missing`, including timeouts, rate limits, forbidden access, malformed responses, and Jules service failures.
+- The raw exception message is interpolated into the public `diagnostic`; R-047 already demonstrated that upstream text can reflect arbitrary submitted key material.
+- A non-Git repository, a repository without remotes, a failed `git remote -v`, and unparseable remote output all collapse to `remote_missing`.
+- `source_not_installed` can also mean first-page truncation or invalid source data rather than a missing GitHub App.
+
+Risk:
+
+- Users receive the wrong remediation and may replace credentials or reinstall integrations during a provider outage or local Git failure.
+- Provider or credential details can leak into the API response and global error/logging paths.
+- Callers cannot make safe retry, disablement, or user-action decisions from the result status.
+
+Deferred adjustment:
+
+- Model typed results for `not_git`, `remote_missing`, `remote_invalid`, `credentials_missing`, `credentials_invalid`, `forbidden`, `rate_limited`, `provider_unavailable`, `contract_error`, `source_missing`, `branch_missing`, and `connected`.
+- Map typed Git and Jules errors without embedding raw upstream text or remote credentials in public diagnostics.
+- Keep remediation and presentation text outside the provider adapter so UI wording can evolve independently.
+
+### R-055 — Focused tests are environment-dependent and omit the acceptance boundaries
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Three discovery tests run real Git commands against `process.cwd()` and assume this checkout's origin is `frankr2994/antigravity-orchestra`.
+- The tests can fail in a fork, source archive, worktree without that origin, or CI environment with a rewritten remote.
+- Mock source data repeats the incorrect Phase 6 type by representing `defaultBranch` as a string and uses hand-authored resource-name layouts rather than sanitized official fixtures.
+- There are no tests for non-Git directories, missing/multiple/fetch-push remotes, Git command errors, malformed or credential-bearing URLs, pagination, conflicting identities, branch visibility, persistence, safe errors, or the HTTP route.
+- All four tests passed while R-051 through R-054 remained observable.
+
+Risk:
+
+- The suite is simultaneously flaky across environments and unable to detect the security and correctness failures that matter for dispatch.
+
+Deferred adjustment:
+
+- Use isolated temporary Git repositories or inject a `GitRemoteReader` fake; never depend on the Orchestra checkout's live origin.
+- Build table-driven parser and pure matcher tests plus sanitized Jules fixtures.
+- Add negative, pagination, branch, persistence, provider-error, and HTTP contract cases before changing discovery behavior.
+
+### R-056 — Source discovery combines infrastructure, provider, application, and presentation concerns
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The 220-line provider module imports concrete Git commands, `CredentialVault`, credential resolution, and `JulesApiClient` while also parsing remotes, choosing a primary remote, matching identities, classifying failures, and writing user-facing remediation text.
+- `createJulesRouter` accepts optional concrete `Store` and `CredentialVault` dependencies and invokes discovery directly; mounting without Store remains possible and becomes a runtime 500.
+- GitHub normalization is duplicated rather than extracted from the existing Git infrastructure.
+- Direct imports make Git failure paths difficult to isolate, which is why focused tests use the real repository.
+
+Risk:
+
+- Adding another cloud provider, changing credential storage, or revising Git parsing requires edits inside the Jules adapter and route.
+- The new module becomes another cross-layer workflow unit instead of reducing monolithic coupling.
+
+Deferred adjustment:
+
+- Separate a pure canonical repository parser/matcher from `GitRemoteReader`, credential, and `JulesSourceGateway` ports.
+- Put orchestration and typed outcomes in an application service and map them to HTTP/UI responses in a presenter.
+- Require dependencies at composition time and prevent routes/provider adapters from importing concrete Store, vault, or Git command modules directly.
+
+### R-057 — A tokenless GET performs credentialed provider work
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `/projects/:id/jules-source` is a GET that reads the configured Jules key and performs Git and remote Jules API calls on every request.
+- `apiAuthMiddleware` exempts GET, HEAD, and OPTIONS requests from origin and `x-orchestra-token` checks.
+- The endpoint can return the raw remote URL and, on a miss, the account's available Jules sources.
+- No per-project cache, request coalescing, rate limit, or abort propagation is present.
+
+Risk:
+
+- An untrusted local client or cross-site request that can target a known project ID can consume Jules quota and trigger repeated credentialed network traffic without the dashboard token.
+- Same-origin compromise or future CORS changes would expose repository authorization metadata and any raw-URL secret described in R-051.
+
+Deferred adjustment:
+
+- Require dashboard authentication and origin checks for provider-backed and configuration-sensitive reads, not only mutations.
+- Add bounded caching/coalescing and pass request abort signals through Git/provider operations.
+- Return only sanitized repository/source summaries and test unauthorized, cross-origin, repeated, and disconnected-client requests.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:
