@@ -61,6 +61,7 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     const project = store.upsertProject({ name: 'test-sup', root: fixtureDir, gitRoot: fixtureDir });
     const session = store.createSession(project.id, 'Supervisor Test');
     const task = store.createTask(project.id, session.id, 'Supervisor Tick Task', null, null, 'cloud');
+    store.updateTask(task.id, { state: 'running' });
 
     const createdCloud = store.manager.cloudSessions.create({
       taskId: task.id,
@@ -87,12 +88,14 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
           name: 'sessions/sess-tick-1',
           id: 'sess-tick-1',
           state: currentRemoteState,
-          outputs: currentRemoteState === 'COMPLETED' ? {
-            pullRequest: {
-              url: 'https://github.com/frankr2994/antigravity-orchestra/pull/99',
-              headCommitSha: 'head-sha-999',
+          outputs: currentRemoteState === 'COMPLETED' ? [
+            {
+              pullRequest: {
+                url: 'https://github.com/frankr2994/antigravity-orchestra/pull/99',
+                title: 'Supervisor PR',
+              },
             },
-          } : undefined,
+          ] : undefined,
         }),
       };
     };

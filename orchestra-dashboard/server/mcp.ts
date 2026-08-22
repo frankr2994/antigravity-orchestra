@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { config } from './config.js';
 import { runProcess } from './process.js';
-import { getLoadedLmStudioModels } from './agents.js';
+import { getLoadedLmStudioModels } from './lmstudio.js';
 
 const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
 const home = process.env.USERPROFILE || process.cwd();

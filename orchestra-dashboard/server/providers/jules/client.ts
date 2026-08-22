@@ -1,6 +1,5 @@
 import { JulesApiError, redactSecrets } from './errors.js';
 import type {
-  JulesActivity,
   JulesCreateSessionRequest,
   JulesListActivitiesResponse,
   JulesListSessionsResponse,
@@ -10,7 +9,7 @@ import type {
 } from './types.js';
 
 // ============================================================================
-// Google Jules REST API Client (Alpha)
+// Google Jules REST API Client (Authoritative Alpha)
 // ============================================================================
 
 export interface JulesClientOptions {
@@ -24,7 +23,7 @@ export interface JulesClientOptions {
 }
 
 export class JulesApiClient {
-  readonly apiKey: string;
+  #apiKey: string;
   readonly baseUrl: string;
   readonly timeoutMs: number;
   readonly maxRetries: number;
@@ -36,7 +35,7 @@ export class JulesApiClient {
     if (!options.apiKey || !options.apiKey.trim()) {
       throw new Error('Jules API key is required to instantiate JulesApiClient.');
     }
-    this.apiKey = options.apiKey.trim();
+    this.#apiKey = options.apiKey.trim();
     this.baseUrl = (options.baseUrl || 'https://jules.googleapis.com/v1alpha').replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.maxRetries = options.maxRetries ?? 3;
@@ -57,7 +56,7 @@ export class JulesApiClient {
 
   private async request<T>(
     endpoint: string,
-    method: 'GET' | 'POST' = 'GET',
+    method: 'GET' | 'POST' | 'DELETE' = 'GET',
     body?: unknown,
     signal?: AbortSignal
   ): Promise<T> {
@@ -81,9 +80,9 @@ export class JulesApiClient {
           method,
           headers: {
             'Content-Type': 'application/json',
-            'X-Goog-Api-Key': this.apiKey,
+            'X-Goog-Api-Key': this.#apiKey,
           },
-          body: body ? JSON.stringify(body) : undefined,
+          body: body !== undefined ? JSON.stringify(body) : undefined,
           signal: controller.signal,
         });
 
@@ -152,73 +151,94 @@ export class JulesApiClient {
     throw lastError || new Error('Request failed after retries.');
   }
 
-  // 1. List Sources
-  async listSources(pageToken?: string, pageSize?: number, signal?: AbortSignal): Promise<JulesSource[]> {
+  // 1. List Sources (with pagination)
+  async listSources(pageToken?: string, pageSize?: number, signal?: AbortSignal): Promise<JulesListSourcesResponse> {
     const params = new URLSearchParams();
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
     const res = await this.request<JulesListSourcesResponse>(`/sources${query}`, 'GET', undefined, signal);
-    return res.sources || [];
+    return {
+      sources: Array.isArray(res?.sources) ? res.sources : [],
+      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
+    };
   }
 
-  // 2. Create Session
+  // 2. Get Source
+  async getSource(name: string, signal?: AbortSignal): Promise<JulesSource> {
+    const resourceName = name.startsWith('sources/') ? name : `sources/${name}`;
+    const res = await this.request<JulesSource>(`/${resourceName}`, 'GET', undefined, signal);
+    return res;
+  }
+
+  // 3. Create Session
   async createSession(request: JulesCreateSessionRequest, signal?: AbortSignal): Promise<JulesSession> {
-    return this.request<JulesSession>('/sessions', 'POST', request, signal);
+    // Only send automationMode if explicitly specified and valid
+    const cleanRequest: JulesCreateSessionRequest = {
+      prompt: request.prompt,
+      sourceContext: request.sourceContext,
+      title: request.title,
+      requirePlanApproval: request.requirePlanApproval,
+    };
+    if (request.automationMode === 'AUTO_CREATE_PR') {
+      cleanRequest.automationMode = 'AUTO_CREATE_PR';
+    }
+    return this.request<JulesSession>('/sessions', 'POST', cleanRequest, signal);
   }
 
-  // 3. List Sessions
+  // 4. List Sessions (with pagination)
   async listSessions(pageSize?: number, pageToken?: string, signal?: AbortSignal): Promise<JulesListSessionsResponse> {
     const params = new URLSearchParams();
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
-    return this.request<JulesListSessionsResponse>(`/sessions${query}`, 'GET', undefined, signal);
+    const res = await this.request<JulesListSessionsResponse>(`/sessions${query}`, 'GET', undefined, signal);
+    return {
+      sessions: Array.isArray(res?.sessions) ? res.sessions : [],
+      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
+    };
   }
 
-  // 4. Get Session
+  // 5. Get Session
   async getSession(name: string, signal?: AbortSignal): Promise<JulesSession> {
     const resourceName = name.startsWith('sessions/') ? name : `sessions/${name}`;
     return this.request<JulesSession>(`/${resourceName}`, 'GET', undefined, signal);
   }
 
-  // 5. List Activities
+  // 6. Delete Session
+  async deleteSession(name: string, signal?: AbortSignal): Promise<void> {
+    const resourceName = name.startsWith('sessions/') ? name : `sessions/${name}`;
+    await this.request<void>(`/${resourceName}`, 'DELETE', undefined, signal);
+  }
+
+  // 7. List Activities (with pagination)
   async listActivities(
     sessionName: string,
     pageSize?: number,
     pageToken?: string,
     signal?: AbortSignal
-  ): Promise<JulesActivity[]> {
+  ): Promise<JulesListActivitiesResponse> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
     const params = new URLSearchParams();
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
     const res = await this.request<JulesListActivitiesResponse>(`/${resourceName}/activities${query}`, 'GET', undefined, signal);
-    return res.activities || [];
+    return {
+      activities: Array.isArray(res?.activities) ? res.activities : [],
+      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
+    };
   }
 
-  // 6. Approve Plan
+  // 8. Approve Plan
   async approvePlan(sessionName: string, signal?: AbortSignal): Promise<void> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
     await this.request<void>(`/${resourceName}:approvePlan`, 'POST', {}, signal);
   }
 
-  // 7. Send Feedback
-  async sendFeedback(sessionName: string, message: string, signal?: AbortSignal): Promise<void> {
+  // 9. Send Message (authoritative endpoint)
+  async sendMessage(sessionName: string, prompt: string, signal?: AbortSignal): Promise<void> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
-    await this.request<void>(`/${resourceName}:sendFeedback`, 'POST', { message }, signal);
-  }
-
-  // 8. Pause
-  async pause(sessionName: string, signal?: AbortSignal): Promise<void> {
-    const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
-    await this.request<void>(`/${resourceName}:pause`, 'POST', {}, signal);
-  }
-
-  // 9. Resume
-  async resume(sessionName: string, signal?: AbortSignal): Promise<void> {
-    const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
-    await this.request<void>(`/${resourceName}:resume`, 'POST', {}, signal);
+    await this.request<void>(`/${resourceName}:sendMessage`, 'POST', { prompt }, signal);
   }
 }

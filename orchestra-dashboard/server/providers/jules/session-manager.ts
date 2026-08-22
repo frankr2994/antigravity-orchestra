@@ -1,7 +1,12 @@
 import type { Store } from '../../db.js';
 import { CredentialVault } from '../../infrastructure/security/vault.js';
-import type { CloudSessionReference, ExecutionAttempt, OrchestraTaskState } from '../../domain/index.js';
-import { mapJulesToOrchestraState, isJulesTerminalState, type JulesSessionState } from '../../domain/tasks/states.js';
+import {
+  type CloudSessionReference,
+  type ExecutionAttempt,
+  type OrchestraTaskState,
+  isTerminalTaskState,
+} from '../../domain/index.js';
+import { mapJulesToOrchestraState, isJulesTerminalState, type JulesSessionState } from './state-mapper.js';
 import { JulesApiClient } from './client.js';
 import { resolveJulesApiKey } from './credentials.js';
 import { runJulesPreflight } from './preflight.js';
@@ -99,7 +104,7 @@ export class JulesSessionManager {
           },
         },
         requirePlanApproval: options.requirePlanApproval ?? false,
-        autoPr: options.autoPr ?? false,
+        automationMode: options.autoPr ? 'AUTO_CREATE_PR' : undefined,
       });
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -196,10 +201,12 @@ export class JulesSessionManager {
     let activities: JulesActivity[] = [];
 
     try {
-      [session, activities] = await Promise.all([
+      const [sessionRes, activitiesRes] = await Promise.all([
         client.getSession(remoteSessionId),
-        client.listActivities(remoteSessionId).catch(() => []),
+        client.listActivities(remoteSessionId).catch(() => ({ activities: [] })),
       ]);
+      session = sessionRes;
+      activities = activitiesRes.activities || [];
     } catch (err: unknown) {
       // Network dropout / transient error: preserve state without crashing task
       const message = err instanceof Error ? err.message : String(err);
@@ -230,16 +237,15 @@ export class JulesSessionManager {
       }
     }
 
-    // Extract PR output details if present
-    const prUrl = session.outputs?.pullRequest?.url || cloudSession.prUrl;
-    const prHeadSha = session.outputs?.pullRequest?.headCommitSha || cloudSession.prHeadSha;
+    // Extract PR output details if present (outputs is an array)
+    const prOutput = Array.isArray(session.outputs) ? session.outputs.find((o) => o.pullRequest?.url)?.pullRequest : undefined;
+    const prUrl = prOutput?.url || cloudSession.prUrl;
     const latestActivity = activities.at(-1);
 
     // Update cloud session in SQLite
     this.store.manager.cloudSessions.update(cloudSession.id, {
       state: julesState,
       prUrl,
-      prHeadSha,
       lastActivityId: latestActivity?.id || cloudSession.lastActivityId,
       lastActivityAt: latestActivity?.createTime || cloudSession.lastActivityAt,
     });
@@ -250,7 +256,6 @@ export class JulesSessionManager {
       this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', {
         remoteSessionId,
         prUrl,
-        prHeadSha,
       });
     } else if (julesState === 'FAILED') {
       this.store.updateTask(cloudSession.taskId, { state: 'failed' });
@@ -282,16 +287,19 @@ export class JulesSessionManager {
 
     try {
       const client = this.resolveClient(options?.julesClient);
-      await client.pause(remoteSessionId).catch(() => null);
+      await client.deleteSession(remoteSessionId).catch(() => null);
     } catch {
-      // Best-effort remote cancel
+      // Best-effort remote cancel/delete
     }
 
     this.store.manager.cloudSessions.update(cloudSession.id, {
       state: 'CANCELLED',
     });
 
-    this.store.updateTask(cloudSession.taskId, { state: 'failed' });
+    const currentTask = this.store.getTask(cloudSession.taskId);
+    if (currentTask && !isTerminalTaskState(currentTask.state)) {
+      this.store.updateTask(cloudSession.taskId, { state: 'cancelled' });
+    }
     this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.cancelled', {
       remoteSessionId,
     });

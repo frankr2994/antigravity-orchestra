@@ -92,12 +92,14 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
             name: 'sessions/sess-1234',
             id: 'sess-1234',
             state: mockSessionState,
-            outputs: mockSessionState === 'COMPLETED' ? {
-              pullRequest: {
-                url: 'https://github.com/frankr2994/antigravity-orchestra/pull/42',
-                headCommitSha: 'abc1234',
+            outputs: mockSessionState === 'COMPLETED' ? [
+              {
+                pullRequest: {
+                  url: 'https://github.com/frankr2994/antigravity-orchestra/pull/42',
+                  title: 'Feature PR',
+                },
               },
-            } : undefined,
+            ] : undefined,
           }),
         };
       }
@@ -151,7 +153,7 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     assert.equal(cancelledCloud?.state, 'CANCELLED');
 
     const updatedTask = store.getTask(task.id);
-    assert.equal(updatedTask?.state, 'failed');
+    assert.equal(updatedTask?.state, 'completed');
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }

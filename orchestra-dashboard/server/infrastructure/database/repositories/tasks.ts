@@ -1,18 +1,27 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { TaskRecord, OrchestraTaskState, ExecutionTarget } from '../../../domain/index.js';
+import {
+  type TaskRecord,
+  type OrchestraTaskState,
+  type ExecutionTarget,
+  isOrchestraTaskState,
+  isValidTaskStateTransition,
+} from '../../../domain/index.js';
 
 function now() { return new Date().toISOString(); }
 
 function mapTask(row: unknown): TaskRecord {
   const r = row as Record<string, unknown>;
+  const rawState = String(r.state);
+  const state: OrchestraTaskState = isOrchestraTaskState(rawState) ? rawState : 'failed';
+
   return {
     id: String(r.id),
     projectId: String(r.project_id),
     sessionId: String(r.session_id),
     prompt: String(r.prompt),
     title: String(r.title),
-    state: String(r.state) as OrchestraTaskState,
+    state,
     target: (r.target ? String(r.target) : 'local') as ExecutionTarget,
     classification: r.classification ? String(r.classification) : null,
     models: r.models ? String(r.models) : null,
@@ -63,6 +72,17 @@ export class TaskRepository {
   ) {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
     if (!entries.length) return;
+
+    if (fields.state !== undefined) {
+      if (!isOrchestraTaskState(fields.state)) {
+        throw new Error(`Invalid task state: '${fields.state}'`);
+      }
+      const current = this.getById(id);
+      if (current && !isValidTaskStateTransition(current.state, fields.state)) {
+        throw new Error(`Illegal task state transition from '${current.state}' to '${fields.state}' for task ${id}`);
+      }
+    }
+
     const names: Record<string, string> = { commitSha: 'commit_sha', pushStatus: 'push_status' };
     const assignments = entries.map(([key]) => `${names[key] || key}=?`).join(',');
     this.db.prepare(`UPDATE tasks SET ${assignments},updated_at=? WHERE id=?`)

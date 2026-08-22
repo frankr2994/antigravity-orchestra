@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mapJulesToOrchestraState,
-} from '../dist-server/domain/index.js';
+} from '../dist-server/providers/jules/index.js';
 
 // ============================================================================
 // Phase 3 Domain Contracts & State Mapping Test Suite
@@ -14,63 +14,72 @@ test('Phase 3 Domain — mapJulesToOrchestraState covers all 9 canonical Jules s
   assert.equal(queued.taskState, 'running');
   assert.equal(queued.executionState, 'DISPATCHING');
   assert.equal(queued.requiresUserAction, false);
-  assert.equal(queued.isTerminal, false);
+  assert.equal(queued.isTaskTerminal, false);
+  assert.equal(queued.isProviderTerminal, false);
 
   // 2. PLANNING
   const planning = mapJulesToOrchestraState('PLANNING');
   assert.equal(planning.taskState, 'running');
   assert.equal(planning.executionState, 'PLANNING');
   assert.equal(planning.requiresUserAction, false);
-  assert.equal(planning.isTerminal, false);
+  assert.equal(planning.isTaskTerminal, false);
+  assert.equal(planning.isProviderTerminal, false);
 
   // 3. AWAITING_PLAN_APPROVAL
   const awaitingPlan = mapJulesToOrchestraState('AWAITING_PLAN_APPROVAL');
   assert.equal(awaitingPlan.taskState, 'running');
   assert.equal(awaitingPlan.executionState, 'AWAITING_APPROVAL');
   assert.equal(awaitingPlan.requiresUserAction, true);
-  assert.equal(awaitingPlan.isTerminal, false);
+  assert.equal(awaitingPlan.isTaskTerminal, false);
+  assert.equal(awaitingPlan.isProviderTerminal, false);
 
   // 4. AWAITING_USER_FEEDBACK
   const awaitingFeedback = mapJulesToOrchestraState('AWAITING_USER_FEEDBACK');
   assert.equal(awaitingFeedback.taskState, 'running');
   assert.equal(awaitingFeedback.executionState, 'AWAITING_FEEDBACK');
   assert.equal(awaitingFeedback.requiresUserAction, true);
-  assert.equal(awaitingFeedback.isTerminal, false);
+  assert.equal(awaitingFeedback.isTaskTerminal, false);
+  assert.equal(awaitingFeedback.isProviderTerminal, false);
 
   // 5. IN_PROGRESS
   const inProgress = mapJulesToOrchestraState('IN_PROGRESS');
   assert.equal(inProgress.taskState, 'running');
   assert.equal(inProgress.executionState, 'WORKING');
   assert.equal(inProgress.requiresUserAction, false);
-  assert.equal(inProgress.isTerminal, false);
+  assert.equal(inProgress.isTaskTerminal, false);
+  assert.equal(inProgress.isProviderTerminal, false);
 
   // 6. PAUSED
   const paused = mapJulesToOrchestraState('PAUSED');
   assert.equal(paused.taskState, 'running');
   assert.equal(paused.executionState, 'PAUSED');
   assert.equal(paused.requiresUserAction, true);
-  assert.equal(paused.isTerminal, false);
+  assert.equal(paused.isTaskTerminal, false);
+  assert.equal(paused.isProviderTerminal, false);
 
   // 7. COMPLETED (Transitions task to 'reviewing' so Orchestra can fetch the PR & run Codex review)
   const completed = mapJulesToOrchestraState('COMPLETED');
   assert.equal(completed.taskState, 'reviewing');
   assert.equal(completed.executionState, 'COMPLETED');
   assert.equal(completed.requiresUserAction, false);
-  assert.equal(completed.isTerminal, false);
+  assert.equal(completed.isTaskTerminal, false);
+  assert.equal(completed.isProviderTerminal, true);
 
   // 8. FAILED
   const failed = mapJulesToOrchestraState('FAILED');
   assert.equal(failed.taskState, 'failed');
   assert.equal(failed.executionState, 'FAILED');
   assert.equal(failed.requiresUserAction, false);
-  assert.equal(failed.isTerminal, true);
+  assert.equal(failed.isTaskTerminal, true);
+  assert.equal(failed.isProviderTerminal, true);
 
   // 9. STATE_UNSPECIFIED
   const unspecified = mapJulesToOrchestraState('STATE_UNSPECIFIED');
   assert.equal(unspecified.taskState, 'running');
-  assert.equal(unspecified.executionState, 'WORKING');
+  assert.equal(unspecified.executionState, 'UNKNOWN');
   assert.equal(unspecified.requiresUserAction, false);
-  assert.equal(unspecified.isTerminal, false);
+  assert.equal(unspecified.isTaskTerminal, false);
+  assert.equal(unspecified.isProviderTerminal, false);
 });
 
 test('Phase 3 Domain — mapJulesToOrchestraState handles unknown or malformed states safely without crashing', () => {
@@ -81,18 +90,19 @@ test('Phase 3 Domain — mapJulesToOrchestraState handles unknown or malformed s
   // Unknown future state
   const futureState = mapJulesToOrchestraState('ANALYZING_DEPENDENCIES_V2');
   assert.equal(futureState.taskState, 'running');
-  assert.equal(futureState.executionState, 'WORKING');
+  assert.equal(futureState.executionState, 'UNKNOWN');
+  assert.equal(futureState.uncertain, true);
   assert.equal(futureState.isTerminal, false);
   assert.match(futureState.reason || '', /degraded safely/i);
 
   // Null & Undefined safety
   const nullState = mapJulesToOrchestraState(null);
   assert.equal(nullState.taskState, 'running');
-  assert.equal(nullState.executionState, 'WORKING');
+  assert.equal(nullState.executionState, 'UNKNOWN');
 
   const emptyState = mapJulesToOrchestraState('');
   assert.equal(emptyState.taskState, 'running');
-  assert.equal(emptyState.executionState, 'WORKING');
+  assert.equal(emptyState.executionState, 'UNKNOWN');
 });
 
 test('Phase 3 Domain — ExecutionTarget & WorkerIdentity Contracts', () => {

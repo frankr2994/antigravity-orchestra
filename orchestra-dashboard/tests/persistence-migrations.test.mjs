@@ -152,6 +152,7 @@ test('Phase 4 Persistence — Store facade retains 100% backwards-compatibility'
     const project = store.upsertProject({ name: 'Facade App', root: '/tmp/facade', gitRoot: null });
     const session = store.createSession(project.id, 'Session 1');
     const task = store.createTask(project.id, session.id, 'Run test');
+    store.updateTask(task.id, { state: 'running' });
     store.addEvent(task.id, 'system', 'task.state', { state: 'running' });
 
     const events = store.listEvents(task.id);

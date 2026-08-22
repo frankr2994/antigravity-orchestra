@@ -164,10 +164,17 @@ export async function discoverJulesSource(
     client = new JulesApiClient({ apiKey, timeoutMs: 15_000 });
   }
 
-  // Query sources from Jules
+  // Query all sources from Jules (paginated)
   let sources: JulesSource[] = [];
   try {
-    sources = await client.listSources();
+    let pageToken: string | undefined;
+    do {
+      const response = await client.listSources(pageToken);
+      if (Array.isArray(response.sources)) {
+        sources.push(...response.sources);
+      }
+      pageToken = response.nextPageToken;
+    } while (pageToken);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return {

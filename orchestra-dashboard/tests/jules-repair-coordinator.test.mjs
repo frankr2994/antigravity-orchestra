@@ -112,7 +112,7 @@ test('Phase 13 Repair Loop — executeDualEngineRepair orchestrates cloud repair
     let feedbackSent = false;
     const mockFetch = async (url) => {
       const urlStr = String(url);
-      if (urlStr.includes('sendFeedback')) {
+      if (urlStr.includes('sendMessage') || urlStr.includes('sendFeedback')) {
         feedbackSent = true;
         return { ok: true, status: 200, json: async () => ({}) };
       }

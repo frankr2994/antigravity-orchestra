@@ -1,17 +1,21 @@
-import type { JulesSessionState } from '../../domain/index.js';
+import type { JulesSessionState } from './state-mapper.js';
 
 // ============================================================================
-// Google Jules REST API Wire Protocol Types (Alpha)
+// Google Jules REST API Wire Protocol Types (Authoritative Alpha)
 // ============================================================================
+
+export interface JulesSourceBranch {
+  displayName: string;
+}
 
 export interface JulesSource {
   name: string;
   id?: string;
-  displayName?: string;
   githubRepo?: {
     owner: string;
     repo: string;
-    defaultBranch?: string;
+    defaultBranch?: JulesSourceBranch;
+    branches?: JulesSourceBranch[];
   };
 }
 
@@ -23,14 +27,14 @@ export interface JulesListSourcesResponse {
 export interface JulesPullRequestOutput {
   url?: string;
   title?: string;
-  headBranch?: string;
-  baseBranch?: string;
-  headCommitSha?: string;
+  description?: string;
 }
 
-export interface JulesSessionOutputs {
+export interface JulesSessionOutput {
   pullRequest?: JulesPullRequestOutput;
 }
+
+export type JulesAutomationMode = 'AUTOMATION_MODE_UNSPECIFIED' | 'AUTO_CREATE_PR';
 
 export interface JulesSession {
   name: string;
@@ -45,7 +49,8 @@ export interface JulesSession {
   };
   prompt?: string;
   requirePlanApproval?: boolean;
-  outputs?: JulesSessionOutputs;
+  automationMode?: JulesAutomationMode;
+  outputs?: JulesSessionOutput[];
   createTime?: string;
   updateTime?: string;
 }
@@ -65,30 +70,124 @@ export interface JulesCreateSessionRequest {
   };
   title?: string;
   requirePlanApproval?: boolean;
-  autoPr?: boolean;
+  automationMode?: JulesAutomationMode;
 }
 
-export interface JulesActivity {
+export type JulesActivityOriginator = 'user' | 'agent' | 'system' | 'originator_unspecified' | string;
+
+export interface JulesPlanStep {
+  index?: number;
+  title: string;
+  description?: string;
+  status?: string;
+}
+
+export interface JulesPlan {
+  id?: string;
+  steps: JulesPlanStep[];
+}
+
+export interface JulesGitPatch {
+  patch?: string;
+  uncommittedChanges?: boolean;
+  mimeType?: string;
+}
+
+export interface JulesChangeSet {
+  source?: string;
+  gitPatch?: JulesGitPatch;
+}
+
+export interface JulesArtifact {
+  changeSet?: JulesChangeSet;
+  bashOutput?: {
+    command?: string;
+    output?: string;
+    exitCode?: number;
+  };
+  media?: {
+    mimeType?: string;
+    data?: string;
+  };
+}
+
+export interface BaseJulesActivity {
   name: string;
   id?: string;
   createTime?: string;
-  type?: string;
+  originator?: JulesActivityOriginator;
   description?: string;
-  artifacts?: Array<{
-    type?: string;
-    uri?: string;
-    metadata?: Record<string, unknown>;
-  }>;
-  plan?: {
-    steps?: Array<{
-      title: string;
-      description?: string;
-      status?: string;
-    }>;
+  artifacts?: JulesArtifact[];
+}
+
+export interface JulesPlanGeneratedActivity extends BaseJulesActivity {
+  planGenerated: {
+    plan?: JulesPlan;
   };
 }
+
+export interface JulesPlanApprovedActivity extends BaseJulesActivity {
+  planApproved: {
+    planId?: string;
+  };
+}
+
+export interface JulesAgentMessageActivity extends BaseJulesActivity {
+  agentMessaged?: {
+    message?: string;
+  };
+  agentMessage?: {
+    message?: string;
+  };
+}
+
+export interface JulesUserMessageActivity extends BaseJulesActivity {
+  userMessaged?: {
+    message?: string;
+  };
+  userMessage?: {
+    message?: string;
+  };
+}
+
+export interface JulesProgressActivity extends BaseJulesActivity {
+  progressUpdated: {
+    title?: string;
+    description?: string;
+  };
+}
+
+export interface JulesSessionCompletedActivity extends BaseJulesActivity {
+  sessionCompleted: {
+    summary?: string;
+  };
+}
+
+export interface JulesSessionFailedActivity extends BaseJulesActivity {
+  sessionFailed: {
+    reason?: string;
+  };
+}
+
+export interface JulesGenericActivity extends BaseJulesActivity {
+  [key: string]: unknown;
+}
+
+export type JulesActivity =
+  | JulesPlanGeneratedActivity
+  | JulesPlanApprovedActivity
+  | JulesAgentMessageActivity
+  | JulesUserMessageActivity
+  | JulesProgressActivity
+  | JulesSessionCompletedActivity
+  | JulesSessionFailedActivity
+  | JulesGenericActivity;
 
 export interface JulesListActivitiesResponse {
   activities?: JulesActivity[];
   nextPageToken?: string;
+}
+
+export interface JulesSendMessageRequest {
+  prompt: string;
 }

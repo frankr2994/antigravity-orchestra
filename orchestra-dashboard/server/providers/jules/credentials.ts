@@ -70,10 +70,10 @@ export async function validateJulesApiKey(
       fetchFn,
     });
 
-    const sources = await client.listSources();
+    const res = await client.listSources();
     return {
       valid: true,
-      sourceCount: sources.length,
+      sourceCount: res.sources?.length || 0,
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);

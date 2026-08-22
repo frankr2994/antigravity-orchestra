@@ -89,13 +89,13 @@ export class JulesSupervisor {
 
         // 3. Handle terminal transition callback
         if (pollResult.isTerminal) {
-          const prOutput = pollResult.julesSession?.outputs?.pullRequest;
+          const outputs = pollResult.julesSession?.outputs;
+          const prOutput = Array.isArray(outputs) ? outputs.find((o) => o.pullRequest?.url)?.pullRequest : undefined;
           await this.options.onTerminal?.({
             taskId: session.taskId,
             remoteSessionId: session.remoteSessionId,
             state: (pollResult.julesState as string) || 'COMPLETED',
             prUrl: prOutput?.url,
-            prHeadSha: prOutput?.headCommitSha,
           });
         }
       } catch (err: unknown) {

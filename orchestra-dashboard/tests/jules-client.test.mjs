@@ -18,20 +18,34 @@ test('Phase 6 Jules Client — redactSecrets scrubs sensitive tokens and keys', 
   assert.equal(redactSecrets(urlWithKey), 'https://jules.googleapis.com/v1alpha/sources?key=[REDACTED]');
 });
 
-test('Phase 6 Jules Client — Constructor requires non-empty API key', () => {
+test('Phase 6 Jules Client — Constructor requires non-empty API key and hides private key property', () => {
   assert.throws(() => new JulesApiClient({ apiKey: '' }), /API key is required/i);
   assert.throws(() => new JulesApiClient({ apiKey: '   ' }), /API key is required/i);
 
   const client = new JulesApiClient({ apiKey: 'test-api-key' });
-  assert.equal(client.apiKey, 'test-api-key');
+  // ApiKey should not be a public enumerable property
+  assert.equal(client.apiKey, undefined);
+  assert.equal(Object.keys(client).includes('apiKey'), false);
   assert.equal(client.baseUrl, 'https://jules.googleapis.com/v1alpha');
 });
 
-test('Phase 6 Jules Client — listSources and createSession wire contract conformance', async () => {
+test('Phase 6 Jules Client — listSources, getSource, and createSession wire contract conformance', async () => {
   const requestsMade = [];
 
   const mockFetch = async (url, options) => {
     requestsMade.push({ url, options });
+
+    if (url.includes('/sources/github/owner/test-repo')) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          name: 'sources/github/owner/test-repo',
+          id: 'test-repo',
+          githubRepo: { owner: 'owner', repo: 'test-repo', defaultBranch: { displayName: 'main' } },
+        }),
+      };
+    }
 
     if (url.includes('/sources')) {
       return {
@@ -43,9 +57,10 @@ test('Phase 6 Jules Client — listSources and createSession wire contract confo
               name: 'sources/github/owner/test-repo',
               id: 'test-repo',
               displayName: 'test-repo',
-              githubRepo: { owner: 'owner', repo: 'test-repo', defaultBranch: 'main' },
+              githubRepo: { owner: 'owner', repo: 'test-repo', defaultBranch: { displayName: 'main' } },
             },
           ],
+          nextPageToken: 'token-page-2',
         }),
       };
     }
@@ -61,6 +76,8 @@ test('Phase 6 Jules Client — listSources and createSession wire contract confo
           state: 'QUEUED',
           prompt: body.prompt,
           sourceContext: body.sourceContext,
+          automationMode: body.automationMode,
+          outputs: [],
           createTime: '2026-08-22T00:00:00Z',
         }),
       };
@@ -74,25 +91,33 @@ test('Phase 6 Jules Client — listSources and createSession wire contract confo
     fetchFn: mockFetch,
   });
 
-  // Test 1: listSources
-  const sources = await client.listSources();
-  assert.equal(sources.length, 1);
-  assert.equal(sources[0].name, 'sources/github/owner/test-repo');
+  // Test 1: listSources with pagination preservation
+  const sourcesRes = await client.listSources();
+  assert.equal(sourcesRes.sources.length, 1);
+  assert.equal(sourcesRes.sources[0].name, 'sources/github/owner/test-repo');
+  assert.equal(sourcesRes.nextPageToken, 'token-page-2');
   assert.equal(requestsMade[0].options.headers['X-Goog-Api-Key'], 'test-key-123');
 
-  // Test 2: createSession
+  // Test 2: getSource
+  const source = await client.getSource('sources/github/owner/test-repo');
+  assert.equal(source.name, 'sources/github/owner/test-repo');
+  assert.equal(source.githubRepo?.defaultBranch?.displayName, 'main');
+
+  // Test 3: createSession with automationMode
   const session = await client.createSession({
     prompt: 'Refactor database',
     sourceContext: {
       source: 'sources/github/owner/test-repo',
       githubRepoContext: { startingBranch: 'main' },
     },
+    automationMode: 'AUTO_CREATE_PR',
   });
   assert.equal(session.name, 'sessions/session-12345');
   assert.equal(session.state, 'QUEUED');
+  assert.equal(session.automationMode, 'AUTO_CREATE_PR');
 });
 
-test('Phase 6 Jules Client — approvePlan, sendFeedback, and activities endpoints', async () => {
+test('Phase 6 Jules Client — approvePlan, sendMessage, deleteSession, and activities endpoints', async () => {
   const calls = [];
 
   const mockFetch = async (url, options) => {
@@ -101,8 +126,11 @@ test('Phase 6 Jules Client — approvePlan, sendFeedback, and activities endpoin
     if (url.includes(':approvePlan')) {
       return { ok: true, status: 200, json: async () => ({}) };
     }
-    if (url.includes(':sendFeedback')) {
+    if (url.includes(':sendMessage')) {
       return { ok: true, status: 200, json: async () => ({}) };
+    }
+    if (url.includes('/sessions/12345') && options.method === 'DELETE') {
+      return { ok: true, status: 204 };
     }
     if (url.includes('/activities')) {
       return {
@@ -110,8 +138,20 @@ test('Phase 6 Jules Client — approvePlan, sendFeedback, and activities endpoin
         status: 200,
         json: async () => ({
           activities: [
-            { name: 'activities/act-1', id: 'act-1', type: 'PLAN_GENERATED', createTime: '2026-08-22T00:00:00Z' },
+            {
+              name: 'activities/act-1',
+              id: 'act-1',
+              originator: 'agent',
+              planGenerated: {
+                plan: {
+                  id: 'plan-1',
+                  steps: [{ index: 0, title: 'Analyze requirements', status: 'COMPLETED' }],
+                },
+              },
+              createTime: '2026-08-22T00:00:00Z',
+            },
           ],
+          nextPageToken: 'token-act-2',
         }),
       };
     }
@@ -123,17 +163,28 @@ test('Phase 6 Jules Client — approvePlan, sendFeedback, and activities endpoin
     fetchFn: mockFetch,
   });
 
+  // 1. approvePlan
   await client.approvePlan('sessions/12345');
   assert.equal(calls[0].url, 'https://jules.googleapis.com/v1alpha/sessions/12345:approvePlan');
   assert.equal(calls[0].method, 'POST');
 
-  await client.sendFeedback('12345', 'Please update the migration script.');
-  assert.equal(calls[1].url, 'https://jules.googleapis.com/v1alpha/sessions/12345:sendFeedback');
-  assert.equal(calls[1].body.message, 'Please update the migration script.');
+  // 2. sendMessage (authoritative endpoint with { prompt })
+  await client.sendMessage('12345', 'Please update the migration script.');
+  assert.equal(calls[1].url, 'https://jules.googleapis.com/v1alpha/sessions/12345:sendMessage');
+  assert.equal(calls[1].body.prompt, 'Please update the migration script.');
 
-  const activities = await client.listActivities('12345');
-  assert.equal(activities.length, 1);
-  assert.equal(activities[0].id, 'act-1');
+  // 3. deleteSession
+  await client.deleteSession('12345');
+  assert.equal(calls[2].url, 'https://jules.googleapis.com/v1alpha/sessions/12345');
+  assert.equal(calls[2].method, 'DELETE');
+
+  // 4. listActivities with pagination
+  const actRes = await client.listActivities('12345');
+  assert.equal(actRes.activities.length, 1);
+  assert.equal(actRes.activities[0].id, 'act-1');
+  assert.equal(actRes.activities[0].originator, 'agent');
+  assert.equal(actRes.activities[0].planGenerated?.plan?.steps?.length, 1);
+  assert.equal(actRes.nextPageToken, 'token-act-2');
 });
 
 test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiError', async () => {
@@ -146,7 +197,13 @@ test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiEr
         ok: false,
         status: 503,
         statusText: 'Service Unavailable',
-        json: async () => ({ error: { code: 503, message: 'Rate limit on AIzaSyB1234567890abcdefghijklmnopqrstuvwxyz' } }),
+        json: async () => ({
+          error: {
+            code: 503,
+            message: 'Rate limit on AIzaSyB1234567890abcdefghijklmnopqrstuvwxyz',
+            details: [{ secret: 'sk-proj-sensitive12345' }],
+          },
+        }),
       };
     }
     return {
@@ -173,7 +230,13 @@ test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiEr
     ok: false,
     status: 400,
     statusText: 'Bad Request',
-    json: async () => ({ error: { code: 400, message: 'Invalid prompt for key AIzaSyB1234567890abcdefghijklmnopqrstuvwxyz' } }),
+    json: async () => ({
+      error: {
+        code: 400,
+        message: 'Invalid prompt for key AIzaSyB1234567890abcdefghijklmnopqrstuvwxyz',
+        details: [{ token: 'ghp_secrettoken999' }],
+      },
+    }),
   });
 
   const failingClient = new JulesApiClient({
@@ -189,6 +252,7 @@ test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiEr
       assert.equal(err.status, 400);
       assert.ok(!err.message.includes('AIzaSy'), 'Error message must redact secret API key');
       assert.ok(err.message.includes('[REDACTED_API_KEY]'));
+      assert.deepEqual(err.details, [{ token: '[REDACTED_GH_TOKEN]' }], 'Structured details must be recursively redacted');
       return true;
     }
   );

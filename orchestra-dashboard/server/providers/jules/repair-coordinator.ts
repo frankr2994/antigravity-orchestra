@@ -192,7 +192,7 @@ export async function executeDualEngineRepair(
     const feedbackMessage = formatRepairFeedbackPrompt(findings, verificationResults);
 
     try {
-      await client.sendFeedback(remoteSessionId, feedbackMessage);
+      await client.sendMessage(remoteSessionId, feedbackMessage);
     } catch {
       // Fallback to local takeover if cloud feedback fails
       return executeDualEngineRepair({

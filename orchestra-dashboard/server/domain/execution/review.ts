@@ -52,3 +52,43 @@ export interface ReviewPacketInput {
   verification?: VerificationResult;
   previousReview?: string;
 }
+
+/**
+ * Validates invariant consistency of a ReviewVerdict.
+ * Ensures blocked flag and verdict type are never in contradictory states.
+ */
+export function validateReviewVerdict(verdict: ReviewVerdict): { valid: boolean; reason?: string } {
+  const hasBlockingFindings = Array.isArray(verdict.findings) && verdict.findings.some((f) => f.severity === 'blocking');
+
+  if (verdict.verdict === 'PASS' || verdict.verdict === 'APPROVED') {
+    if (verdict.blocked) {
+      return {
+        valid: false,
+        reason: `Review verdict '${verdict.verdict}' cannot have blocked=true.`,
+      };
+    }
+    if (hasBlockingFindings) {
+      return {
+        valid: false,
+        reason: `Review verdict '${verdict.verdict}' cannot contain blocking findings.`,
+      };
+    }
+  }
+
+  if (verdict.verdict === 'BLOCK' || verdict.verdict === 'DISPUTED') {
+    if (!verdict.blocked) {
+      return {
+        valid: false,
+        reason: `Review verdict '${verdict.verdict}' requires blocked=true.`,
+      };
+    }
+    if (!hasBlockingFindings && verdict.verdict === 'BLOCK') {
+      return {
+        valid: false,
+        reason: `Review verdict 'BLOCK' requires at least one blocking finding.`,
+      };
+    }
+  }
+
+  return { valid: true };
+}

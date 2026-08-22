@@ -122,9 +122,9 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
         approvedPlan = true;
         return { ok: true, status: 200, json: async () => ({}) };
       }
-      if (urlStr.includes('sendFeedback')) {
+      if (urlStr.includes('sendMessage') || urlStr.includes('sendFeedback')) {
         const body = JSON.parse(String(opts?.body || '{}'));
-        feedbackReceived = body.message;
+        feedbackReceived = body.prompt || body.message || '';
         return { ok: true, status: 200, json: async () => ({}) };
       }
       if (urlStr.includes('pause')) {

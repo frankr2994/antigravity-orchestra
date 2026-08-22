@@ -133,6 +133,9 @@ test('Phase 1 Baseline — Task Fixtures: Successful, Failed, Interrupted, Dispu
 
     // 3. Fixture A: Successful Task
     const successfulTask = store.createTask(project.id, session.id, 'Implement authentication endpoint');
+    store.updateTask(successfulTask.id, { state: 'running' });
+    store.updateTask(successfulTask.id, { state: 'reviewing' });
+    store.updateTask(successfulTask.id, { state: 'summarizing' });
     store.updateTask(successfulTask.id, {
       state: 'completed',
       result: 'Authentication endpoint implemented successfully.',
@@ -165,6 +168,8 @@ test('Phase 1 Baseline — Task Fixtures: Successful, Failed, Interrupted, Dispu
 
     // 6. Fixture D: Disputed Task awaiting User Approval
     const disputedTask = store.createTask(project.id, session.id, 'Controversial refactoring');
+    store.updateTask(disputedTask.id, { state: 'running' });
+    store.updateTask(disputedTask.id, { state: 'reviewing' });
     store.updateTask(disputedTask.id, {
       state: 'review_disputed',
       result: 'Refactored module but Codex flagged performance concern.',

@@ -6,6 +6,23 @@ import { delimiter, dirname, resolve } from 'node:path';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { codexAppServer } from './codex-app-server.js';
 import { callGemmaRiderTool, getGemmaRiderTools } from './mcp.js';
+import {
+  getInstalledLmStudioModels,
+  getLoadedLmStudioModels,
+  getActiveLmStudioModel,
+  loadLmStudioModel,
+  unloadLmStudioModel,
+  type LmStudioInstalledModel,
+} from './lmstudio.js';
+
+export {
+  getInstalledLmStudioModels,
+  getLoadedLmStudioModels,
+  getActiveLmStudioModel,
+  loadLmStudioModel,
+  unloadLmStudioModel,
+  type LmStudioInstalledModel,
+};
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
 
@@ -24,104 +41,6 @@ const DISTILLED_ERRORS_SCHEMA: JsonSchema = { name: 'verification_errors_distill
 const SEMANTIC_COMMITS_SCHEMA: JsonSchema = { name: 'semantic_commit_slicing', schema: { type: 'object', properties: { slices: { type: 'array', items: { type: 'object', properties: { title: { type: 'string' }, body: { type: 'string' }, files: { type: 'array', items: { type: 'string' } } }, required: ['title', 'body', 'files'], additionalProperties: false } } }, required: ['slices'], additionalProperties: false } };
 const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
 const GEMMA_MICRO_TASK_SCHEMA: JsonSchema = { name: 'gemma_micro_task_execution', schema: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, action: { type: 'string', enum: ['overwrite', 'create'] }, content: { type: 'string' } }, required: ['path', 'action', 'content'], additionalProperties: false } }, explanation: { type: 'string' } }, required: ['files', 'explanation'], additionalProperties: false } };
-
-export interface InstalledLmStudioModel {
-  id: string;
-  displayName?: string;
-  publisher?: string;
-  arch?: string;
-  quantization?: string;
-  state: 'loaded' | 'not-loaded';
-  maxContextLength?: number;
-  loadedContextLength?: number;
-  sizeBytes?: number;
-  paramsString?: string;
-  type?: string;
-  capabilities?: string[];
-}
-
-export async function getInstalledLmStudioModels(): Promise<InstalledLmStudioModel[]> {
-  try {
-    const v0Res = await fetch(`${config.lmStudioBaseUrl.replace(/\/v1\/?$/, '')}/api/v0/models`, { signal: AbortSignal.timeout(3000) });
-    if (v0Res.ok) {
-      const body = await v0Res.json() as { data?: Array<Record<string, any>> };
-      if (Array.isArray(body.data)) {
-        return body.data
-          .filter((item) => item && item.id && item.type !== 'embeddings')
-          .map((item) => ({
-            id: String(item.id),
-            displayName: typeof item.displayName === 'string' ? item.displayName : undefined,
-            publisher: typeof item.publisher === 'string' ? item.publisher : undefined,
-            arch: typeof item.arch === 'string' ? item.arch : undefined,
-            quantization: typeof item.quantization === 'string' ? item.quantization : item.quantization?.name,
-            state: item.state === 'loaded' ? 'loaded' : 'not-loaded',
-            maxContextLength: typeof item.max_context_length === 'number' ? item.max_context_length : undefined,
-            loadedContextLength: typeof item.loaded_context_length === 'number' ? item.loaded_context_length : undefined,
-            sizeBytes: typeof item.sizeBytes === 'number' ? item.sizeBytes : undefined,
-            paramsString: typeof item.paramsString === 'string' ? item.paramsString : undefined,
-            type: typeof item.type === 'string' ? item.type : undefined,
-            capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : undefined,
-          }));
-      }
-    }
-  } catch { /* Fallback to v1 models endpoint */ }
-
-  try {
-    const response = await fetch(`${config.lmStudioBaseUrl}/models`, { signal: AbortSignal.timeout(3000) });
-    if (response.ok) {
-      const body = await response.json() as { data?: Array<{ id?: string }> };
-      return (body.data?.map((item) => ({ id: String(item.id), state: 'not-loaded' as const })).filter((m) => m.id) || []);
-    }
-  } catch { /* Offline */ }
-
-  return [];
-}
-
-export async function getLoadedLmStudioModels(): Promise<string[]> {
-  const models = await getInstalledLmStudioModels();
-  return models.filter((m) => m.state === 'loaded').map((m) => m.id);
-}
-
-export async function getActiveLmStudioModel(): Promise<string> {
-  const loaded = await getLoadedLmStudioModels();
-  if (loaded.length > 0) return loaded[0]!;
-  return config.lmStudioModel;
-}
-
-export async function loadLmStudioModel(modelId: string, options?: { gpu?: string; contextLength?: number }): Promise<{ ok: boolean; message: string; activeModel?: string }> {
-  try {
-    // 1. Unload all currently loaded models first to free 100% GPU VRAM
-    await runProcess('lms', ['unload', '--all'], { timeoutMs: 30_000 }).catch(() => { /* ignore */ });
-
-    // 2. Load target model
-    const args = ['load', modelId, '-y'];
-    if (options?.gpu) args.push('--gpu', options.gpu);
-    else args.push('--gpu', 'max');
-    if (options?.contextLength) args.push('--context-length', String(options.contextLength));
-
-    const result = await runProcess('lms', args, { timeoutMs: 90_000 });
-    if (result.code !== 0) {
-      throw new Error(result.stderr.trim() || result.stdout.trim() || `lms load exited with code ${result.code}`);
-    }
-
-    return { ok: true, message: `Loaded model ${modelId}`, activeModel: modelId };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
-}
-
-export async function unloadLmStudioModel(modelId?: string): Promise<{ ok: boolean; message: string }> {
-  try {
-    const args = modelId ? ['unload', modelId] : ['unload', '--all'];
-    const result = await runProcess('lms', args, { timeoutMs: 30_000 });
-    if (result.code !== 0) {
-      throw new Error(result.stderr.trim() || result.stdout.trim() || `lms unload exited with code ${result.code}`);
-    }
-    return { ok: true, message: modelId ? `Unloaded model ${modelId}` : 'Unloaded all local models' };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
-  }
-}
 
 export async function lmStudioHealth() {
   try {
@@ -168,11 +87,7 @@ export async function triageProviderFailure(input: { stage: string; error: strin
 }
 
 async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false, onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void): Promise<string> {
-  const loaded = await getLoadedLmStudioModels();
-  if (loaded.length === 0) {
-    throw new Error('No local model is currently loaded in LM Studio. Please load a model from the Settings tab or LM Studio.');
-  }
-  const model = loaded[0];
+  const model = await getActiveLmStudioModel();
   const conversation = [...messages];
   const tools = riderTools ? await getGemmaRiderTools() : [];
   let toolCallsUsed = 0;

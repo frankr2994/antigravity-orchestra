@@ -257,8 +257,8 @@ export function createJulesRouter(
     }
   });
 
-  // 9. Send Feedback
-  router.post('/tasks/:id/jules/feedback', async (req, res, next) => {
+  // 9. Send Message to Jules Cloud Session
+  const handleSendMessage = async (req: any, res: any, next: any) => {
     try {
       const s = requireStore();
       const task = s.getTask(req.params.id);
@@ -273,75 +273,30 @@ export function createJulesRouter(
         return;
       }
 
-      const message = String(req.body?.message || '').trim();
-      if (!message) {
-        res.status(400).json({ error: 'Feedback message cannot be empty.' });
+      const prompt = String(req.body?.prompt || req.body?.message || '').trim();
+      if (!prompt) {
+        res.status(400).json({ error: 'Message prompt cannot be empty.' });
         return;
       }
 
       const client = resolveClient();
-      await client.sendFeedback(cloudSession.sessionResourceName, message);
+      await client.sendMessage(cloudSession.sessionResourceName, prompt);
 
       s.addEvent(task.id, 'orchestra', 'cloud.feedback_sent', {
         remoteSessionId: cloudSession.remoteSessionId,
-        message,
+        prompt,
       });
 
       res.json({ ok: true });
     } catch (error) {
       next(error);
     }
-  });
+  };
 
-  // 10. Pause / Resume / Cancel
-  router.post('/tasks/:id/jules/pause', async (req, res, next) => {
-    try {
-      const s = requireStore();
-      const task = s.getTask(req.params.id);
-      if (!task) {
-        res.status(404).json({ error: 'Task not found.' });
-        return;
-      }
+  router.post('/tasks/:id/jules/message', handleSendMessage);
+  router.post('/tasks/:id/jules/feedback', handleSendMessage);
 
-      const cloudSession = s.manager.cloudSessions.getByTaskId(task.id);
-      if (!cloudSession) {
-        res.status(404).json({ error: 'Cloud session not found for task.' });
-        return;
-      }
-
-      const client = resolveClient();
-      await client.pause(cloudSession.sessionResourceName);
-      s.addEvent(task.id, 'orchestra', 'cloud.paused', { remoteSessionId: cloudSession.remoteSessionId });
-      res.json({ ok: true });
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/tasks/:id/jules/resume', async (req, res, next) => {
-    try {
-      const s = requireStore();
-      const task = s.getTask(req.params.id);
-      if (!task) {
-        res.status(404).json({ error: 'Task not found.' });
-        return;
-      }
-
-      const cloudSession = s.manager.cloudSessions.getByTaskId(task.id);
-      if (!cloudSession) {
-        res.status(404).json({ error: 'Cloud session not found for task.' });
-        return;
-      }
-
-      const client = resolveClient();
-      await client.resume(cloudSession.sessionResourceName);
-      s.addEvent(task.id, 'orchestra', 'cloud.resumed', { remoteSessionId: cloudSession.remoteSessionId });
-      res.json({ ok: true });
-    } catch (error) {
-      next(error);
-    }
-  });
-
+  // 10. Cancel / Delete Cloud Session
   router.post('/tasks/:id/jules/cancel', async (req, res, next) => {
     try {
       const s = requireStore();
@@ -365,7 +320,30 @@ export function createJulesRouter(
     }
   });
 
-  // 11. List Activities
+  router.delete('/tasks/:id/jules-session', async (req, res, next) => {
+    try {
+      const s = requireStore();
+      const sm = requireSessionManager();
+      const task = s.getTask(req.params.id);
+      if (!task) {
+        res.status(404).json({ error: 'Task not found.' });
+        return;
+      }
+
+      const cloudSession = s.manager.cloudSessions.getByTaskId(task.id);
+      if (!cloudSession) {
+        res.status(404).json({ error: 'Cloud session not found for task.' });
+        return;
+      }
+
+      const result = await sm.cancelSession(cloudSession.remoteSessionId, { julesClient: customClient });
+      res.json(result);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // 11. List Activities (with pagination)
   router.get('/tasks/:id/jules/activities', async (req, res, next) => {
     try {
       const s = requireStore();
@@ -381,12 +359,11 @@ export function createJulesRouter(
         return;
       }
 
-      const pageSize = req.query.pageSize ? Number(req.query.pageSize) : undefined;
-      const pageToken = typeof req.query.pageToken === 'string' ? req.query.pageToken : undefined;
-
       const client = resolveClient();
-      const activities = await client.listActivities(cloudSession.sessionResourceName, pageSize, pageToken);
-      res.json({ activities });
+      const pageToken = typeof req.query?.pageToken === 'string' ? req.query.pageToken : undefined;
+      const pageSize = req.query?.pageSize ? parseInt(String(req.query.pageSize), 10) : undefined;
+      const response = await client.listActivities(cloudSession.sessionResourceName, pageSize, pageToken);
+      res.json({ activities: response.activities, nextPageToken: response.nextPageToken });
     } catch (error) {
       next(error);
     }
