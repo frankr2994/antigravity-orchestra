@@ -66,6 +66,10 @@ export class ExecutionAttemptRepository {
     return this.db.prepare('SELECT * FROM execution_attempts WHERE task_id=? ORDER BY started_at DESC').all(taskId).map(mapAttempt);
   }
 
+  listByTaskId(taskId: string): ExecutionAttempt[] {
+    return this.listByTask(taskId);
+  }
+
   update(id: string, fields: Partial<Pick<ExecutionAttempt, 'state' | 'headSha' | 'prUrl' | 'retryCount' | 'error' | 'completedAt'>>) {
     const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
     if (!entries.length) return;

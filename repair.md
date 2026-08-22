@@ -1772,6 +1772,260 @@ Deferred adjustment:
 - Implement the provider-neutral preflight contract through a Jules adapter and keep Git ref preparation as an independently testable infrastructure service.
 - Keep presentation mapping at the API/UI boundary and add architecture checks for these dependency directions.
 
+## Phase 10 review
+
+### Review scope
+
+- Reviewed commit: `928b10212ccc6216b80681ff36dd25d29fa5bf1d`
+- Commit subject: `feat(jules): implement core jules cloud dispatch and session lifecycle manager (phase 10)`
+- Primary artifacts reviewed: `server/providers/jules/session-manager.ts`, Jules wire types and client behavior, domain state mapping, focused tests, the Phase 10 and later lifecycle requirements in `julesplan.md`, and the official Jules session, type, and activity references.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that `session-manager.ts` was unchanged between `928b102` and the review checkout by comparing its Git blob ID (`66bfedc7bdf37098b38c75a68853dcc6b85b9796`).
+- `npm run build:server`: passed with zero TypeScript errors.
+- `node --test tests/jules-session-manager.test.mjs`: one test passed with zero failures after rerunning outside the process sandbox.
+- Confirmed with `git grep` that `JulesSessionManager` had no production caller at this commit; only its definition and focused test referenced it.
+- Compared session creation, outputs, lifecycle methods, activities, pagination, and payload shapes with the official Jules API documentation.
+
+### R-067 — The planned Phase 10 secure configuration was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 10 as secure configuration for endpoint, API-key reference, polling interval, request timeout, retry limits, maximum concurrency, plan-approval default, and the Jules feature flag.
+- Commit `928b102` instead adds explicit dispatch plus fragments of polling and cancellation, work assigned to later plan phases.
+- The manager hard-codes a 15-second timeout and a false plan-approval default; it adds no configuration schema, endpoint setting, polling interval, retry limit, maximum-session policy, feature flag, or connectivity check.
+- The OS-protected credential and safe-error deficiencies already recorded in R-044 through R-049 remain unresolved.
+- At this commit the new manager is not called by production code, so it cannot constitute an operational Phase 10 configuration path.
+
+Risk:
+
+- Phase tracking can mark secure configuration complete while cloud execution has no enforceable feature gate, concurrency limit, centrally validated settings, or compliant secret store.
+- Hard-coded behavior will spread across later lifecycle components and be more disruptive to repair.
+
+Deferred adjustment:
+
+- Keep planned Phase 10 open until every listed setting has one typed, validated source and secrets are stored through an OS-protected facility.
+- Add a provider connectivity check with stable, actionable, redacted errors and tests at both service and HTTP boundaries.
+- Inject one immutable Jules configuration object into provider components rather than reading or hard-coding settings throughout the lifecycle.
+
+### R-068 — Session creation and output handling use incompatible Jules wire shapes
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `dispatchSession` sends `autoPr: boolean`, but the documented session create request uses `automationMode: "AUTO_CREATE_PR"`.
+- The local types model `outputs` as an object containing `pullRequest`; the documented Session uses a list of `SessionOutput` values.
+- The manager reads `outputs.pullRequest.headCommitSha`, but the documented pull-request output exposes URL, title, and description, not a head commit SHA.
+- The focused mock reproduces these invented shapes and never asserts the actual create-request body, allowing the compatibility error to pass.
+- Remote `name`, `id`, state, outputs, and activity values are accepted through compile-time casts with no runtime schema validation; `name.split('/').pop()!` can create an invalid local identifier.
+
+Risk:
+
+- Automatic PR creation may not be enabled, and a real completed session's PR output will not be captured.
+- Invalid or changed alpha responses can corrupt lifecycle state or create records that cannot be polled or reconciled.
+
+Deferred adjustment:
+
+- Regenerate or hand-maintain wire DTOs from the current official contract, send `automationMode`, and parse the output union/list explicitly.
+- Obtain commit identity from a verified GitHub/ref workflow rather than an undocumented provider field.
+- Validate every provider response at runtime and return typed protocol errors when required names, IDs, states, or payload variants are invalid.
+
+### R-069 — Dispatch is neither atomic nor idempotent
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The remote session is created before any durable dispatch intent, execution attempt, or cloud-session reference is recorded.
+- Attempt creation, cloud-session creation, event insertion, callback delivery, and task update are independent operations with no transaction or compensating reconciliation.
+- A failure after remote creation is not caught, so the method can throw while leaving remote work orphaned or local records only partially written.
+- The Jules client retries transient requests, including session-creation POSTs, without an idempotency key or a lookup/reconciliation step for an ambiguous timeout.
+- No uniqueness rule or pre-dispatch check prevents multiple cloud sessions for the same task/attempt.
+
+Risk:
+
+- Process, network, or database failures can produce duplicate billable work, orphaned remote sessions, or contradictory local state.
+- Recovery cannot determine whether it is safe to retry creation because the decision and provider correlation were never durably recorded.
+
+Deferred adjustment:
+
+- Persist a uniquely keyed dispatch intent before network work, then claim it through a transactional outbox/state-machine transition.
+- On ambiguous create outcomes, reconcile by durable correlation before any retry; never blindly repeat a non-idempotent create.
+- Transactionally persist the provider identity, attempt transition, cloud-session reference, task event, and task state, with explicit recovery for every boundary failure.
+
+### R-070 — Completion bypasses mandatory review and produces contradictory states
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `mapJulesToOrchestraState('COMPLETED')` returns task state `reviewing` and `isTerminal: false`, reflecting the plan's independent-review boundary.
+- The new `isJulesTerminalState('COMPLETED')` returns true, so a single state has two conflicting terminal classifications in the same domain module.
+- `pollSession` returns `orchestraState: 'reviewing'` and `isTerminal: true` while separately writing the task itself as `completed` and emitting `cloud.completed`.
+- No PR identity verification, independent Codex review, baseline comparison, or merge-readiness check occurs before that completed task transition.
+- Every subsequent completed poll emits another completion event because no previous-state transition guard exists.
+
+Risk:
+
+- Untrusted cloud-generated code is presented as completed before review or verification, violating a central safety invariant.
+- Consumers observing the method result, task row, mapper, and event stream can make incompatible scheduling and UI decisions.
+
+Deferred adjustment:
+
+- Define completion once in the provider-neutral state machine: provider completion must transition to review intake, not task completion.
+- Use the mapper's full result as the sole lifecycle decision and remove duplicate terminal helpers.
+- Enforce legal compare-and-set transitions and emit transition events exactly once after durable state changes.
+
+### R-071 — Polling can lose, duplicate, or silently suppress provider activity
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `listActivities` returns only the first page and discards `nextPageToken`, while the official endpoint is paginated.
+- Activity-fetch failures are converted to an empty list even when the session request succeeds, so missing audit data is indistinguishable from no activity.
+- Deduplication primarily compares timestamps; distinct activities with equal, missing, invalid, or out-of-order creation times can be skipped or replayed.
+- The cursor is set from `activities.at(-1)` without validating ordering and stores an ID that is not actually used for ID-based deduplication once a timestamp exists.
+- Events and callbacks occur before the cursor update, so a crash or callback failure can replay work or prevent cursor persistence.
+- The implementation is a single poll call, with no persisted next-poll time, lease, bounded backoff, timeout lifecycle, restart scheduler, or terminal-transition guard required by the plan.
+
+Risk:
+
+- Important plans, user-action requests, progress, failures, and artifacts can be permanently missed or multiply emitted.
+- Multiple processes or restarts can poll and process the same session concurrently without an ownership mechanism.
+
+Deferred adjustment:
+
+- Implement a paginated activity adapter and persist a stable `(createTime, activity identity)` cursor only in the same transaction as normalized events.
+- Treat activity-fetch failure as an observable partial poll failure and retry it under bounded backoff.
+- Add a durable scheduler/lease with configured intervals, jitter, deadline, restart recovery, and state-transition idempotency.
+
+### R-072 — Cancellation reports success without confirming that remote work stopped
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `cancelSession` calls an undocumented `:pause` endpoint rather than a documented cancellation operation.
+- Every remote error is swallowed, after which the cloud session is unconditionally set to `CANCELLED`, the task is set to `failed`, and `{ ok: true }` is returned.
+- Pausing and cancelling have different semantics; even a successful pause would not prove terminal cancellation.
+- No current-state check prevents cancellation after provider completion. The focused test explicitly cancels its completed fixture and asserts that `COMPLETED` is overwritten with `CANCELLED`.
+- The documented session API exposes delete, but no product policy decides whether deletion is an acceptable substitute or how it affects recovery and audit history.
+
+Risk:
+
+- The UI can claim cancellation while Jules continues changing code or opening a PR.
+- Completed evidence can be destroyed locally, and a legitimate cancelled task is misclassified as a failure.
+
+Deferred adjustment:
+
+- Do not expose cancellation until a supported remote semantic is selected and verified; model pause, delete, cancellation request, confirmed cancellation, and cancellation failure separately.
+- Permit the action only from legal states and use compare-and-set transitions that cannot overwrite completion.
+- Preserve and surface the sanitized remote result, and reconcile uncertain outcomes through polling rather than declaring success.
+
+### R-073 — Raw provider payloads cross the trust boundary into durable events
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Every qualifying Jules activity is persisted wholesale as a task-event payload and passed unchanged to the callback.
+- The official activity schema can include patches, shell output, and media artifacts; the implementation applies no allow-list, size bound, encoding check, redaction, or content classification.
+- Provider error messages and preflight reasons are returned as plain strings, inheriting the upstream-detail exposure tracked in R-047, R-054, and R-064.
+- PR URLs and provider resource names are accepted without repository, host, or ownership validation before persistence and event emission.
+
+Risk:
+
+- Secrets, large patches, command output, binary material, hostile strings, or unrelated repository links can enter SQLite, SSE/event consumers, logs, and the UI.
+- Storage exhaustion and stored-content injection become possible at a provider-controlled boundary.
+
+Deferred adjustment:
+
+- Validate and normalize provider activities into a small provider-neutral event vocabulary; store large artifacts in a bounded, access-controlled artifact channel.
+- Apply explicit byte/count limits, safe encodings, redaction, and hostile-content tests before persistence or publication.
+- Validate PR/repository identity against the dispatch source and expose only structured safe diagnostics to callers.
+
+### R-074 — Attempts, cloud sessions, tasks, and failures do not share one lifecycle
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Dispatch creates an execution attempt in `WORKING`, but polling and cancellation never update that attempt to completed, failed, cancelled, or review-pending.
+- The cloud-session record is looked up only by remote ID and is not linked to the attempt, retaining the correlation gap in R-024.
+- Poll failures are returned transiently but are not recorded against the attempt/session with retry count, next-poll time, or terminal reason.
+- State updates across the cloud session, task, attempt, and events are not transactional and enforce no transition version or owner.
+
+Risk:
+
+- Recovery and audit views can report a permanently working attempt beside a completed, failed, or cancelled task.
+- Later retries and reviews cannot reliably identify which provider execution produced a PR or failure.
+
+Deferred adjustment:
+
+- Make the attempt the aggregate root for dispatch and lifecycle state, with unique provider correlation and an explicit linked cloud-session projection.
+- Update attempt, task projection, session metadata, cursor, and outbox events through versioned transactions.
+- Persist retry/error/next-action metadata so recovery can resume deterministically after restart.
+
+### R-075 — The focused test encodes invalid behavior and omits failure boundaries
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The sole test uses `skipPush: true`, never inspects the create-request body, and returns the same incorrect object-shaped outputs and invented `headCommitSha` expected by production code.
+- It accepts the contradictory completed result (`reviewing` plus terminal), does not assert the persisted task state, and then treats cancellation of that completed session as successful behavior.
+- It contains no cases for invalid responses, missing IDs, POST ambiguity, duplicate dispatch, partial database failure, activity pagination/error/ordering/deduplication, repeated terminal polls, restart recovery, concurrency, or payload limits.
+- The test passes and the server type-check succeeds, demonstrating internal consistency only—not compatibility, durability, or lifecycle safety.
+
+Risk:
+
+- Regression tests will preserve the wrong wire contract and false-success semantics while critical crash and retry paths remain unexercised.
+
+Deferred adjustment:
+
+- Build sanitized fixtures from documented response shapes and assert exact outbound method, path, query, headers, and body.
+- Add deterministic fault injection at each network/database/event boundary and restart the service between lifecycle steps.
+- Test pagination, equal/out-of-order timestamps, duplicate IDs, repeated terminal polls, legal transitions, uncertain cancellation, and bounded/redacted payloads.
+
+### R-076 — The session manager extends the monolith instead of implementing provider ports
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The 303-line class combines credential resolution, preflight orchestration, API construction, request mapping, dispatch policy, four persistence concerns, event publication, polling, deduplication, output extraction, task transitions, and cancellation.
+- It depends directly on concrete `Store`, `CredentialVault`, `JulesApiClient`, and `runJulesPreflight` implementations rather than the provider-neutral interfaces established earlier in the plan.
+- It does not implement or compose through `ExecutionProvider`; at this commit no production application workflow calls it.
+- Test-only concerns (`julesClient`, vault, callbacks, and `skipPush`) are exposed through the production dispatch options instead of narrow injected ports.
+
+Risk:
+
+- Adding another provider, scheduler, recovery policy, output type, or review transition requires editing one cross-layer module and can disrupt working dispatch behavior.
+- Important failure modes remain hard to isolate, test, or reuse, directly opposing the plan's modularity objective.
+
+Deferred adjustment:
+
+- Split provider wire transport/mapping, dispatch application service, durable lifecycle repository, activity ingestion, scheduler/lease, transition policy, and event outbox behind narrow interfaces.
+- Compose those modules at bootstrap through `ExecutionProvider`; keep Jules-specific DTOs inside the adapter and provider-neutral state/policies in the application/domain layers.
+- Add dependency-direction and module-size checks so later phases extend ports or add modules instead of growing a new lifecycle monolith.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:

@@ -7,3 +7,4 @@ export * from './preflight.js';
 export * from './session-manager.js';
 export * from './worktree-review.js';
 export * from './codex-review.js';
+export * from './repair-coordinator.js';
