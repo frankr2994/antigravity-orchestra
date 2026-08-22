@@ -1,0 +1,210 @@
+# Google Jules Integration Plan for Antigravity Orchestra
+
+================================================================================
+ARCHITECTURE OVERVIEW: FOUR-MODEL ORCHESTRA
+================================================================================
+
+Orchestra operates as a four-model hybrid Local + Cloud multi-agent system, with
+Orchestra Core remaining the primary workflow, state, and Git controller.
+
+Core Roles:
+-----------
+1. Gemma (Local):
+   - Task classification and complexity estimation
+   - Summarization and telemetry analysis
+   - Error & review finding distillation
+   - In-memory repository queries and commit slicing
+
+2. Codex (Local Sandbox):
+   - Architectural design and trade-off analysis
+   - Root-cause debugging
+   - Independent code review and security audit
+   - Test-quality review
+
+3. Antigravity (Local Interactive):
+   - Primary LOCAL implementation worker
+   - Real-time interactive pair programming
+   - Fast incremental file edits and local repairs
+
+4. Jules (Google Cloud VM):
+   - Primary CLOUD / asynchronous implementation worker
+   - Large-scale refactors and migrations
+   - Repository-wide test suite generation
+   - Dependency upgrades and background bug fixes
+   - Executes inside isolated Google Cloud VMs; produces remote branches and PRs
+
+5. Orchestra Core:
+   - Owns task state machine, concurrency locks, and database persistence
+   - Manages Git branch lifecycles, worktrees, and conflict-safe merges
+   - Dispatches tasks to either Local (Antigravity) or Cloud (Jules) workers
+   - Coordinates automated verification and independent Codex review loops
+
+================================================================================
+EXECUTION FLOW
+================================================================================
+
+                           USER REQUEST
+                                │
+                                ▼
+                      Gemma Classifies Task
+                                │
+                                ▼
+                    Orchestra Execution Router
+                                │
+         ┌──────────────────────┴──────────────────────┐
+         ▼                                             ▼
+   LOCAL EXECUTION                               CLOUD EXECUTION
+     Antigravity                                      Jules
+         │                                             │
+   Local File Edits                           Isolated Cloud VM
+         │                                             │
+   Local Working Tree                         Remote Git Branch & PR
+         │                                             │
+         └──────────────────────┬──────────────────────┘
+                                │
+                                ▼
+                       Codex Review Gate
+                   (Independent Audit)
+                                │
+                     Blocking Findings?
+                      /            \
+                    YES            NO
+                     │              │
+                   Gemma         Orchestra
+             Distills Findings   Verifies Build/Tests
+                     │              │
+              Original Worker    Conflict-Safe
+                  Repairs           Git Merge
+                     │              │
+               Codex Re-Audit    COMPLETED
+
+================================================================================
+DETAILED 10-PHASE IMPLEMENTATION PLAN
+================================================================================
+
+--------------------------------------------------------------------------------
+Phase 1 — Jules Provider Client (`server/jules.ts`)
+--------------------------------------------------------------------------------
+Create the Jules API provider client module responsible for:
+- API authentication and token management (stored in environment/settings).
+- Listing Jules-connected GitHub repositories.
+- Session lifecycle: create session, get session state, list activities.
+- Interactive plan management: send prompt, inspect plan, approve plan.
+- Session termination: cancel/delete session.
+- Output retrieval: fetch resulting pull request URL, remote branch name, and commit SHA.
+- Event translation: normalize raw Jules streaming events into Orchestra standard SSE timeline events.
+
+--------------------------------------------------------------------------------
+Phase 2 — Extend Orchestra Task Model (`server/db.ts`, `server/tasks.ts`)
+--------------------------------------------------------------------------------
+Extend the core task schema to support hybrid execution targets:
+- Execution Target: `local` | `cloud` | `auto`
+- Worker Identification: `worker: 'antigravity' | 'jules'`
+- Remote Session Metadata:
+  * `remoteSessionId`: Google Jules cloud session ID
+  * `baseSha`: Git commit hash at the time of cloud dispatch
+  * `remoteBranch`: Name of the remote feature branch (e.g. `orchestra/jules-<id>`)
+  * `prUrl`: Resulting GitHub Pull Request link
+  * `cloudState`: `QUEUED` | `PLANNING` | `WAITING_FOR_APPROVAL` | `WORKING` | `COMPLETED` | `FAILED`
+
+Both Antigravity and Jules remain peer implementation workers managed by Orchestra Core.
+
+--------------------------------------------------------------------------------
+Phase 3 — Cloud Dispatch Preflight Checks
+--------------------------------------------------------------------------------
+Before dispatching a task to Jules, Orchestra performs strict deterministic validation:
+1. Verify repository is an initialized Git repository with an active remote (`origin`).
+2. Verify remote URL points to a supported GitHub repository.
+3. Verify the base branch exists remotely and the local HEAD commit is pushed.
+4. Verify there are no unpushed local commits required for the task.
+5. If unpushed changes exist, prompt user to push before dispatching.
+6. Record the exact base commit SHA for future merge verification.
+
+--------------------------------------------------------------------------------
+Phase 4 — UI Execution Selector & Slash Commands
+--------------------------------------------------------------------------------
+Add execution mode controls to the Orchestra Dashboard:
+- Execution Selector: `[ Auto ]` | `[ Local — Antigravity ]` | `[ Cloud — Jules ]`
+- Slash command in chat: `/jules <prompt>` to directly dispatch to cloud.
+- Slash command `/jules-status` to inspect active cloud sessions.
+- Initial implementation keeps Auto simple and focuses on explicit, reliable Local vs Cloud selection.
+
+--------------------------------------------------------------------------------
+Phase 5 — Jules Task Lifecycle & Activity Monitoring
+--------------------------------------------------------------------------------
+When Cloud (Jules) is selected:
+1. Orchestra initializes the task in SQLite and calls `POST /sessions` via Jules API.
+2. Background poller / webhook handler listens for Jules activity events.
+3. Activity items (Plan created, Dependencies installed, Files modified, Test run status)
+   are emitted directly to Orchestra's existing SSE event stream.
+4. Dashboard displays live progress inside the standard task monitor without needing
+   a disconnected secondary UI.
+
+--------------------------------------------------------------------------------
+Phase 6 — Independent PR Checkout & Codex Audit via Git Worktree
+--------------------------------------------------------------------------------
+When Jules completes work in the cloud:
+1. Orchestra fetches the remote PR branch head from GitHub.
+2. Orchestra creates an isolated temporary Git worktree:
+   `git worktree add .orchestra/worktrees/jules-<id> <remote-branch>`
+3. Deterministic verification (`npm test`, `npm run check`, typecheck) runs inside the worktree.
+4. Codex CLI conducts an independent code audit against the actual checked-out worktree files.
+5. The developer's primary working tree remains completely untouched during the review.
+
+--------------------------------------------------------------------------------
+Phase 7 — Symmetric Feedback & Repair Loop
+--------------------------------------------------------------------------------
+If Codex identifies blocking issues on Jules's PR:
+1. Codex generates structured review findings.
+2. Gemma distills the findings into concise, actionable instructions.
+3. Orchestra posts the repair directive back to the active Jules session via API.
+4. Jules applies fixes in its cloud VM, reruns tests, and pushes an updated commit.
+5. Codex re-audits the updated worktree (bounded by Orchestra's standard repair iteration limit).
+
+--------------------------------------------------------------------------------
+Phase 8 — Conflict-Safe Merge
+--------------------------------------------------------------------------------
+Once Codex review passes and deterministic verification succeeds:
+1. Dashboard presents `[ Review Diff ]` and `[ Merge Jules PR ]` actions.
+2. When the user confirms merge:
+   - Orchestra compares the Jules `baseSha` against the current target branch HEAD.
+   - If target branch has advanced, Orchestra checks for merge conflicts and rebase safety.
+   - Merges cleanly or fast-forwards the branch into local target branch.
+3. Orchestra removes the temporary Git worktree and cleans up background references.
+
+--------------------------------------------------------------------------------
+Phase 9 — Concurrency Model (Local Lock vs Cloud Multi-Session)
+--------------------------------------------------------------------------------
+- Local Task Rule: Maximum 1 mutating Antigravity task per project (prevents disk collisions).
+- Cloud Task Rule: Multiple concurrent Jules sessions allowed per project (each works on an isolated remote branch).
+- Git Lock: Local working tree lock is only acquired during final review import / merge phase.
+
+--------------------------------------------------------------------------------
+Phase 10 — Autonomous Task Routing (Auto Mode)
+--------------------------------------------------------------------------------
+Once explicit modes are rock-solid, activate intelligent auto-routing:
+- Gemma inspects prompt and repository context to recommend target.
+- Deterministic routing rules applied by Orchestra:
+  * Jules Candidates: Large refactors, migrations, multi-file repetitive edits,
+    exhaustive test suite expansions, dependency upgrades, heavy background issues.
+  * Antigravity Candidates: Quick interactive edits, targeted bug fixes,
+    debugging sessions, local-only unpushed code, tasks requiring real-time feedback.
+
+================================================================================
+CRITICAL ENGINEERING & PLATFORM CONSIDERATIONS
+================================================================================
+
+1. Windows File Lock Protection:
+   When pruning temporary Git worktrees on Windows (`.orchestra/worktrees/*`), file
+   handles held by language servers or background watchers must be handled gracefully
+   with retry logic and `git worktree remove --force`.
+
+2. Session Crash Recovery:
+   If the local dashboard or computer restarts while Jules is working in the cloud,
+   Orchestra's SQLite database retains the `remoteSessionId`. Upon server restart,
+   Orchestra reconnects to the Jules API and resumes live monitoring seamlessly.
+
+3. Credential Security:
+   Jules API tokens and GitHub credentials must be stored exclusively in local
+   environment variables / Orchestra configuration (`config.ts` / OS credential store)
+   and never committed to repository files.
