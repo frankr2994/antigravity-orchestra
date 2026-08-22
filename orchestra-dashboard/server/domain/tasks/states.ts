@@ -152,3 +152,8 @@ export function mapJulesToOrchestraState(julesState: JulesSessionState | string 
       };
   }
 }
+
+export function isJulesTerminalState(julesState: JulesSessionState | string | null | undefined): boolean {
+  const norm = String(julesState || '').trim().toUpperCase();
+  return norm === 'COMPLETED' || norm === 'FAILED';
+}

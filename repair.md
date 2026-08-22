@@ -1141,6 +1141,191 @@ Deferred adjustment:
 - Sanitize or omit structured upstream error details before attaching them to throwable/loggable objects.
 - Add serialization and nested-detail leakage tests, coordinated with R-009, R-022, and R-033.
 
+## Phase 7 review
+
+### Review scope
+
+- Reviewed commit: `d28b30f4f21c65c4b5baa7cece97845c355ebc1c`
+- Commit subject: `feat(security): implement secure encrypted credential vault and jules key management (phase 7)`
+- Primary artifacts reviewed: `server/infrastructure/security/vault.ts`, `server/providers/jules/credentials.ts`, `server/api/routes/jules.ts`, route registration, focused tests, the Phase 7 and Phase 10 requirements in `julesplan.md`, and authoritative key-storage guidance.
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- Confirmed that the vault, credential helper, and focused-test blobs were unchanged between `d28b30f` and the test checkout. The Jules route had subsequent Phase 8 changes, so its Phase 7 version was reviewed directly from the commit.
+- `npm run build:server`: passed.
+- `node --test tests/jules-credentials.test.mjs`: four tests passed with zero failures.
+- A self-cleaning probe independently decrypted a vault value using only the hostname, username, profile path, fixed salt, and algorithm present in source.
+- A malformed successful Jules response was accepted as a valid credential.
+- A mocked authentication error that echoed a nonstandard submitted key was returned with that key still present.
+- Compared the design with Microsoft DPAPI, Node.js filesystem/crypto documentation, and OWASP cryptographic-storage and secrets-management guidance.
+
+### R-043 — The planned Phase 7 provider decomposition was not implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `julesplan.md` defines Phase 7 as moving Antigravity behind `ExecutionProvider`, declaring capabilities, preserving Codex and Gemma specialist roles, and returning typed capability errors.
+- Commit `d28b30f` changes credential, vault, and Jules route files; it does not change `TaskManager`, agent execution, domain interfaces, or provider adapters.
+- At this commit, `ExecutionProvider` and `ProviderCapability` are only declarations in `server/domain/providers/provider.ts`; no server implementation or workflow consumer references them.
+- The commit instead implements part of the plan's Phase 10 secure Jules configuration scope.
+
+Risk:
+
+- Phase tracking can mark the provider abstraction complete while Antigravity remains coupled to the monolithic execution path.
+- Jules integration can accumulate direct workflow dependencies before the common provider seam and capability-error behavior exist.
+
+Deferred adjustment:
+
+- Keep the implementation ledger aligned with `julesplan.md` and leave the planned Phase 7 open.
+- Adapt Antigravity through the provider interface before cloud dispatch uses it.
+- Add typed unsupported-capability behavior and tests without forcing Codex or Gemma into an unsuitable implementation-provider role.
+
+### R-044 — The vault encryption key is reproducible and is not OS-protected
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `vault.ts:33-34` derives the AES key from hostname, username, and profile path using a fixed source-code salt.
+- Those values bind the ciphertext to an environment but do not supply a secret; anyone who obtains or can infer the identifiers can run the same derivation.
+- A review probe independently derived the key and decrypted a test vault without using `CredentialVault.getSecret`.
+- The implementation does not call Windows DPAPI, Credential Manager, macOS Keychain, Linux Secret Service, or another OS-protected credential store.
+- AES-256-GCM, a random 12-byte IV, and an authentication tag are appropriate primitives, but they cannot compensate for a reproducible encryption key.
+
+Risk:
+
+- Theft or backup exposure of `vault.enc.json` can disclose every stored secret, so the file provides obfuscation rather than the Phase 10 requirement's OS-backed protection.
+- An attacker does not need the user's Windows logon credential to decrypt the vault.
+
+Deferred adjustment:
+
+- Replace metadata-derived keying with an OS-protected secret-storage adapter; on Windows, use current-user DPAPI or an appropriate Credential Manager integration.
+- Define platform adapters and an explicit unsupported-platform policy rather than silently weakening protection.
+- Version and migrate existing vault data only after authenticating the old format, then remove the legacy derivation path.
+
+### R-045 — Vault writes are neither atomic nor reliably access-restricted
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `vault.ts:82` overwrites the live vault directly with `writeFileSync`; there is no same-directory temporary file, flush, atomic rename, backup, or interprocess lock.
+- The supplied `mode: 0o600` only applies when Node creates a file and does not repair permissions on an existing vault.
+- Node documents that Windows file modes cannot express the POSIX owner/group/other distinction, so `0o600` does not establish an owner-only Windows ACL.
+- The parent directory is created with default permissions, and no post-write permission or ownership verification is performed.
+
+Risk:
+
+- A crash, disk-full condition, or competing process can truncate or lose the only credential copy.
+- On the primary Windows platform, local accounts or inherited ACL principals may be able to read the ciphertext; combined with R-044, that exposes the key.
+
+Deferred adjustment:
+
+- Use an OS credential store so file ACLs are not the primary secret boundary.
+- If an encrypted-file fallback remains, write and flush a restrictive temporary file, atomically replace the destination, preserve a recoverable backup, and serialize writers.
+- Explicitly create and verify platform-appropriate directory/file ACLs and fail closed when they cannot be enforced.
+
+### R-046 — Corruption and migration failures are silently treated as an empty vault
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `vault.ts:45-46` returns `{}` for an unsupported version or incomplete envelope.
+- `vault.ts:58-60` catches every read, parse, authentication, decryption, and plaintext-schema error, logs a generic reset warning, and also returns `{}`.
+- Callers cannot distinguish a missing vault from corruption, tampering, permission denial, environment drift, or an unsupported future version.
+- A subsequent `setSecret` loads that empty object and overwrites the original vault, destroying other recoverable secrets.
+
+Risk:
+
+- Authentication failures or interrupted writes can become silent credential loss, followed by destructive replacement.
+- Tampering and version incompatibility are hidden from operators instead of failing securely and preserving evidence.
+
+Deferred adjustment:
+
+- Return typed `missing`, `locked`, `corrupt`, `unsupported-version`, and `unavailable` outcomes.
+- Never overwrite a vault that failed authenticated loading; quarantine or retain it and require an explicit recovery/reset operation.
+- Add envelope schema validation, versioned migrations, backup recovery, and diagnostics that contain no secrets.
+
+### R-047 — Credential validation can accept invalid responses and leak submitted keys
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `validateJulesApiKey` treats any successful `listSources` call as valid; because the Phase 6 client does not validate response schemas, a review probe showed that HTTP 200 with `{ unexpected: true }` returns `valid: true`.
+- `credentials.ts:78-82` collapses authentication failures, authorization failures, rate limits, service outages, timeouts, and contract errors into `{ valid: false, error: message }`.
+- `jules.ts:48-51` returns that upstream error text to the caller as a 400 response.
+- A review probe used an upstream message that echoed the submitted nonstandard key; the returned error still contained the complete key because pattern-based redaction did not recognize it.
+- The Phase 10 acceptance criteria require secrets to stay out of error payloads and revoked or invalid keys to produce actionable errors.
+
+Risk:
+
+- Malformed or intercepted responses can mark unusable credentials as valid and persist them.
+- Credentials can be reflected into browser-visible error payloads, console output through the global error path, telemetry, or support captures.
+- Operators cannot distinguish a bad key from a transient Jules outage and may replace credentials unnecessarily.
+
+Deferred adjustment:
+
+- Resolve R-039 by validating the exact source-list response before declaring connectivity successful.
+- Return a closed status enum such as `valid`, `invalid`, `forbidden`, `rate_limited`, `unavailable`, and `contract_error`, with safe fixed client messages.
+- Never include upstream text or submitted secret material in an HTTP response; retain only redacted, correlated diagnostics.
+- Test arbitrary secret formats and upstream reflection, not only known token prefixes.
+
+### R-048 — The secure Jules configuration phase is only partially implemented
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- Although this commit corresponds to Phase 10 work, it configures only credential resolution.
+- No Jules endpoint, polling interval, request timeout, retry limit, maximum concurrent-session limit, plan-approval default, or feature flag is added to application configuration.
+- `routes/index.ts:21` mounts the Jules credential router unconditionally, so there is no rollout switch that disables Jules surfaces while preserving local execution.
+- Environment credentials always take precedence, while `save-key` writes only the vault and `clear-key` removes only the vault; under an environment override, a successful save is inactive and a successful clear leaves Jules configured.
+
+Risk:
+
+- Operational values remain scattered as client literals and cannot be validated, tuned, or disabled centrally.
+- Credential-management responses can mislead users about which key an operation changed, and staged rollback cannot disable the feature cleanly.
+
+Deferred adjustment:
+
+- Add one validated, typed Jules configuration object with safe bounds and explicit defaults for every Phase 10 setting.
+- Gate routes, discovery, dispatch, and background activity behind the same server-side feature flag.
+- Make environment-managed credentials read-only in the API and return an explicit source/active-state result for save and clear operations.
+
+### R-049 — Security-critical behavior is not exercised through the HTTP boundary
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- The four focused tests call helpers directly; none sends a request through the Jules router or the global host, origin, dashboard-token, JSON, and error middleware.
+- The encryption test proves only that a chosen plaintext substring is absent from the file; it does not attempt independent key derivation or exercise tampering, corruption, version mismatch, permission failure, interrupted writes, or recovery.
+- There are no tests for save validation, validation bypass, environment precedence during save/clear, secret reflection, concurrent operations, or response cache policy.
+- `createJulesRouter` depends on the concrete `CredentialVault` and calls the real validation function directly, while `createApiRouter` constructs it internally. This prevents narrow dependency injection at the HTTP boundary and repeats the modularity problem in R-029/R-030.
+
+Risk:
+
+- The suite stays green while the vault is decryptable from metadata and route responses can expose submitted credentials.
+- Later credential providers or connectivity policies will require editing route code and may disrupt unrelated API behavior.
+
+Deferred adjustment:
+
+- Introduce narrow credential-store and Jules-connectivity ports and inject them into the router factory.
+- Add HTTP-level tests for authentication, authorization, schema validation, status codes, safe error bodies, cache headers, save/clear semantics, and injected infrastructure failures.
+- Add adversarial vault tests for independent decryption, tampering, corrupt envelopes, permissions, atomic-write failure, migration, and recovery.
+
 ## Future phase review template
 
 Copy the following block for each reviewed phase:

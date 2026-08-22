@@ -65,6 +65,7 @@ export interface JulesCreateSessionRequest {
   };
   title?: string;
   requirePlanApproval?: boolean;
+  autoPr?: boolean;
 }
 
 export interface JulesActivity {
