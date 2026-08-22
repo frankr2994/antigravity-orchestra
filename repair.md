@@ -36,6 +36,15 @@ Implementation and tests should not be changed during a phase review unless a fi
 | R-017 | 3 | `ff6f8b2` | Medium | Open | Provider roles | The execution-provider contract permits `auto` providers and treats Codex and Gemma as implementation workers. |
 | R-018 | 3 | `ff6f8b2` | Medium | Open | Contract tests | JavaScript sample-object tests do not compile against or negatively test the TypeScript interfaces they claim to verify. |
 | R-019 | 3 | `ff6f8b2` | Medium | Open | Review invariants | Review verdict and verification interfaces permit internally contradictory combinations. |
+| R-020 | 4 | `e3d9bfc` | High | Open | Migration atomicity | Schema changes and migration-version inserts run outside a transaction and can leave a partially applied unversioned schema. |
+| R-021 | 4 | `e3d9bfc` | Medium | Open | Migration compatibility | The migration engine does not reject newer schemas, verify migration identity, or provide rollback/backup guidance. |
+| R-022 | 4 | `e3d9bfc` | High | Open | Credential storage | The generic settings repository accepts arbitrary plaintext keys and values, including future provider secrets. |
+| R-023 | 4 | `e3d9bfc` | High | Open | Persistence validation | Repository mappers cast unrestricted database strings into task, target, worker, agent, and execution-state unions. |
+| R-024 | 4 | `e3d9bfc` | Medium | Open | Cloud identity | Cloud sessions are not linked to execution attempts, remote session IDs are not unique, and provider identity is hard-coded on reads. |
+| R-025 | 4 | `e3d9bfc` | Medium | Open | Repository transactions | Multi-statement session and message operations are not atomic. |
+| R-026 | 4 | `e3d9bfc` | Medium | Open | Migration tests | Tests do not inject migration failure, compare legacy/fresh schema parity, or exercise downgrade and partial-migration behavior. |
+| R-027 | 4 | `e3d9bfc` | Medium | Open | Compatibility tests | The test labeled 100% Store compatibility covers only a small subset of the facade. |
+| R-028 | 4 | `e3d9bfc` | Medium | Open | Persistence boundary | The compatibility facade publicly exposes the raw database connection, allowing future workflows to bypass repositories. |
 
 ## Phase 1 review
 
@@ -519,6 +528,241 @@ Deferred adjustment:
 - Use discriminated unions or constructors that derive `blocked` from the verdict.
 - Define one canonical vocabulary for automated review versus user approval.
 - Derive aggregate verification status from checks, or validate consistency at construction and persistence boundaries.
+
+## Phase 4 review
+
+### Review scope
+
+- Reviewed commit: `e3d9bfc28f7e99b62559d964ed85d9d3f22135d8`
+- Commit subject: `feat(persistence): modularize database repositories and versioned migrations engine (phase 4)`
+- Primary artifacts reviewed: `server/infrastructure/database/**`, `server/db.ts`, and `tests/persistence-migrations.test.mjs`
+- Review date: 2026-08-22
+- Review policy: Findings recorded only; implementation repairs deferred.
+
+### Verification performed
+
+- `npm run build:server`: passed.
+- `node --test tests/persistence-migrations.test.mjs`: four tests passed with zero failures.
+- Phase 4 persistence source and focused tests were unchanged between `e3d9bfc` and the then-current Phase 5 head.
+- Search of the exact Phase 4 tree found no application-workflow SQL outside the persistence infrastructure; the only non-infrastructure `.exec` match was a regular-expression call in `mcp.ts`.
+
+### R-020 — Migrations are versioned but not transactional
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `migrations.ts:181-186` calls `m.up(db)` and inserts the migration-version row as separate autocommit operations.
+- Neither each migration nor the full pending migration batch is wrapped in `BEGIN`, `COMMIT`, and `ROLLBACK`.
+- Migration 2 performs multiple `ALTER TABLE`, `CREATE TABLE`, and `CREATE INDEX` operations before its version is recorded.
+- The schema-migrations table itself is created outside a migration transaction.
+
+Risk:
+
+- A crash, disk error, duplicate migration runner, or failing statement can leave part of a migration applied without a corresponding version record.
+- A retry may appear idempotent while preserving an unintended partial schema or data transformation.
+- This directly misses Phase 4's transactional-migration requirement where SQLite supports transactional DDL.
+
+Deferred adjustment:
+
+- Acquire a migration lock with `BEGIN IMMEDIATE`.
+- Run each migration and its version-row insert in the same transaction.
+- Roll back on every exception and close the database if initialization fails.
+- Add a failure-injection migration that changes schema and then throws; assert both the schema change and version row are absent afterward.
+- Define whether the entire pending batch or each individual migration is the recovery boundary.
+
+### R-021 — Migration compatibility and recovery policy are incomplete
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `runMigrations` returns the last version in the local `MIGRATIONS` array even if the database contains a newer schema version.
+- It does not reject an older application opening a database migrated by a newer release.
+- Applied migration names are stored but never compared with the current migration definition, and no checksum or immutable identity is verified.
+- Migration ordering and duplicate versions are not validated.
+- No rollback procedure, pre-migration backup, or user-facing recovery guidance was added despite the explicit Phase 4 requirement.
+
+Risk:
+
+- A downgraded application can operate against an unsupported schema and potentially corrupt data.
+- Edited, reordered, or duplicated migrations can be silently treated as valid.
+- Users have no documented recovery path after an unsuccessful production migration.
+
+Deferred adjustment:
+
+- Refuse startup when the database version is newer than the application supports.
+- Validate strictly increasing unique migration versions and immutable migration identity.
+- Document and implement the chosen backup or rollback strategy before applying pending migrations.
+- Report the failed version and recovery location without exposing sensitive database contents.
+
+### R-022 — Settings repository permits plaintext provider secrets
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `SettingsRepository.set(key, value)` accepts every key and persists every value as plaintext SQLite text.
+- The compatibility `Store.setSetting` method exposes this unrestricted operation to application code.
+- Nothing rejects keys such as `jules_api_key`, GitHub tokens, or authenticated remote URLs.
+- The Phase 2 architecture scan checks only one literal SQL statement, so calls through this repository bypass that protection.
+
+Risk:
+
+- A later settings or Jules phase can accidentally persist credentials in the database while architecture and persistence tests remain green.
+
+Deferred adjustment:
+
+- Restrict persisted settings to an allowlisted non-secret schema.
+- Reject secret-like keys at the repository and compatibility-facade boundaries.
+- Route provider credentials exclusively through the environment or OS-protected credential service.
+- Add negative tests proving known secret keys and values cannot be persisted.
+- Coordinate this repair with R-009.
+
+### R-023 — Persistence mappers trust invalid enum and event values
+
+Severity: **High**
+Status: **Open**
+
+Evidence:
+
+- `TaskRepository` casts arbitrary `state` and `target` text into domain unions.
+- `ExecutionAttemptRepository` casts arbitrary target, worker, and provider-execution state values.
+- `TaskEventRepository` casts arbitrary agent names while retaining unrestricted event names and payloads.
+- Cloud session state remains an unrestricted string.
+- The schema adds no check constraints for these fields, and update methods perform no runtime validation.
+
+Risk:
+
+- Corrupt, malformed, or raw provider values become trusted domain objects after a type assertion.
+- Invalid values can bypass workflow exhaustiveness and recovery behavior.
+
+Deferred adjustment:
+
+- Parse and validate every enum-like database value at the repository boundary.
+- Quarantine or fail clearly on historical invalid values rather than silently casting.
+- Add compatible database constraints for newly created tables and validated migrations for existing tables.
+- Add negative CRUD and migration tests.
+- Coordinate this repair with R-015.
+
+### R-024 — Cloud sessions cannot be correlated reliably with attempts
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `execution_attempts` and `cloud_sessions` share only `task_id`; `cloud_sessions` has no `attempt_id` foreign key.
+- Multiple attempts and sessions can therefore belong to one task without an unambiguous relationship.
+- `remote_session_id` has a normal non-unique index, while `getByRemoteSessionId` returns one unspecified match.
+- `getByTaskId` chooses the latest timestamp even though timestamps are text and can collide.
+- `mapCloudSession` ignores the stored `provider_id` and always returns `jules`.
+- `ExecutionAttemptRepository.update` cannot populate or correct `providerSessionId` after an asynchronous provider start.
+
+Risk:
+
+- Retry, timeout reconciliation, polling, and restart recovery can update or resume the wrong provider session.
+- Duplicate remote sessions cannot be detected reliably.
+
+Deferred adjustment:
+
+- Link each cloud session to its execution attempt with a foreign key.
+- Add the appropriate uniqueness constraint for provider ID plus external session ID.
+- Query by stable IDs rather than timestamp ordering.
+- Preserve and validate the stored provider identity.
+- Permit controlled post-dispatch persistence of the provider session ID with an idempotent compare-and-set operation.
+
+### R-025 — Multi-statement repository operations are not atomic
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `SessionRepository.create` inserts the session and updates the project's active session in separate operations.
+- `SessionRepository.activate` updates the project and session separately.
+- `SessionRepository.addMessage` inserts the message and updates the session timestamp separately.
+- No transaction boundary protects these related writes.
+
+Risk:
+
+- A failure between statements can leave orphaned sessions, stale active-session pointers, or messages whose parent session metadata was not updated.
+
+Deferred adjustment:
+
+- Add a reusable transaction helper owned by the database infrastructure.
+- Wrap each multi-statement invariant in one transaction.
+- Add failure-injection tests that prove the earlier statement rolls back when the later statement fails.
+
+### R-026 — Migration tests do not verify failure safety or schema parity
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- The idempotency test only reruns successful migrations.
+- No test interrupts or fails a migration after a schema change.
+- The legacy fixture omits several production constraints and foreign keys; `CREATE TABLE IF NOT EXISTS` leaves those existing weak tables unchanged.
+- The test checks a few retained rows but does not compare indexes, foreign keys, defaults, nullability, or table structure against a fresh database.
+- No test covers an unknown newer schema version, a migration gap, duplicate versions, or a partially recorded migration.
+
+Risk:
+
+- A database can be reported as successfully migrated while its structure differs materially from a fresh installation.
+- The most damaging migration failure modes remain untested.
+
+Deferred adjustment:
+
+- Build legacy fixtures from real released schemas.
+- Compare normalized schema metadata between migrated and fresh databases.
+- Add failure, partial-state, concurrent-runner, future-version, and malformed-history tests.
+- Verify preservation of messages, task events, Git operations, settings, sessions, tasks, and their relationships.
+
+### R-027 — Store compatibility test is not comprehensive
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- The test named `Store facade retains 100% backwards-compatibility` exercises only project/session/task creation, one event, and one task update.
+- It does not cover project listing and deletion, onboarding, session activation/summary/title/deletion, messages, interrupted-task recovery, Git operations, settings, filtering, ordering, or error behavior.
+
+Risk:
+
+- A facade regression can break existing application workflows while the claimed compatibility test remains green.
+
+Deferred adjustment:
+
+- Inventory every pre-refactor public Store method and its observable behavior.
+- Add contract tests for each method, including ordering, limits, cascades, timestamps, null handling, and failures.
+- Rename tests so their names match their actual coverage until the complete compatibility matrix exists.
+
+### R-028 — Raw database access remains publicly exposed
+
+Severity: **Medium**
+Status: **Open**
+
+Evidence:
+
+- `Store.db` publicly returns `DatabaseManager.db`.
+- `DatabaseManager.db` is also public.
+- Application code can therefore bypass repositories, domain validation, migration assumptions, and future credential restrictions.
+- The exact Phase 4 application workflows do not currently use the escape hatch, but the architecture does not prevent future use.
+
+Risk:
+
+- New workflow code can reintroduce raw SQL without an obvious architectural violation at compile time.
+
+Deferred adjustment:
+
+- Keep the connection private to persistence infrastructure.
+- Expose narrowly scoped transaction and diagnostic interfaces where required.
+- If temporary compatibility access is unavoidable, document it as a ratcheted legacy exception and add a test preventing new consumers.
 
 ## Future phase review template
 
