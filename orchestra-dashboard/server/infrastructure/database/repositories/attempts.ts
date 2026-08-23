@@ -1,22 +1,30 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { ExecutionAttempt, WorkerIdentity, ExecutionTarget, ProviderExecutionState } from '../../../domain/index.js';
+import {
+  isExecutionTarget,
+  isProviderExecutionState,
+  isWorkerIdentity,
+  type ExecutionAttempt, type WorkerIdentity, type ExecutionTarget, type ProviderExecutionState,
+} from '../../../domain/index.js';
 
 function now() { return new Date().toISOString(); }
 
 function mapAttempt(row: unknown): ExecutionAttempt {
   const r = row as Record<string, unknown>;
+  if (!isExecutionTarget(r.target)) throw new TypeError(`Persisted attempt contains invalid target '${String(r.target)}'`);
+  if (!isWorkerIdentity(r.worker)) throw new TypeError(`Persisted attempt contains invalid worker '${String(r.worker)}'`);
+  if (!isProviderExecutionState(r.state)) throw new TypeError(`Persisted attempt contains invalid state '${String(r.state)}'`);
   return {
     id: String(r.id),
     taskId: String(r.task_id),
-    target: String(r.target) as ExecutionTarget,
-    worker: String(r.worker) as WorkerIdentity,
+    target: r.target,
+    worker: r.worker,
     providerSessionId: r.provider_session_id ? String(r.provider_session_id) : null,
     baseSha: String(r.base_sha),
     headSha: r.head_sha ? String(r.head_sha) : null,
     branchName: r.branch_name ? String(r.branch_name) : null,
     prUrl: r.pr_url ? String(r.pr_url) : null,
-    state: String(r.state) as ProviderExecutionState,
+    state: r.state,
     retryCount: Number(r.retry_count || 0),
     error: r.error ? String(r.error) : null,
     startedAt: String(r.started_at),

@@ -16,16 +16,17 @@ test('Phase 4 Persistence — Versioned Migrations run on fresh database', () =>
   try {
     const db = new DatabaseSync(dbPath);
     const version = runMigrations(db);
-    assert.ok(version >= 2, 'Migration engine must apply all migrations up to at least v2');
+    assert.ok(version >= 3, 'Migration engine must apply all migrations up to at least v3');
 
     const applied = db.prepare('SELECT * FROM schema_migrations ORDER BY version ASC').all();
-    assert.equal(applied.length, 2);
+    assert.equal(applied.length, 3);
     assert.equal(applied[0].version, 1);
     assert.equal(applied[1].version, 2);
+    assert.equal(applied[2].version, 3);
 
     // Re-running migrations is idempotent
     const rerunVersion = runMigrations(db);
-    assert.equal(rerunVersion, 2);
+    assert.equal(rerunVersion, 3);
 
     db.close();
   } finally {
@@ -109,6 +110,7 @@ test('Phase 4 Persistence — Modular Repositories CRUD (CloudSessions, Attempts
     // 4. Cloud Sessions Repository
     const cloudSession = manager.cloudSessions.create({
       taskId: task.id,
+      attemptId: attempt.id,
       sourceName: 'sources/github/example/repo',
       sessionResourceName: 'sessions/jules-session-999',
       remoteSessionId: 'jules-session-999',
@@ -118,6 +120,7 @@ test('Phase 4 Persistence — Modular Repositories CRUD (CloudSessions, Attempts
       state: 'IN_PROGRESS',
     });
     assert.equal(cloudSession.remoteSessionId, 'jules-session-999');
+    assert.equal(cloudSession.attemptId, attempt.id);
 
     const nonTerminal = manager.cloudSessions.listNonTerminal();
     assert.equal(nonTerminal.length, 1);

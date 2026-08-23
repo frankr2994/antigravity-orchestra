@@ -163,9 +163,134 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 3,
+    name: 'durable_workflow_coordination',
+    up: (db: DatabaseSync) => {
+      const cloudColumns = db.prepare('PRAGMA table_info(cloud_sessions)').all() as Array<{ name: string }>;
+      if (!cloudColumns.some((column) => column.name === 'attempt_id')) {
+        db.exec('ALTER TABLE cloud_sessions ADD COLUMN attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE SET NULL;');
+      }
+      const duplicateRemote = db.prepare(`
+        SELECT provider_id, remote_session_id, COUNT(*) AS count
+        FROM cloud_sessions
+        GROUP BY provider_id, remote_session_id
+        HAVING COUNT(*) > 1
+        LIMIT 1
+      `).get() as { count?: number } | undefined;
+      if (duplicateRemote?.count) {
+        throw new Error('Cannot enforce cloud session identity: duplicate provider session rows exist');
+      }
+
+      db.exec(`
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_cloud_sessions_provider_remote
+          ON cloud_sessions(provider_id, remote_session_id);
+        CREATE INDEX IF NOT EXISTS idx_cloud_sessions_attempt ON cloud_sessions(attempt_id);
+
+        CREATE TABLE command_intents (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_hash TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending','acknowledged','ambiguous','failed')),
+          provider_resource TEXT,
+          response_json TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_command_intents_task ON command_intents(task_id, created_at);
+
+        CREATE TABLE workflow_checkpoints (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE CASCADE,
+          stage TEXT NOT NULL,
+          revision INTEGER NOT NULL CHECK(revision >= 1),
+          subject_sha TEXT,
+          data_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(task_id, stage, revision)
+        );
+        CREATE INDEX idx_workflow_checkpoints_latest ON workflow_checkpoints(task_id, stage, revision DESC);
+
+        CREATE TABLE activity_cursors (
+          cloud_session_id TEXT PRIMARY KEY REFERENCES cloud_sessions(id) ON DELETE CASCADE,
+          next_page_token TEXT,
+          last_activity_id TEXT,
+          last_activity_at TEXT,
+          next_poll_at TEXT NOT NULL,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0),
+          last_error_code TEXT,
+          version INTEGER NOT NULL DEFAULT 0 CHECK(version >= 0),
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_activity_cursors_due ON activity_cursors(next_poll_at);
+
+        CREATE TABLE resource_leases (
+          resource_type TEXT NOT NULL,
+          resource_id TEXT NOT NULL,
+          owner_id TEXT NOT NULL,
+          fencing_token INTEGER NOT NULL CHECK(fencing_token > 0),
+          expires_at TEXT NOT NULL,
+          acquired_at TEXT NOT NULL,
+          PRIMARY KEY(resource_type, resource_id)
+        );
+        CREATE INDEX idx_resource_leases_expiry ON resource_leases(expires_at);
+
+        CREATE TABLE managed_git_resources (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE CASCADE,
+          repository_root TEXT NOT NULL,
+          kind TEXT NOT NULL CHECK(kind IN ('dispatch_ref','review_ref','worktree','integration_ref')),
+          resource_value TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('active','cleanup_pending','cleaned','cleanup_failed')),
+          cleanup_after TEXT,
+          last_error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(repository_root, kind, resource_value)
+        );
+        CREATE INDEX idx_managed_git_cleanup ON managed_git_resources(state, cleanup_after);
+
+        CREATE TABLE workflow_evidence (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE CASCADE,
+          kind TEXT NOT NULL CHECK(kind IN ('routing','preflight','provider_output','review','verification','repair','integration','cleanup')),
+          subject_sha TEXT,
+          outcome TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_workflow_evidence_task ON workflow_evidence(task_id, kind, created_at);
+        CREATE UNIQUE INDEX uq_workflow_evidence_sha
+          ON workflow_evidence(attempt_id, kind, subject_sha)
+          WHERE attempt_id IS NOT NULL AND subject_sha IS NOT NULL;
+
+        CREATE TABLE workflow_outbox (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          topic TEXT NOT NULL,
+          payload_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending','publishing','published','failed')),
+          attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+          available_at TEXT NOT NULL,
+          published_at TEXT,
+          last_error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_workflow_outbox_due ON workflow_outbox(state, available_at);
+      `);
+    },
+  },
 ];
 
-export function runMigrations(db: DatabaseSync): number {
+export function runMigrations(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): number {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -174,15 +299,29 @@ export function runMigrations(db: DatabaseSync): number {
     );
   `);
 
-  const appliedRows = db.prepare('SELECT version FROM schema_migrations ORDER BY version ASC').all() as Array<{ version: number }>;
-  const appliedVersions = new Set(appliedRows.map((r) => r.version));
+  const appliedRows = db.prepare('SELECT version, name FROM schema_migrations ORDER BY version ASC').all() as Array<{ version: number; name: string }>;
+  const knownByVersion = new Map(migrations.map((migration) => [migration.version, migration]));
+  const latestKnown = migrations.at(-1)?.version ?? 0;
+  for (const applied of appliedRows) {
+    const known = knownByVersion.get(applied.version);
+    if (!known) throw new Error(`Database schema version ${applied.version} is newer than supported version ${latestKnown}`);
+    if (known.name !== applied.name) throw new Error(`Migration identity mismatch at version ${applied.version}`);
+  }
+  const appliedVersions = new Set(appliedRows.map((row) => row.version));
 
   let currentVersion = 0;
-  for (const m of MIGRATIONS) {
+  for (const m of migrations) {
     if (!appliedVersions.has(m.version)) {
-      m.up(db);
-      db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
-        .run(m.version, m.name, new Date().toISOString());
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        m.up(db);
+        db.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
+          .run(m.version, m.name, new Date().toISOString());
+        db.exec('COMMIT');
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
     }
     currentVersion = m.version;
   }

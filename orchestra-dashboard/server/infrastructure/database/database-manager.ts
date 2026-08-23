@@ -9,6 +9,13 @@ import {
   CloudSessionRepository,
   GitOperationRepository,
   SettingsRepository,
+  CommandIntentRepository,
+  WorkflowCheckpointRepository,
+  ActivityCursorRepository,
+  ResourceLeaseRepository,
+  ManagedGitResourceRepository,
+  WorkflowEvidenceRepository,
+  WorkflowOutboxRepository,
 } from './repositories/index.js';
 
 // ============================================================================
@@ -27,6 +34,13 @@ export class DatabaseManager {
   readonly cloudSessions: CloudSessionRepository;
   readonly gitOperations: GitOperationRepository;
   readonly settings: SettingsRepository;
+  readonly commandIntents: CommandIntentRepository;
+  readonly checkpoints: WorkflowCheckpointRepository;
+  readonly activityCursors: ActivityCursorRepository;
+  readonly leases: ResourceLeaseRepository;
+  readonly managedGitResources: ManagedGitResourceRepository;
+  readonly evidence: WorkflowEvidenceRepository;
+  readonly outbox: WorkflowOutboxRepository;
 
   constructor(databasePath: string) {
     this.db = new DatabaseSync(databasePath);
@@ -41,6 +55,25 @@ export class DatabaseManager {
     this.cloudSessions = new CloudSessionRepository(this.db);
     this.gitOperations = new GitOperationRepository(this.db);
     this.settings = new SettingsRepository(this.db);
+    this.commandIntents = new CommandIntentRepository(this.db);
+    this.checkpoints = new WorkflowCheckpointRepository(this.db);
+    this.activityCursors = new ActivityCursorRepository(this.db);
+    this.leases = new ResourceLeaseRepository(this.db);
+    this.managedGitResources = new ManagedGitResourceRepository(this.db);
+    this.evidence = new WorkflowEvidenceRepository(this.db);
+    this.outbox = new WorkflowOutboxRepository(this.db);
+  }
+
+  transaction<T>(work: () => T): T {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const result = work();
+      this.db.exec('COMMIT');
+      return result;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
 
   close() {

@@ -129,6 +129,7 @@ export class JulesSessionManager {
     // 5. Record cloud session reference in SQLite
     const cloudSession = this.store.manager.cloudSessions.create({
       taskId,
+      attemptId: attempt.id,
       sourceName: preflight.sourceName!,
       sessionResourceName: julesSession.name,
       remoteSessionId,

@@ -6,3 +6,6 @@ export * from './attempts.js';
 export * from './cloud-sessions.js';
 export * from './git.js';
 export * from './settings.js';
+export * from './intents.js';
+export * from './coordination.js';
+export * from './workflow-artifacts.js';

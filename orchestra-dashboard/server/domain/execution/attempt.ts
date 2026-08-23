@@ -6,6 +6,10 @@ import type { ProviderExecutionState } from '../tasks/states.js';
 // ============================================================================
 
 export type WorkerIdentity = 'antigravity' | 'jules' | 'codex' | 'gemma';
+export const WORKER_IDENTITIES: readonly WorkerIdentity[] = ['antigravity', 'jules', 'codex', 'gemma'];
+export function isWorkerIdentity(value: unknown): value is WorkerIdentity {
+  return typeof value === 'string' && WORKER_IDENTITIES.includes(value as WorkerIdentity);
+}
 
 export interface ExecutionAttempt {
   id: string;
@@ -27,6 +31,7 @@ export interface ExecutionAttempt {
 export interface CloudSessionReference {
   id: string;
   taskId: string;
+  attemptId?: string | null;
   providerId: 'jules';
   sourceName: string;
   sessionResourceName: string;

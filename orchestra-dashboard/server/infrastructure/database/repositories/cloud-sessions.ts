@@ -6,9 +6,11 @@ function now() { return new Date().toISOString(); }
 
 function mapCloudSession(row: unknown): CloudSessionReference {
   const r = row as Record<string, unknown>;
+  if (r.provider_id !== 'jules') throw new TypeError(`Persisted cloud session contains invalid provider '${String(r.provider_id)}'`);
   return {
     id: String(r.id),
     taskId: String(r.task_id),
+    attemptId: r.attempt_id ? String(r.attempt_id) : null,
     providerId: 'jules',
     sourceName: String(r.source_name),
     sessionResourceName: String(r.session_resource_name),
@@ -32,6 +34,7 @@ export class CloudSessionRepository {
 
   create(input: {
     taskId: string;
+    attemptId?: string | null;
     sourceName: string;
     sessionResourceName: string;
     remoteSessionId: string;
@@ -44,13 +47,14 @@ export class CloudSessionRepository {
     const stamp = now();
     this.db.prepare(`
       INSERT INTO cloud_sessions (
-        id, task_id, provider_id, source_name, session_resource_name,
+        id, task_id, attempt_id, provider_id, source_name, session_resource_name,
         remote_session_id, dispatch_branch, target_branch, base_sha,
         state, created_at, updated_at
-      ) VALUES (?, ?, 'jules', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, 'jules', ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       input.taskId,
+      input.attemptId ?? null,
       input.sourceName,
       input.sessionResourceName,
       input.remoteSessionId,

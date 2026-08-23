@@ -116,3 +116,10 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * Replaced reproducible vault encryption with current-user Windows DPAPI, authenticated legacy migration, atomic replacement, corrupt-vault failure, and safe closed credential-validation statuses.
 * Verification: dashboard lint, production build, and all 135 offline automated tests pass. No live Jules API call was made or required.
 
+## [2026-08-23] Durable workflow persistence
+
+* Added transactional migration v3 and focused repositories for durable command intents, idempotency, checkpoints, polling cursors, retry schedules, fenced leases, managed Git resources, SHA-bound evidence, and publication outbox records.
+* Added unique provider-session identity, cloud-session-to-attempt correlation, runtime enum validation, and a database unit-of-work boundary.
+* Added fault, concurrency, stale-owner, rollback, redaction, uniqueness, and recovery tests.
+* Verification: dashboard lint, production build, and all 141 offline automated tests pass.
+

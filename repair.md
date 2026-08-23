@@ -23,6 +23,14 @@ Implementation and tests should not be changed during a phase review unless a fi
 - Credential storage now defaults to current-user Windows DPAPI. Authenticated legacy vaults migrate atomically to version 2, corrupt/unsupported vaults fail closed, and credential validation returns closed safe statuses without upstream text.
 - Offline evidence: the focused suites pass and the complete gate reached 134/135 before exposing an obsolete source fixture; correcting its documented `defaultBranch` object shape made the focused source suite pass. A final complete gate is required at the milestone commit.
 
+## Repair implementation checkpoint — durable persistence (2026-08-23)
+
+- Migration v3 adds command intents/idempotency, versioned workflow checkpoints, activity cursors/retry schedules, owner leases with monotonic fencing tokens, managed Git resource ownership/cleanup, exact-SHA workflow evidence, and a durable publication outbox.
+- Each migration and its version record now commit atomically. Unknown future versions and version/name mismatches fail closed.
+- Cloud sessions have unique provider/session identity and explicit attempt correlation. Attempt target/worker/state and cloud provider values are validated on reads.
+- `DatabaseManager.transaction` provides a synchronous unit-of-work boundary for coordinated repository writes.
+- Offline evidence covers migration fault rollback, unknown/mismatched histories, unit-of-work rollback, conflicting idempotency reuse, redaction, cursor compare-and-set, competing/stale lease owners, non-reused fencing tokens, Git ownership, SHA-bound evidence uniqueness, and outbox recovery. The full gate passes with 141 tests.
+
 ## Findings index
 
 | ID | Phase | Commit | Severity | Status | Area | Summary |
@@ -46,11 +54,11 @@ Implementation and tests should not be changed during a phase review unless a fi
 | R-017 | 3 | `ff6f8b2` | Medium | Open | Provider roles | The execution-provider contract permits `auto` providers and treats Codex and Gemma as implementation workers. |
 | R-018 | 3 | `ff6f8b2` | Medium | Open | Contract tests | JavaScript sample-object tests do not compile against or negatively test the TypeScript interfaces they claim to verify. |
 | R-019 | 3 | `ff6f8b2` | Medium | Open | Review invariants | Review verdict and verification interfaces permit internally contradictory combinations. |
-| R-020 | 4 | `e3d9bfc` | High | Open | Migration atomicity | Schema changes and migration-version inserts run outside a transaction and can leave a partially applied unversioned schema. |
+| R-020 | 4 | `e3d9bfc` | High | Resolved | Migration atomicity | Schema changes and migration-version inserts run outside a transaction and can leave a partially applied unversioned schema. |
 | R-021 | 4 | `e3d9bfc` | Medium | Open | Migration compatibility | The migration engine does not reject newer schemas, verify migration identity, or provide rollback/backup guidance. |
 | R-022 | 4 | `e3d9bfc` | High | Open | Credential storage | The generic settings repository accepts arbitrary plaintext keys and values, including future provider secrets. |
 | R-023 | 4 | `e3d9bfc` | High | Open | Persistence validation | Repository mappers cast unrestricted database strings into task, target, worker, agent, and execution-state unions. |
-| R-024 | 4 | `e3d9bfc` | Medium | Open | Cloud identity | Cloud sessions are not linked to execution attempts, remote session IDs are not unique, and provider identity is hard-coded on reads. |
+| R-024 | 4 | `e3d9bfc` | Medium | Resolved | Cloud identity | Cloud sessions are not linked to execution attempts, remote session IDs are not unique, and provider identity is hard-coded on reads. |
 | R-025 | 4 | `e3d9bfc` | Medium | Open | Repository transactions | Multi-statement session and message operations are not atomic. |
 | R-026 | 4 | `e3d9bfc` | Medium | Open | Migration tests | Tests do not inject migration failure, compare legacy/fresh schema parity, or exercise downgrade and partial-migration behavior. |
 | R-027 | 4 | `e3d9bfc` | Medium | Open | Compatibility tests | The test labeled 100% Store compatibility covers only a small subset of the facade. |
@@ -574,7 +582,9 @@ Deferred adjustment:
 ### R-020 — Migrations are versioned but not transactional
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): every migration and its identity record execute in one immediate transaction. An injected schema-write failure proves both the partial table and migration row roll back.
 
 Evidence:
 
@@ -676,7 +686,9 @@ Deferred adjustment:
 ### R-024 — Cloud sessions cannot be correlated reliably with attempts
 
 Severity: **Medium**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): cloud sessions persist `attempt_id`, provider/remote identity has a unique index, dispatch records the attempt relationship, and reads reject any provider other than the repository's Jules contract.
 
 Evidence:
 

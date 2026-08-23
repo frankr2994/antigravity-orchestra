@@ -7,4 +7,5 @@ export * from './tasks/task.js';
 export * from './tasks/events.js';
 export * from './execution/attempt.js';
 export * from './execution/review.js';
+export * from './execution/durability.js';
 export * from './providers/provider.js';

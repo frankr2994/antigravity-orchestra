@@ -66,6 +66,14 @@ export type ProviderExecutionState =
   | 'CANCELLED'
   | 'UNKNOWN';
 
+export const PROVIDER_EXECUTION_STATES: readonly ProviderExecutionState[] = [
+  'IDLE', 'DISPATCHING', 'PLANNING', 'AWAITING_APPROVAL', 'AWAITING_FEEDBACK',
+  'WORKING', 'PAUSED', 'COMPLETED', 'FAILED', 'CANCELLED', 'UNKNOWN',
+];
+export function isProviderExecutionState(value: unknown): value is ProviderExecutionState {
+  return typeof value === 'string' && PROVIDER_EXECUTION_STATES.includes(value as ProviderExecutionState);
+}
+
 /**
  * Checks if a task state is terminal in Orchestra.
  */
