@@ -39,3 +39,13 @@ export function apiAuthMiddleware(req: Request, res: Response, next: NextFunctio
   }
   next();
 }
+
+export function dashboardTokenMiddleware(req: Request, res: Response, next: NextFunction) {
+  const origin = req.headers.origin;
+  if (origin) {
+    try { if (!allowedHosts.has(new URL(origin).host)) return void res.status(403).json({ error: 'Invalid request origin.' }); }
+    catch { return void res.status(403).json({ error: 'Invalid request origin.' }); }
+  }
+  if (req.headers['x-orchestra-token'] !== config.uiToken) return void res.status(403).json({ error: 'Invalid dashboard token.' });
+  next();
+}

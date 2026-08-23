@@ -10,6 +10,8 @@ import { JulesApiClient } from './client.js';
 import { resolveJulesApiKey } from './credentials.js';
 import { runJulesPreflight } from './preflight.js';
 import type { JulesActivity, JulesSession } from './types.js';
+import { JulesApiError } from './errors.js';
+import { translateJulesActivity } from './activity-translator.js';
 
 // ============================================================================
 // Google Jules Cloud Dispatch & Session Lifecycle Manager
@@ -33,6 +35,7 @@ export interface JulesDispatchResult {
   error?: string;
   preflightReason?: string;
   resolution?: string;
+  ambiguous?: boolean;
 }
 
 export interface JulesPollResult {
@@ -76,6 +79,8 @@ export class JulesSessionManager {
       projectRoot: options.projectRoot,
       vault,
       julesClient: options.julesClient,
+      store: this.store,
+      projectId: this.store.getTask(taskId)?.projectId,
     });
 
     if (!preflight.ok) {
@@ -86,6 +91,9 @@ export class JulesSessionManager {
         resolution: preflight.resolution,
       };
     }
+    this.store.manager.checkpoints.append({ taskId, stage: 'preflight', subjectSha: preflight.baseSha,
+      data: { status: 'verified', sourceName: preflight.sourceName!, dispatchBranch: preflight.dispatchBranch!,
+        targetBranch: preflight.targetBranch!, baseSha: preflight.baseSha! } });
 
     // 2. Initialize API Client
     const client = this.resolveClient(options.julesClient, vault);
@@ -110,50 +118,39 @@ export class JulesSessionManager {
       return {
         ok: false,
         error: `Failed to create Jules session: ${message}`,
+        ambiguous: !(err instanceof JulesApiError && err.status >= 400 && err.status < 500),
       };
     }
 
     const remoteSessionId = julesSession.id || julesSession.name.split('/').pop()!;
 
-    // 4. Record execution attempt in SQLite
-    const attempt = this.store.manager.attempts.create({
-      taskId,
-      target: 'cloud',
-      worker: 'jules',
-      baseSha: preflight.baseSha!,
-      branchName: preflight.dispatchBranch,
-      state: 'WORKING',
-      providerSessionId: remoteSessionId,
-    });
-
-    // 5. Record cloud session reference in SQLite
-    const cloudSession = this.store.manager.cloudSessions.create({
-      taskId,
-      attemptId: attempt.id,
-      sourceName: preflight.sourceName!,
-      sessionResourceName: julesSession.name,
-      remoteSessionId,
-      dispatchBranch: preflight.dispatchBranch!,
-      targetBranch: preflight.targetBranch!,
-      baseSha: preflight.baseSha!,
-      state: julesSession.state || 'QUEUED',
-    });
-
-    // 6. Record task event and update task status
-    this.store.addEvent(taskId, 'jules', 'cloud.dispatched', {
-      remoteSessionId,
-      sessionName: julesSession.name,
-      dispatchBranch: preflight.dispatchBranch,
-      targetBranch: preflight.targetBranch,
-      state: julesSession.state,
+    // 4. Persist every local consequence of the provider acknowledgement atomically.
+    let attempt!: ExecutionAttempt;
+    let cloudSession!: CloudSessionReference;
+    this.store.manager.transaction(() => {
+      attempt = this.store.manager.attempts.create({
+        taskId, target: 'cloud', worker: 'jules', baseSha: preflight.baseSha!,
+        branchName: preflight.dispatchBranch, state: 'WORKING', providerSessionId: remoteSessionId,
+      });
+      cloudSession = this.store.manager.cloudSessions.create({
+        taskId, attemptId: attempt.id, sourceName: preflight.sourceName!, sessionResourceName: julesSession.name,
+        remoteSessionId, dispatchBranch: preflight.dispatchBranch!, targetBranch: preflight.targetBranch!,
+        baseSha: preflight.baseSha!, state: julesSession.state || 'QUEUED',
+      });
+      this.store.manager.activityCursors.ensure(cloudSession.id);
+      this.store.addEvent(taskId, 'jules', 'cloud.dispatched', {
+        remoteSessionId, sessionName: julesSession.name, dispatchBranch: preflight.dispatchBranch,
+        targetBranch: preflight.targetBranch, baseSha: preflight.baseSha, state: julesSession.state,
+      });
+      this.store.manager.checkpoints.append({ taskId, attemptId: attempt.id, stage: 'dispatch', subjectSha: preflight.baseSha,
+        data: { status: 'provider_acknowledged', remoteSessionId, dispatchBranch: preflight.dispatchBranch! } });
+      this.store.updateTask(taskId, { state: 'running' });
     });
 
     options.onEvent?.({
       name: 'cloud.dispatched',
       payload: { taskId, remoteSessionId, dispatchBranch: preflight.dispatchBranch },
     });
-
-    this.store.updateTask(taskId, { state: 'running' });
 
     return {
       ok: true,
@@ -168,6 +165,7 @@ export class JulesSessionManager {
     options?: {
       julesClient?: JulesApiClient;
       onActivity?: (activity: JulesActivity) => void;
+      lease?: { ownerId: string; fencingToken: number };
     }
   ): Promise<JulesPollResult> {
     const cloudSession = this.store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
@@ -198,25 +196,39 @@ export class JulesSessionManager {
     }
 
     let session: JulesSession;
-    let activities: JulesActivity[] = [];
+    const activities: JulesActivity[] = [];
+    const cursor = this.store.manager.activityCursors.ensure(cloudSession.id);
 
     try {
-      const [sessionRes, activitiesRes] = await Promise.all([
-        client.getSession(remoteSessionId),
-        client.listActivities(remoteSessionId),
-      ]);
-      session = sessionRes;
-      activities = activitiesRes.activities || [];
-    } catch (err: unknown) {
-      // Network dropout / transient error: preserve state without crashing task
-      const message = err instanceof Error ? err.message : String(err);
+      session = await client.getSession(remoteSessionId);
+      let pageToken: string | undefined;
+      const seenTokens = new Set<string>();
+      for (let page = 0; page < 100; page += 1) {
+        const response = await client.listActivities(remoteSessionId, 100, pageToken);
+        activities.push(...response.activities);
+        if (!response.nextPageToken) break;
+        if (seenTokens.has(response.nextPageToken)) throw new Error('Jules activity pagination repeated a page token');
+        seenTokens.add(response.nextPageToken);
+        pageToken = response.nextPageToken;
+        if (page === 99) throw new Error('Jules activity pagination exceeded the safety limit');
+      }
+    } catch {
+      const failures = cursor.consecutiveFailures + 1;
+      const delay = Math.min(300_000, 5_000 * (2 ** Math.min(failures, 6)));
+      try {
+        if (options?.lease) this.store.manager.leases.assertFence('jules_poll', cloudSession.id, options.lease.ownerId, options.lease.fencingToken);
+        this.store.manager.activityCursors.compareAndSet(cloudSession.id, cursor.version, {
+          nextPollAt: new Date(Date.now() + delay).toISOString(), consecutiveFailures: failures,
+          lastActivityId: cursor.lastActivityId, lastActivityAt: cursor.lastActivityAt, lastErrorCode: 'JULES_POLL_FAILED',
+        });
+      } catch { /* A newer poll owner controls the cursor. */ }
       return {
         ok: false,
         remoteSessionId,
         isTerminal: false,
         activities: [],
         newActivitiesCount: 0,
-        error: `Transient poll failure: ${message}`,
+        error: 'Jules polling failed; the durable cursor was retained for retry.',
       };
     }
 
@@ -224,45 +236,45 @@ export class JulesSessionManager {
     const mapping = mapJulesToOrchestraState(julesState);
     const isTerminal = isJulesTerminalState(julesState);
 
-    // Filter new activities
+    // Persist activity identities and state as one fenced unit of work.
     let newActivitiesCount = 0;
-    const latestExistingStamp = cloudSession.lastActivityAt ? new Date(cloudSession.lastActivityAt).getTime() : 0;
-
-    for (const activity of activities) {
-      const activityStamp = activity.createTime ? new Date(activity.createTime).getTime() : 0;
-      if (activityStamp > latestExistingStamp || (!cloudSession.lastActivityId && activity.id)) {
-        newActivitiesCount += 1;
-        this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.activity', activity);
-        options?.onActivity?.(activity);
-      }
-    }
-
-    // Extract PR output details if present (outputs is an array)
+    const newActivities: JulesActivity[] = [];
     const prOutput = Array.isArray(session.outputs) ? session.outputs.find((o) => o.pullRequest?.url)?.pullRequest : undefined;
     const prUrl = prOutput?.url || cloudSession.prUrl;
-    const latestActivity = activities.at(-1);
-
-    // Update cloud session in SQLite
-    this.store.manager.cloudSessions.update(cloudSession.id, {
-      state: julesState,
-      prUrl,
-      lastActivityId: latestActivity?.id || cloudSession.lastActivityId,
-      lastActivityAt: latestActivity?.createTime || cloudSession.lastActivityAt,
+    const ordered = [...activities].sort((left, right) => (left.createTime ?? '').localeCompare(right.createTime ?? '') || left.name.localeCompare(right.name));
+    const newest = ordered.at(-1);
+    this.store.manager.transaction(() => {
+      if (options?.lease) this.store.manager.leases.assertFence('jules_poll', cloudSession.id, options.lease.ownerId, options.lease.fencingToken);
+      for (const activity of ordered) {
+        const activityId = activity.id || activity.name;
+        if (this.store.manager.julesActivityReceipts.record(cloudSession.id, activityId, activity.createTime)) {
+          newActivitiesCount += 1;
+          newActivities.push(activity);
+          this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.activity', translateJulesActivity(activity));
+        }
+      }
+      this.store.manager.cloudSessions.update(cloudSession.id, {
+        state: julesState, prUrl, lastActivityId: newest?.id || newest?.name || cloudSession.lastActivityId,
+        lastActivityAt: newest?.createTime || cloudSession.lastActivityAt,
+      });
+      if (julesState === 'COMPLETED' && cloudSession.state !== 'COMPLETED') {
+        this.store.updateTask(cloudSession.taskId, { state: mapping.taskState });
+        this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', { remoteSessionId, prUrl });
+        this.store.manager.evidence.record({ taskId: cloudSession.taskId, attemptId: cloudSession.attemptId,
+          kind: 'provider_output', outcome: 'completed', payload: { remoteSessionId, prUrl: prUrl ?? null, state: julesState } });
+      } else if (julesState === 'FAILED' && cloudSession.state !== 'FAILED') {
+        this.store.updateTask(cloudSession.taskId, { state: 'failed' });
+        this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.failed', { remoteSessionId });
+        this.store.manager.julesCapacity.release(cloudSession.taskId);
+      }
+      this.store.manager.activityCursors.compareAndSet(cloudSession.id, cursor.version, {
+        nextPollAt: isTerminal ? '9999-12-31T23:59:59.999Z' : new Date(Date.now() + 5_000).toISOString(),
+        consecutiveFailures: 0, lastErrorCode: null,
+        lastActivityId: newest?.id || newest?.name || cursor.lastActivityId,
+        lastActivityAt: newest?.createTime || cursor.lastActivityAt,
+      });
     });
-
-    // Handle terminal transitions
-    if (julesState === 'COMPLETED') {
-      this.store.updateTask(cloudSession.taskId, { state: mapping.taskState });
-      this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', {
-        remoteSessionId,
-        prUrl,
-      });
-    } else if (julesState === 'FAILED') {
-      this.store.updateTask(cloudSession.taskId, { state: 'failed' });
-      this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.failed', {
-        remoteSessionId,
-      });
-    }
+    for (const activity of newActivities) options?.onActivity?.(activity);
 
     return {
       ok: true,

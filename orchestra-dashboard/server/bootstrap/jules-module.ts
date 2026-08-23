@@ -9,6 +9,15 @@ import { JulesSessionService } from '../application/jules/session-service.js';
 import { createJulesConnectionRouter } from '../api/routes/jules/connection.js';
 import { createJulesSessionsRouter } from '../api/routes/jules/sessions.js';
 import { createJulesReviewRouter } from '../api/routes/jules/review.js';
+import { JulesReviewService } from '../application/jules/review-service.js';
+import { JulesBatchService } from '../application/jules/batch-service.js';
+import { createJulesBatchRouter } from '../api/routes/jules/batches.js';
+import { dashboardTokenMiddleware } from '../api/middleware/security.js';
+import { JulesOperationsService } from '../application/jules/operations-service.js';
+import { createJulesOperationsRouter } from '../api/routes/jules/operations.js';
+import type { TaskManager } from '../tasks.js';
+import { JulesRoutingService } from '../application/jules/routing-service.js';
+import { createJulesRoutingRouter } from '../api/routes/jules/routing.js';
 
 export interface JulesModuleOptions {
   store?: Store;
@@ -16,6 +25,8 @@ export interface JulesModuleOptions {
   sessionManager?: JulesSessionManager;
   julesClient?: JulesApiClient;
   rolloutStage?: JulesRolloutStage;
+  reviewService?: JulesReviewService;
+  tasks?: TaskManager;
 }
 function isStore(value: Store | JulesModuleOptions): value is Store { return 'manager' in value; }
 
@@ -27,12 +38,16 @@ export function composeJulesRouter(storeOrOptions?: Store | JulesModuleOptions, 
   const vault = options.vault ?? new CredentialVault();
   const connection = new JulesConnectionService(options.store, vault, options.julesClient);
   const router = Router();
+  router.use(dashboardTokenMiddleware);
   router.use(createJulesConnectionRouter(connection, stage));
   if (options.store) {
     const manager = options.sessionManager ?? new JulesSessionManager(options.store, vault);
     const sessions = new JulesSessionService(options.store, vault, manager, () => connection.client(), options.julesClient);
     router.use(createJulesSessionsRouter(sessions, stage));
+    router.use(createJulesBatchRouter(new JulesBatchService(options.store, sessions), stage));
+    router.use(createJulesOperationsRouter(new JulesOperationsService(options.store), stage));
+    if (options.tasks) router.use(createJulesRoutingRouter(new JulesRoutingService(options.store, options.tasks, sessions), stage));
   }
-  router.use(createJulesReviewRouter(stage));
+  router.use(createJulesReviewRouter(stage, options.reviewService ?? (options.store ? new JulesReviewService(options.store) : undefined)));
   return router;
 }

@@ -12,8 +12,10 @@ import type {
 } from './app/types';
 import { Card, Empty, Field, Metric, NavButton, PageHeader, StateBadge, StatusDot } from './shared/ui';
 import { formatDate, formatDuration, humanState } from './shared/format';
+import { JulesTaskPanel } from './features/jules/JulesTaskPanel';
+import { JulesSettingsCard } from './features/jules/JulesSettingsCard';
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewed', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
 
 function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
@@ -49,6 +51,7 @@ function App() {
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [input, setInput] = useState('');
   const [executionMode, setExecutionMode] = useState<'orchestra' | 'direct'>('orchestra');
+  const [executionTarget, setExecutionTarget] = useState<'local' | 'cloud' | 'auto'>('local');
   const [directAgent, setDirectAgent] = useState<'gemma' | 'antigravity' | 'codex'>('gemma');
   const [availableModels, setAvailableModels] = useState<AvailableModels>({
     antigravity: [
@@ -328,10 +331,20 @@ function App() {
             : null
           : null;
 
-      const created = await api<Task>(`/api/sessions/${session.id}/tasks`, {
-        method: 'POST',
-        body: JSON.stringify({ prompt, mode: executionMode, directAgent, directModel, directEffort }),
-      });
+      let created: Task;
+      if (executionMode === 'orchestra' && executionTarget !== 'local' && project) {
+        const path = executionTarget === 'cloud' ? `/api/projects/${project.id}/jules/dispatch` : `/api/projects/${project.id}/jules/execute`;
+        const response = await api<{ taskId?: string; id?: string }>(path, {
+          method: 'POST', body: JSON.stringify({ prompt, sessionId: session.id, target: executionTarget, idempotencyKey: crypto.randomUUID() }),
+        });
+        const taskId = response.taskId || response.id;
+        if (!taskId) throw new Error('The execution request did not return a task identity.');
+        created = await api<Task>(`/api/tasks/${taskId}`);
+      } else {
+        created = await api<Task>(`/api/sessions/${session.id}/tasks`, {
+          method: 'POST', body: JSON.stringify({ prompt, mode: executionMode, directAgent, directModel, directEffort }),
+        });
+      }
       setMessages((current) => [...current, { id: crypto.randomUUID(), taskId: created.id, role: 'user', agent: 'system', content: prompt, createdAt: new Date().toISOString() }]);
       setTasks((current) => [created, ...current]); setActiveTask(created); setActivity([]); watchTask(created.id);
       if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
@@ -481,7 +494,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard stats={stats} health={health} usage={usage} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} />}
+        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
@@ -749,6 +762,7 @@ function App() {
               </select>
             </div>
           )}
+          {executionMode === 'orchestra' && <div className="solo-model-picker"><span>Execution:</span><select value={executionTarget} onChange={(event) => setExecutionTarget(event.target.value as 'local' | 'cloud' | 'auto')}><option value="local">Local agents</option><option value="cloud">Jules cloud</option><option value="auto">Auto route</option></select></div>}
           <div className="composer-box">
             <textarea
               value={input}
@@ -801,10 +815,11 @@ function formatResetTimer(isoDate: string | null | undefined): string | null {
   return `resets in ${days}d ${remHours}h`;
 }
 
-function Dashboard({ stats, health, usage, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed }: { stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
+function Dashboard({ api, stats, health, usage, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
     {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
+    {activeTask?.target === 'cloud' && <JulesTaskPanel task={activeTask} api={api} />}
     <div className="metrics-grid">
       <Metric icon={<Cpu />} label="CPU" value={`${stats?.cpu.load ?? 0}%`} detail={stats?.cpu.speed || 'Unavailable'} percent={stats?.cpu.load ?? 0} color="blue" />
       <Metric icon={<MemoryStick />} label="Memory" value={`${stats?.memory.percent ?? 0}%`} detail={stats ? `${stats.memory.used} / ${stats.memory.total} GB` : 'Loading'} percent={stats?.memory.percent ?? 0} color="cyan" />
@@ -1581,6 +1596,7 @@ function SettingsView({
   return (
     <section>
       <PageHeader eyebrow="Local configuration & Quota Management" title="Settings" subtitle="Customize real-time telemetry, model routing, and quota tier policies." />
+      <JulesSettingsCard api={api} />
       <div className="settings-grid">
         <Card title="Local model (LM Studio)" icon={<Bot />}>
           <Field label="LM Studio URL" value={settings.lmStudioBaseUrl} />

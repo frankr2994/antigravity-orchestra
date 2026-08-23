@@ -40,6 +40,11 @@ export function hasJulesCapability(current: JulesRolloutStage, required: JulesRo
   return JULES_ROLLOUT_STAGES.indexOf(current) >= JULES_ROLLOUT_STAGES.indexOf(required);
 }
 
+function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number): number {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= minimum && parsed <= maximum ? parsed : fallback;
+}
+
 const julesEnabled = parseStrictBoolean(process.env.JULES_ENABLED);
 const julesRolloutStage = julesEnabled
   ? parseJulesRolloutStage(process.env.JULES_ROLLOUT_STAGE)
@@ -60,5 +65,8 @@ export const config = {
   jules: {
     enabled: julesEnabled,
     rolloutStage: julesRolloutStage,
+    maxConcurrentSessions: boundedInteger(process.env.JULES_MAX_CONCURRENT_SESSIONS, 2, 1, 32),
+    maxConcurrentPolls: boundedInteger(process.env.JULES_MAX_CONCURRENT_POLLS, 2, 1, 32),
+    pollIntervalMs: boundedInteger(process.env.JULES_POLL_INTERVAL_MS, 5_000, 1_000, 300_000),
   },
 };

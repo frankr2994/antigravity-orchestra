@@ -2,6 +2,7 @@ import type { Store } from '../../db.js';
 import type { CloudSessionReference } from '../../domain/index.js';
 import type { JulesApiClient } from './client.js';
 import { JulesSessionManager } from './session-manager.js';
+import { randomUUID } from 'node:crypto';
 
 // ============================================================================
 // Google Jules Background Cloud Supervisor & Distributed Polling Loop
@@ -13,6 +14,8 @@ export interface JulesSupervisorOptions {
   julesClient?: JulesApiClient;
   pollIntervalMs?: number;
   leaseDurationMs?: number;
+  maxConcurrentPolls?: number;
+  cleanup?: () => Promise<void>;
   onTerminal?: (event: {
     taskId: string;
     remoteSessionId: string;
@@ -34,6 +37,7 @@ export class JulesSupervisor {
   private isRunning = false;
   private isTickInProgress = false;
   private abortController: AbortController | null = null;
+  private readonly ownerId = `jules-supervisor-${randomUUID()}`;
 
   constructor(private readonly options: JulesSupervisorOptions) {}
 
@@ -69,50 +73,44 @@ export class JulesSupervisor {
     }
 
     this.isTickInProgress = true;
-    let polled = 0;
-    let errors = 0;
-
-    const nonTerminalSessions = this.options.store.manager.cloudSessions.listNonTerminal();
-    const leaseDuration = this.options.leaseDurationMs ?? 30_000;
-
-    for (const session of nonTerminalSessions) {
-      // 1. Acquire distributed lease
-      const acquired = this.options.store.manager.cloudSessions.acquirePollingLease(session.id, leaseDuration);
-      if (!acquired) continue;
-
-      try {
-        // 2. Poll remote session & stream activities
-        const pollResult = await this.options.sessionManager.pollSession(session.remoteSessionId, {
-          julesClient: this.options.julesClient,
-        });
-        polled += 1;
-
-        // 3. Handle terminal transition callback
-        if (pollResult.isTerminal) {
-          const outputs = pollResult.julesSession?.outputs;
-          const prOutput = Array.isArray(outputs) ? outputs.find((o) => o.pullRequest?.url)?.pullRequest : undefined;
-          await this.options.onTerminal?.({
-            taskId: session.taskId,
-            remoteSessionId: session.remoteSessionId,
-            state: (pollResult.julesState as string) || 'COMPLETED',
-            prUrl: prOutput?.url,
-          });
+    let polled = 0; let errors = 0;
+    try {
+      const nonTerminalSessions = this.options.store.manager.cloudSessions.listNonTerminal();
+      for (const session of nonTerminalSessions) this.options.store.manager.activityCursors.ensure(session.id);
+      const due = this.options.store.manager.activityCursors.listDue(new Date().toISOString(), 100);
+      const limit = Math.max(1, Math.min(32, this.options.maxConcurrentPolls ?? 2));
+      let nextIndex = 0;
+      const worker = async () => {
+        while (nextIndex < due.length) {
+          const cursor = due[nextIndex++];
+          const session = this.options.store.manager.cloudSessions.getById(cursor.cloudSessionId);
+          if (!session || ['COMPLETED', 'FAILED', 'CANCELLED'].includes(session.state)) continue;
+          const lease = this.options.store.manager.leases.acquire('jules_poll', session.id, this.ownerId, this.options.leaseDurationMs ?? 30_000);
+          if (!lease) continue;
+          try {
+            const result = await this.options.sessionManager.pollSession(session.remoteSessionId, {
+              julesClient: this.options.julesClient, lease: { ownerId: this.ownerId, fencingToken: lease.fencingToken },
+            });
+            polled += 1;
+            if (!result.ok) { errors += 1; continue; }
+            if (result.isTerminal) {
+              const prOutput = result.julesSession?.outputs?.find((output) => output.pullRequest?.url)?.pullRequest;
+              await this.options.onTerminal?.({ taskId: session.taskId, remoteSessionId: session.remoteSessionId,
+                state: String(result.julesState || 'COMPLETED'), prUrl: prOutput?.url });
+            }
+          } catch (caught) {
+            errors += 1;
+            this.options.onError?.(caught instanceof Error ? caught : new Error(String(caught)), session);
+          } finally {
+            this.options.store.manager.leases.release('jules_poll', session.id, this.ownerId, lease.fencingToken);
+          }
         }
-      } catch (err: unknown) {
-        errors += 1;
-        const error = err instanceof Error ? err : new Error(String(err));
-        this.options.onError?.(error, session);
-      } finally {
-        // 4. Release lease
-        this.options.store.manager.cloudSessions.releasePollingLease(session.id);
-      }
+      };
+      await Promise.all(Array.from({ length: Math.min(limit, due.length) }, () => worker()));
+      await this.options.cleanup?.();
+      return { polled, active: nonTerminalSessions.length, errors };
+    } finally {
+      this.isTickInProgress = false;
     }
-
-    this.isTickInProgress = false;
-    return {
-      polled,
-      active: nonTerminalSessions.length,
-      errors,
-    };
   }
 }

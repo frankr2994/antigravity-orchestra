@@ -288,6 +288,102 @@ export const MIGRATIONS: Migration[] = [
       `);
     },
   },
+  {
+    version: 4,
+    name: 'verified_jules_source_mappings',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE jules_source_mappings (
+          project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+          source_name TEXT NOT NULL,
+          github_owner TEXT NOT NULL,
+          github_repo TEXT NOT NULL,
+          starting_branch TEXT NOT NULL,
+          source_fingerprint TEXT NOT NULL,
+          verified_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_jules_source_identity
+          ON jules_source_mappings(github_owner, github_repo);
+      `);
+    },
+  },
+  {
+    version: 5,
+    name: 'durable_jules_activity_receipts',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE jules_activity_receipts (
+          cloud_session_id TEXT NOT NULL REFERENCES cloud_sessions(id) ON DELETE CASCADE,
+          activity_id TEXT NOT NULL,
+          create_time TEXT,
+          received_at TEXT NOT NULL,
+          PRIMARY KEY(cloud_session_id, activity_id)
+        );
+        CREATE INDEX idx_jules_activity_receipts_time
+          ON jules_activity_receipts(cloud_session_id, create_time);
+      `);
+    },
+  },
+  {
+    version: 6,
+    name: 'parallel_cloud_workflows',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE cloud_workflow_batches (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          request_hash TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('running','completed','failed','blocked')),
+          max_concurrency INTEGER NOT NULL CHECK(max_concurrency BETWEEN 1 AND 32),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE cloud_workflow_nodes (
+          id TEXT PRIMARY KEY,
+          batch_id TEXT NOT NULL REFERENCES cloud_workflow_batches(id) ON DELETE CASCADE,
+          ordinal INTEGER NOT NULL,
+          prompt TEXT NOT NULL,
+          dependencies_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('queued','dispatching','running','completed','failed','blocked')),
+          task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(batch_id, ordinal),
+          UNIQUE(task_id)
+        );
+        CREATE INDEX idx_cloud_workflow_nodes_ready ON cloud_workflow_nodes(batch_id,state,ordinal);
+      `);
+    },
+  },
+  {
+    version: 7,
+    name: 'jules_capacity_reservations',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE jules_capacity_reservations (
+          task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+          state TEXT NOT NULL CHECK(state IN ('active','released')),
+          acquired_at TEXT NOT NULL,
+          released_at TEXT
+        );
+        CREATE INDEX idx_jules_capacity_active ON jules_capacity_reservations(state, acquired_at);
+      `);
+    },
+  },
+  {
+    version: 8,
+    name: 'jules_source_target_branch',
+    up: (db) => {
+      const columns = db.prepare('PRAGMA table_info(jules_source_mappings)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'target_branch')) {
+        db.exec('ALTER TABLE jules_source_mappings ADD COLUMN target_branch TEXT;');
+        db.exec('UPDATE jules_source_mappings SET target_branch=starting_branch WHERE target_branch IS NULL;');
+      }
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): number {

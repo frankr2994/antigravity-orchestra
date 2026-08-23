@@ -3594,3 +3594,26 @@ Deferred adjustment:
 - Run lint, build, unit tests, integration tests, and relevant end-to-end tests.
 - Update each finding to `Resolved` or `Accepted` with evidence and a commit SHA.
 - Confirm the authoritative implementation plan and documentation no longer conflict.
+
+## Final Jules implementation checkpoint — 2026-08-23
+
+Status: **Implementation complete; offline acceptance green; live Jules acceptance pending credentials**
+
+Resolution summary:
+
+- R-051 through R-054 and R-057 through R-061: resolved. GitHub identity parsing is canonical and credential-free, source matching uses structured provider identity, duplicate matches fail closed, all Jules reads require dashboard authentication, branch visibility is exact, and dispatch pushes/readbacks an immutable full SHA without force.
+- R-062 through R-075: resolved. Dispatch commands are durable and idempotent, provider acknowledgement is persisted transactionally, polling is paginated/deduplicated/fenced with durable compare-and-set cursors and bounded backoff, provider activities are normalized before event persistence, and startup recovery reconciles intents/cursors/capacity without falsely failing live cloud work.
+- R-076: resolved for the delivered architecture. Jules HTTP controllers are split by feature and constrained by an import-boundary test; application services own routing, batches, review/integration, cleanup, operations, and dispatch commands; repositories and provider adapters remain separate modules.
+- R-077 through R-085: resolved. PR processing starts only from the task-owned persisted PR URL, resolves and fetches the exact remote PR head, verifies ancestry and exact worktree identity, runs bounded deterministic verification and an independent Codex review, rechecks the PR head before integration, and advances only the intended unchanged target ref without force-pushing.
+- R-095 and R-105 through R-127: resolved. Interaction commands enforce provider state and idempotency, the supervisor uses durable leases and configurable bounded concurrency, repair feedback is durable, managed refs/worktrees have ownership-aware retryable cleanup, and automatic target integration records evidence/checkpoints before releasing capacity.
+- R-128: remains resolved by the modular controller/application split and its architecture ratchets.
+- R-129: resolved for offline acceptance. The suite now covers malformed provider responses, immutable dispatch with temporary remotes, strict source visibility, durable persistence/leases, parallel dependency execution, and exact PR integration. `npm run check` passed all 150 tests on 2026-08-23.
+- R-055: **Recheck after live acceptance.** No test used a real Jules API key or live provider repository. A credentialed smoke test must confirm the production Jules API fixture assumptions, source branch propagation timing, plan/feedback behavior, polling cadence, and PR URL/ref availability before enabling later rollout stages in a real installation.
+
+Delivered operational constraints:
+
+- Jules is disabled by default and capabilities advance through explicit rollout stages.
+- Pause, resume, and cancel remain truthfully unavailable until the provider exposes a confirmed lifecycle contract.
+- Concurrent cloud sessions are configurable (`JULES_MAX_CONCURRENT_SESSIONS`, default 2, local safety bound 1–32); no provider-account maximum is hardcoded.
+- Repository verification executes checked-out PR code on the Orchestra host with a sanitized environment, time/output/resource bounds, and an isolated managed worktree. This is hardened host-local execution, not an OS security sandbox.
+- Automatic integration is a non-force update guarded by exact PR identity, ancestry, review/verification success, repository fencing, unchanged PR head, unchanged target SHA, and remote readback.

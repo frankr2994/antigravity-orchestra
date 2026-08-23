@@ -97,10 +97,15 @@ export class TaskRepository {
     const terminal = ['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required'];
     const placeholders = terminal.map(() => '?').join(',');
     const stamp = now();
-    const rows = this.db.prepare(`SELECT id FROM tasks WHERE state NOT IN (${placeholders})`).all(...terminal) as Array<{ id: string }>;
+    const recoverable = `state NOT IN (${placeholders}) AND NOT (
+      target='cloud' AND EXISTS (
+        SELECT 1 FROM cloud_sessions cs WHERE cs.task_id=tasks.id AND cs.state NOT IN ('COMPLETED','FAILED','CANCELLED')
+      )
+    )`;
+    const rows = this.db.prepare(`SELECT id FROM tasks WHERE ${recoverable}`).all(...terminal) as Array<{ id: string }>;
     if (rows.length) {
       this.db.prepare(
-        `UPDATE tasks SET state='failed',error='The dashboard restarted while this task was running. Submit it again to retry safely.',updated_at=? WHERE state NOT IN (${placeholders})`
+        `UPDATE tasks SET state='failed',error='The dashboard restarted while this task was running. Submit it again to retry safely.',updated_at=? WHERE ${recoverable}`
       ).run(stamp, ...terminal);
     }
     return rows.map((row) => row.id);

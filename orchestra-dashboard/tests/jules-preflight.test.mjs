@@ -17,12 +17,10 @@ import {
 
 test('Phase 9 Preflight — generateDispatchBranchName creates safe immutable branch names', () => {
   const taskId = 'task-uuid-1234-5678-90ab';
-  const headSha = 'abc1234567890abcdef1234567890abcdef123456';
+  const headSha = 'a'.repeat(40);
   const branch = generateDispatchBranchName(taskId, headSha);
 
-  assert.ok(branch.startsWith('orchestra/jules-base/taskuuid-'));
-  assert.ok(branch.includes('-abc1234'));
-  assert.equal(branch.length <= 60, true);
+  assert.equal(branch, `orchestra/jules/task-uuid-1234-5678-90ab/${'a'.repeat(12)}`);
 });
 
 test('Phase 9 Preflight — runJulesPreflight detects uncommitted dirty files in project', async () => {
@@ -80,18 +78,21 @@ test('Phase 9 Preflight — runJulesPreflight succeeds on clean repository with 
     await git(['remote', 'add', 'origin', 'https://github.com/frankr2994/antigravity-orchestra.git'], fixtureDir);
     await git(['remote', 'set-url', '--push', 'origin', bareDir], fixtureDir);
     await git(['push', '-u', 'origin', 'main'], fixtureDir);
+    const expectedHead = (await git(['rev-parse', 'HEAD'], fixtureDir)).stdout.trim();
+    const expectedDispatch = generateDispatchBranchName('task-cloud-12345678', expectedHead);
 
-    const mockFetch = async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({
+    const mockFetch = async (url) => ({
+      ok: true, status: 200,
+      json: async () => String(url).endsWith('/sources') ? ({
         sources: [
           {
             name: 'sources/github/frankr2994/antigravity-orchestra',
-            githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra' },
+            githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }] },
           },
         ],
-      }),
+      }) : ({ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: {
+        owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }, { displayName: expectedDispatch }],
+      } }),
     });
 
     const julesClient = new JulesApiClient({
@@ -108,8 +109,10 @@ test('Phase 9 Preflight — runJulesPreflight succeeds on clean repository with 
     assert.equal(result.ok, true, `Expected preflight to succeed, but failed with: ${result.reason}`);
     assert.equal(result.sourceName, 'sources/github/frankr2994/antigravity-orchestra');
     assert.equal(result.targetBranch, 'main');
-    assert.ok(result.dispatchBranch?.startsWith('orchestra/jules-base/taskclou-'));
-    assert.ok(result.baseSha);
+    assert.ok(result.dispatchBranch?.startsWith('orchestra/jules/task-cloud-12345678/'));
+    assert.match(result.baseSha || '', /^[0-9a-f]{40}$/);
+    const advertised = await git(['ls-remote', '--heads', bareDir, `refs/heads/${result.dispatchBranch}`], fixtureDir);
+    assert.equal(advertised.stdout.trim().split(/\s+/)[0], result.baseSha);
   } finally {
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
     try { rmSync(bareDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }

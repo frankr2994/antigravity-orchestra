@@ -10,6 +10,12 @@ import { CredentialVault } from '../dist-server/infrastructure/security/vault.js
 import { JulesApiClient } from '../dist-server/providers/jules/client.js';
 import { composeJulesRouter } from '../dist-server/bootstrap/jules-module.js';
 import { errorHandlerMiddleware } from '../dist-server/api/middleware/error.js';
+import { config } from '../dist-server/config.js';
+
+const authorizedFetch = (input, init = {}) => fetch(input, {
+  ...init,
+  headers: { 'X-Orchestra-Token': config.uiToken, ...init.headers },
+});
 
 const testProtector = {
   scheme: 'windows-dpapi-current-user',
@@ -55,13 +61,14 @@ test('Phase 16 Routes — Credential and source endpoints', async () => {
     const baseUrl = `http://127.0.0.1:${port}/api`;
 
     // 1. Initial credential status
-    const statRes = await fetch(`${baseUrl}/jules/credential-status`);
+    assert.equal((await fetch(`${baseUrl}/jules/credential-status`)).status, 403, 'provider-backed reads require the dashboard token');
+    const statRes = await authorizedFetch(`${baseUrl}/jules/credential-status`);
     assert.equal(statRes.status, 200);
     const statData = await statRes.json();
     assert.equal(typeof statData.configured, 'boolean');
 
     // 2. Save key
-    const saveRes = await fetch(`${baseUrl}/jules/save-key`, {
+    const saveRes = await authorizedFetch(`${baseUrl}/jules/save-key`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey: 'new-vault-api-key', validate: false }),
@@ -71,7 +78,7 @@ test('Phase 16 Routes — Credential and source endpoints', async () => {
     assert.equal(saveData.ok, true);
 
     // 3. Clear key
-    const clearRes = await fetch(`${baseUrl}/jules/clear-key`, { method: 'DELETE' });
+    const clearRes = await authorizedFetch(`${baseUrl}/jules/clear-key`, { method: 'DELETE' });
     assert.equal(clearRes.status, 200);
     const clearData = await clearRes.json();
     assert.equal(clearData.ok, true);
@@ -125,6 +132,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     let feedbackReceived = '';
     let remoteCancelled = false;
     let remoteCreateCount = 0;
+    let currentRemoteState = 'PLANNING';
 
     const mockFetch = async (url, opts) => {
       const urlStr = String(url);
@@ -156,11 +164,18 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
         };
       }
       if (urlStr.includes('/sources')) {
+        if (!urlStr.endsWith('/sources')) {
+          const refs = await git(['ls-remote', '--heads', bareDir, 'refs/heads/orchestra/jules/*'], fixtureDir);
+          const branch = refs.stdout.trim().split(/\s+/)[1]?.replace('refs/heads/', '');
+          return { ok: true, status: 200, json: async () => ({ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: {
+            owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }, ...(branch ? [{ displayName: branch }] : [])],
+          } }) };
+        }
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra' } }],
+            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }] } }],
           }),
         };
       }
@@ -175,6 +190,9 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
             state: 'PLANNING',
           }),
         };
+      }
+      if (urlStr.includes('/sessions') && (!opts?.method || opts.method === 'GET')) {
+        return { ok: true, status: 200, json: async () => ({ name: 'sessions/sess-route-100', id: 'sess-route-100', state: currentRemoteState }) };
       }
       if (urlStr.includes('/sessions') && opts?.method === 'DELETE') {
         remoteCancelled = true;
@@ -195,7 +213,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     const baseUrl = `http://127.0.0.1:${port}/api`;
 
     // 1. Dispatch task to cloud (using real bare git push without skipPush)
-    const dispatchRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+    const dispatchRes = await authorizedFetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -211,7 +229,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     const taskId = dispatchData.taskId;
     assert.equal(remoteCreateCount, 1);
 
-    const replayRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+    const replayRes = await authorizedFetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: 'Add cloud execution router test', sessionId: session.id, idempotencyKey: 'route-dispatch-1' }),
     });
@@ -219,14 +237,14 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     assert.equal((await replayRes.json()).taskId, taskId);
     assert.equal(remoteCreateCount, 1, 'idempotent replay must not create another remote session');
 
-    const wrongSessionRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+    const wrongSessionRes = await authorizedFetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: 'Wrong owner', sessionId: otherSession.id, idempotencyKey: 'wrong-owner' }),
     });
     assert.equal(wrongSessionRes.status, 409);
     assert.equal((await wrongSessionRes.json()).code, 'SESSION_PROJECT_MISMATCH');
 
-    const coercedBooleanRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+    const coercedBooleanRes = await authorizedFetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: 'Bad boolean', requirePlanApproval: 'false', idempotencyKey: 'bad-boolean' }),
     });
@@ -234,36 +252,40 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     assert.equal((await coercedBooleanRes.json()).code, 'INVALID_REQUEST');
 
     // 2. Get task session
-    const getSessRes = await fetch(`${baseUrl}/tasks/${taskId}/jules-session`);
+    const getSessRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules-session`);
     assert.equal(getSessRes.status, 200);
     const getSessData = await getSessRes.json();
     assert.equal(getSessData.cloudSession.remoteSessionId, 'sess-route-100');
 
     // 3. Approve plan
-    const approveRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/approve-plan`, {
+    currentRemoteState = 'AWAITING_PLAN_APPROVAL';
+    const approveRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/approve-plan`, {
       method: 'POST',
+      headers: { 'Idempotency-Key': 'approve-route-1', 'Content-Type': 'application/json' },
+      body: '{}',
     });
     assert.equal(approveRes.status, 200);
     assert.equal(approvedPlan, true);
 
     // 4. Send feedback
-    const feedbackRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/feedback`, {
+    currentRemoteState = 'AWAITING_USER_FEEDBACK';
+    const feedbackRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/feedback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: 'Focus on error handling' }),
+      body: JSON.stringify({ message: 'Focus on error handling', idempotencyKey: 'feedback-route-1' }),
     });
     assert.equal(feedbackRes.status, 200);
     assert.equal(feedbackReceived, 'Focus on error handling');
 
     // 5. List activities
-    const actRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/activities`);
+    const actRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/activities`);
     assert.equal(actRes.status, 200);
     const actData = await actRes.json();
     assert.equal(actData.activities.length, 1);
     assert.equal(actData.activities[0].id, 'act-1');
 
     // 6. Cancel session
-    const cancelRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/cancel`, {
+    const cancelRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/cancel`, {
       method: 'POST',
     });
     assert.equal(cancelRes.status, 501);
@@ -272,14 +294,14 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     assert.equal(remoteCancelled, false);
 
     // 7. Feature-gated import-pr endpoint returns 501
-    const importRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/import-pr`, {
+    const importRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/import-pr`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prHeadSha: 'a'.repeat(40), baseSha: 'b'.repeat(40) }),
     });
     assert.equal(importRes.status, 501);
     const importData = await importRes.json();
-    assert.equal(importData.code, 'JULES_PR_IMPORT_UNAVAILABLE');
+    assert.equal(importData.code, 'JULES_CAPABILITY_UNAVAILABLE');
   } finally {
     if (server) server.close();
     if (store) store.close();

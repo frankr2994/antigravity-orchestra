@@ -27,7 +27,7 @@ export function createApiRouter(store: Store, tasks: TaskManager, options: ApiRo
   router.use(createModelsRouter(store));
   router.use(createSettingsRouter(store));
   if (julesEnabled) {
-    router.use(composeJulesRouter({ store, rolloutStage: julesRolloutStage }));
+    router.use(composeJulesRouter({ store, tasks, rolloutStage: julesRolloutStage }));
   }
 
   return router;

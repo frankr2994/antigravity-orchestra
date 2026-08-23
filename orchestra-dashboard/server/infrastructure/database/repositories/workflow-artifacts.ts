@@ -43,6 +43,17 @@ export class ManagedGitResourceRepository {
     const row = this.db.prepare('SELECT * FROM managed_git_resources WHERE id=?').get(id);
     return row ? mapGitResource(row) : null;
   }
+  listByTask(taskId: string): ManagedGitResource[] {
+    return this.db.prepare('SELECT * FROM managed_git_resources WHERE task_id=? ORDER BY created_at').all(taskId).map(mapGitResource);
+  }
+  scheduleTaskCleanup(taskId: string, cleanupAfter = now()): void {
+    this.db.prepare("UPDATE managed_git_resources SET state='cleanup_pending',cleanup_after=?,updated_at=? WHERE task_id=? AND state='active'")
+      .run(cleanupAfter, now(), taskId);
+  }
+  scheduleOrphanedWorktreeCleanup(cleanupAfter = now()): number {
+    return Number(this.db.prepare("UPDATE managed_git_resources SET state='cleanup_pending',cleanup_after=?,updated_at=? WHERE kind='worktree' AND state='active'")
+      .run(cleanupAfter, now()).changes);
+  }
   scheduleCleanup(id: string, cleanupAfter = now()): ManagedGitResource {
     this.db.prepare("UPDATE managed_git_resources SET state='cleanup_pending',cleanup_after=?,updated_at=? WHERE id=? AND state!='cleaned'")
       .run(cleanupAfter, now(), id);

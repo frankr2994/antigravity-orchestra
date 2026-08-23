@@ -1,6 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import type { JulesSessionService } from '../../../application/jules/session-service.js';
-import { parseActivityPage, parseDispatchRequest, parseMessageRequest } from '../../../application/jules/requests.js';
+import { parseActivityPage, parseDispatchRequest, parseInteractionRequest, parseMessageRequest } from '../../../application/jules/requests.js';
 import type { JulesRolloutStage } from '../../../config.js';
 import { requireJulesCapability } from './capability.js';
 
@@ -23,13 +23,16 @@ export function createJulesSessionsRouter(service: JulesSessionService, stage: J
   router.post('/tasks/:id/jules/approve-plan', async (req, res, next) => {
     try {
       if (!requireJulesCapability(stage, 'interact', res)) return;
-      res.json(await service.approvePlan(id(req.params.id)));
+      const header = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined;
+      res.json(await service.approvePlan(id(req.params.id), parseInteractionRequest(req.body, header).idempotencyKey));
     } catch (error) { next(error); }
   });
   const message = async (req: Request, res: Response, next: NextFunction) => {
     try {
       if (!requireJulesCapability(stage, 'interact', res)) return;
-      res.json(await service.sendMessage(id(req.params.id), parseMessageRequest(req.body)));
+      const header = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined;
+      const command = parseMessageRequest(req.body, header);
+      res.json(await service.sendMessage(id(req.params.id), command.prompt, command.idempotencyKey));
     } catch (error) { next(error); }
   };
   router.post('/tasks/:id/jules/message', message);

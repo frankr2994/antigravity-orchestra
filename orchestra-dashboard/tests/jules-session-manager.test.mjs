@@ -7,6 +7,7 @@ import { git } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { JulesSessionManager } from '../dist-server/providers/jules/session-manager.js';
 import { JulesApiClient } from '../dist-server/providers/jules/client.js';
+import { generateDispatchBranchName } from '../dist-server/providers/jules/preflight.js';
 
 // ============================================================================
 // Phase 10 Jules Cloud Session Lifecycle Manager Test Suite
@@ -40,6 +41,8 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     const project = store.upsertProject({ name: 'test-proj', root: fixtureDir, gitRoot: fixtureDir });
     const session = store.createSession(project.id, 'Test Cloud Session');
     const task = store.createTask(project.id, session.id, 'Implement feature on cloud', null, null, 'cloud');
+    const expectedHead = (await git(['rev-parse', 'HEAD'], fixtureDir)).stdout.trim();
+    const expectedDispatch = generateDispatchBranchName(task.id, expectedHead);
 
     // 3. Mock Jules API Fetch
     let mockSessionState = 'QUEUED';
@@ -60,10 +63,13 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
           ok: true,
           status: 200,
           json: async () => ({
-            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra' } }],
+            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }] } }],
           }),
         };
       }
+      if (urlStr.includes('/sources/')) return { ok: true, status: 200, json: async () => ({
+        name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }, { displayName: expectedDispatch }] },
+      }) };
       if (urlStr.endsWith('/sessions') && (!opts?.method || opts.method === 'POST')) {
         return {
           ok: true,
@@ -123,6 +129,8 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     const savedCloud = store.manager.cloudSessions.getByTaskId(task.id);
     assert.equal(savedCloud?.remoteSessionId, 'sess-1234');
     assert.equal(savedCloud?.sourceName, 'sources/github/frankr2994/antigravity-orchestra');
+    assert.equal(store.manager.julesSourceMappings.get(project.id)?.startingBranch, expectedDispatch);
+    assert.equal(store.manager.managedGitResources.listCleanupDue().length, 0);
 
     // 5. Poll Session (In-Progress)
     mockSessionState = 'IN_PROGRESS';
@@ -132,6 +140,10 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     assert.equal(pollProgress.orchestraState, 'running');
     assert.equal(pollProgress.isTerminal, false);
     assert.equal(pollProgress.newActivitiesCount, 1);
+
+    const pollDuplicate = await manager.pollSession('sess-1234', { julesClient });
+    assert.equal(pollDuplicate.newActivitiesCount, 0, 'activity identities must be durable across polls');
+    assert.equal(store.manager.julesActivityReceipts.count(savedCloud.id), 1);
 
     // 6. Poll Session (Completed with PR)
     mockSessionState = 'COMPLETED';

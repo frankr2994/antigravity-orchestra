@@ -53,10 +53,13 @@ test('Phase 15 Router — Explicit targets are strictly respected', async () => 
 test('Phase 15 Router — Auto-routing decision matrix handles questions, quota, complexity, and fallbacks', async () => {
   const dbPath = join(tmpdir(), `orchestra-rt-db-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   const fixtureDir = join(tmpdir(), `orchestra-rt-auto-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const bareDir = join(tmpdir(), `orchestra-rt-auto-bare-${Date.now()}-${Math.random().toString(36).slice(2)}.git`);
   mkdirSync(fixtureDir, { recursive: true });
+  mkdirSync(bareDir, { recursive: true });
 
   try {
     // Setup git fixture
+    await git(['init', '--bare'], bareDir);
     await git(['init'], fixtureDir);
     await git(['config', 'user.name', 'Orchestra Test'], fixtureDir);
     await git(['config', 'user.email', 'test@orchestra.local'], fixtureDir);
@@ -65,9 +68,8 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
     await git(['commit', '-m', 'Initial commit'], fixtureDir);
     await git(['branch', '-M', 'main'], fixtureDir);
     await git(['remote', 'add', 'origin', 'https://github.com/frankr2994/antigravity-orchestra.git'], fixtureDir);
-    await git(['update-ref', 'refs/remotes/origin/main', 'HEAD'], fixtureDir);
-    await git(['config', 'branch.main.remote', 'origin'], fixtureDir);
-    await git(['config', 'branch.main.merge', 'refs/heads/main'], fixtureDir);
+    await git(['remote', 'set-url', '--push', 'origin', bareDir], fixtureDir);
+    await git(['push', '-u', 'origin', 'main'], fixtureDir);
 
     const store = new Store(dbPath);
     const project = store.upsertProject({ name: 'test-auto', root: fixtureDir, gitRoot: fixtureDir });
@@ -81,9 +83,16 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
           ok: true,
           status: 200,
           json: async () => ({
-            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra' } }],
+            sources: [{ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: { owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }] } }],
           }),
         };
+      }
+      if (urlStr.includes('/sources/')) {
+        const refs = await git(['ls-remote', '--heads', bareDir, 'refs/heads/orchestra/jules/*'], fixtureDir);
+        const branch = refs.stdout.trim().split(/\s+/)[1]?.replace('refs/heads/', '');
+        return { ok: true, status: 200, json: async () => ({ name: 'sources/github/frankr2994/antigravity-orchestra', githubRepo: {
+          owner: 'frankr2994', repo: 'antigravity-orchestra', branches: [{ displayName: 'main' }, ...(branch ? [{ displayName: branch }] : [])],
+        } }) };
       }
       return { ok: true, status: 200, json: async () => ({}) };
     };
@@ -181,5 +190,6 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
+    try { rmSync(bareDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
   }
 });

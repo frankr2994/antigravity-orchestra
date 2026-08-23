@@ -260,6 +260,10 @@ export interface CloudPrImportedEvent extends BaseTaskEvent {
   type: 'cloud.pr_imported';
   payload: { prUrl: string; branch?: string; [key: string]: unknown };
 }
+export interface CloudIntegratedEvent extends BaseTaskEvent {
+  type: 'cloud.integrated';
+  payload: { prUrl: string; baseSha: string; headSha: string; targetBranch: string };
+}
 
 // ----------------------------------------------------------------------------
 // System & Routing Events
@@ -350,6 +354,7 @@ export type TaskEvent =
   | CloudFailedEvent
   | CloudCancelledEvent
   | CloudPrImportedEvent
+  | CloudIntegratedEvent
   | RoutingDecisionEvent
   | RoutingAdjustmentEvent
   | McpCapabilityEvent
@@ -371,6 +376,7 @@ export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
   'cloud.dispatching', 'cloud.dispatched', 'cloud.activity', 'cloud.plan_received',
   'cloud.plan_approved', 'cloud.message_sent', 'cloud.feedback_sent', 'cloud.repair_requested',
   'cloud.reviewed', 'cloud.completed', 'cloud.failed', 'cloud.cancelled', 'cloud.pr_imported',
+  'cloud.integrated',
   'routing.decision', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'warning',
   'provider.telemetry', 'project.onboarding',
 ];

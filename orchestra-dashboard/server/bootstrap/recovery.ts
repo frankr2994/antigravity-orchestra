@@ -27,6 +27,9 @@ export async function restoreInterruptedTask(store: Store, taskId: string) {
 }
 
 export async function reconcileStartupTasks(store: Store): Promise<string[]> {
+  // A live process cannot still own a worktree recorded by a previous process.
+  // Dispatch refs remain active until their owning workflow reaches cleanup.
+  store.manager.managedGitResources.scheduleOrphanedWorktreeCleanup();
   const recoveredTasks = store.recoverInterruptedTasks();
   const interruptedTasks = [...new Set([
     ...recoveredTasks,
@@ -35,6 +38,26 @@ export async function reconcileStartupTasks(store: Store): Promise<string[]> {
 
   for (const taskId of interruptedTasks) {
     await restoreInterruptedTask(store, taskId);
+  }
+
+  for (const intent of store.manager.commandIntents.listPending()) {
+    if (intent.kind !== 'jules.dispatch' || !['pending', 'ambiguous'].includes(intent.state)) continue;
+    const cloud = store.manager.cloudSessions.getByTaskId(intent.taskId);
+    const task = store.getTask(intent.taskId);
+    if (!cloud || !task) continue;
+    const response = { ok: true, taskId: task.id, sessionId: task.sessionId, remoteSessionId: cloud.remoteSessionId, cloudSession: cloud };
+    store.manager.transaction(() => {
+      store.manager.commandIntents.transition(intent.id, intent.state, 'acknowledged', {
+        attemptId: cloud.attemptId, providerResource: cloud.sessionResourceName, response,
+      });
+      store.manager.checkpoints.append({ taskId: task.id, attemptId: cloud.attemptId, stage: 'dispatch', subjectSha: cloud.baseSha,
+        data: { status: 'startup_reconciled', remoteSessionId: cloud.remoteSessionId } });
+    });
+  }
+  for (const cloud of store.manager.cloudSessions.listNonTerminal()) store.manager.activityCursors.ensure(cloud.id);
+  store.manager.julesCapacity.releaseTerminalTasks();
+  for (const task of store.listTasks().filter((item) => item.target === 'cloud' && !['completed', 'completed_unpushed', 'failed', 'cancelled', 'review_disputed'].includes(item.state))) {
+    store.manager.julesCapacity.restore(task.id);
   }
 
   if (interruptedTasks.length) {

@@ -23,13 +23,15 @@ export interface RunOptions {
   signal?: AbortSignal;
   onStdout?: (chunk: string) => void;
   onStderr?: (chunk: string) => void;
+  inheritEnv?: boolean;
+  maxOutputChars?: number;
 }
 
 export function runProcess(command: string, args: string[], options: RunOptions = {}): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: { ...(options.inheritEnv === false ? {} : process.env), ...options.env },
       shell: false,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -53,8 +55,10 @@ export function runProcess(command: string, args: string[], options: RunOptions 
     };
     resetIdleTimer();
     options.signal?.addEventListener('abort', abort, { once: true });
-    child.stdout.on('data', (data: Buffer) => { const chunk = data.toString(); stdout += chunk; resetIdleTimer(); options.onStdout?.(chunk); });
-    child.stderr.on('data', (data: Buffer) => { const chunk = data.toString(); stderr += chunk; resetIdleTimer(); options.onStderr?.(chunk); });
+    const maxOutput = options.maxOutputChars ?? 2_000_000;
+    const bounded = (current: string, chunk: string) => `${current}${chunk}`.slice(-maxOutput);
+    child.stdout.on('data', (data: Buffer) => { const chunk = data.toString(); stdout = bounded(stdout, chunk); resetIdleTimer(); options.onStdout?.(chunk); });
+    child.stderr.on('data', (data: Buffer) => { const chunk = data.toString(); stderr = bounded(stderr, chunk); resetIdleTimer(); options.onStderr?.(chunk); });
     child.on('error', (error) => finish(error));
     child.on('close', (code) => finish(undefined, code ?? -1));
     if (options.input !== undefined) child.stdin.end(options.input); else child.stdin.end();

@@ -16,6 +16,10 @@ import {
   ManagedGitResourceRepository,
   WorkflowEvidenceRepository,
   WorkflowOutboxRepository,
+  JulesSourceMappingRepository,
+  JulesActivityReceiptRepository,
+  CloudWorkflowRepository,
+  JulesCapacityRepository,
 } from './repositories/index.js';
 
 // ============================================================================
@@ -41,6 +45,10 @@ export class DatabaseManager {
   readonly managedGitResources: ManagedGitResourceRepository;
   readonly evidence: WorkflowEvidenceRepository;
   readonly outbox: WorkflowOutboxRepository;
+  readonly julesSourceMappings: JulesSourceMappingRepository;
+  readonly julesActivityReceipts: JulesActivityReceiptRepository;
+  readonly cloudWorkflows: CloudWorkflowRepository;
+  readonly julesCapacity: JulesCapacityRepository;
 
   constructor(databasePath: string) {
     this.db = new DatabaseSync(databasePath);
@@ -62,6 +70,10 @@ export class DatabaseManager {
     this.managedGitResources = new ManagedGitResourceRepository(this.db);
     this.evidence = new WorkflowEvidenceRepository(this.db);
     this.outbox = new WorkflowOutboxRepository(this.db);
+    this.julesSourceMappings = new JulesSourceMappingRepository(this.db);
+    this.julesActivityReceipts = new JulesActivityReceiptRepository(this.db);
+    this.cloudWorkflows = new CloudWorkflowRepository(this.db);
+    this.julesCapacity = new JulesCapacityRepository(this.db);
   }
 
   transaction<T>(work: () => T): T {

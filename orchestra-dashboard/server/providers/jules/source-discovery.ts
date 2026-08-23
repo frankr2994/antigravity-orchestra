@@ -3,6 +3,8 @@ import { CredentialVault } from '../../infrastructure/security/vault.js';
 import { JulesApiClient } from './client.js';
 import { resolveJulesApiKey } from './credentials.js';
 import type { JulesSource } from './types.js';
+import { parseGitHubRepositoryRemote, sameGitHubRepository } from '../../domain/github-repository.js';
+import { JulesApiError } from './errors.js';
 
 // ============================================================================
 // Google Jules Source Repository Discovery & Mapping
@@ -13,7 +15,10 @@ export type JulesSourceDiscoveryStatus =
   | 'remote_missing'
   | 'unsupported_host'
   | 'source_not_installed'
-  | 'credentials_missing';
+  | 'credentials_missing'
+  | 'source_conflict'
+  | 'branch_missing'
+  | 'provider_unavailable';
 
 export interface GitRemoteInfo {
   name: string;
@@ -37,48 +42,9 @@ export interface JulesSourceDiscoveryResult {
 }
 
 export function parseGitRemoteUrl(rawUrl: string, remoteName = 'origin'): GitRemoteInfo | null {
-  if (!rawUrl || !rawUrl.trim()) return null;
-  const clean = rawUrl.trim();
-
-  // 1. SSH format: git@github.com:owner/repo.git or ssh://git@github.com/owner/repo.git
-  const sshMatch = clean.match(/^(?:git@|ssh:\/\/git@)([^:/]+)[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
-  if (sshMatch) {
-    const host = sshMatch[1].toLowerCase();
-    const owner = sshMatch[2];
-    const repo = sshMatch[3];
-    return {
-      name: remoteName,
-      url: clean,
-      host,
-      owner,
-      repo,
-      isGitHub: host === 'github.com',
-    };
-  }
-
-  // 2. HTTPS format: https://github.com/owner/repo.git
   try {
-    const parsed = new URL(clean);
-    const host = parsed.hostname.toLowerCase();
-    const parts = parsed.pathname.split('/').filter(Boolean);
-    if (parts.length >= 2) {
-      const owner = parts[0];
-      const repo = parts[1].replace(/\.git$/i, '');
-      return {
-        name: remoteName,
-        url: clean,
-        host,
-        owner,
-        repo,
-        isGitHub: host === 'github.com',
-      };
-    }
-    return {
-      name: remoteName,
-      url: clean,
-      host,
-      isGitHub: host === 'github.com',
-    };
+    const parsed = parseGitHubRepositoryRemote(rawUrl);
+    return { name: remoteName, url: parsed.canonicalUrl, host: parsed.host, owner: parsed.owner, repo: parsed.repo, isGitHub: true };
   } catch {
     return null;
   }
@@ -119,6 +85,7 @@ export async function discoverJulesSource(
   options?: {
     vault?: CredentialVault;
     julesClient?: JulesApiClient;
+    startingBranch?: string;
   }
 ): Promise<JulesSourceDiscoveryResult> {
   const remotes = await getProjectGitRemotes(projectRoot);
@@ -137,7 +104,6 @@ export async function discoverJulesSource(
   if (!primaryRemote.isGitHub || !primaryRemote.owner || !primaryRemote.repo) {
     return {
       status: 'unsupported_host',
-      remoteUrl: primaryRemote.url,
       diagnostic: `Remote '${primaryRemote.name}' points to '${primaryRemote.host}', which is not supported by Google Jules.`,
       resolution: 'Google Jules requires a GitHub repository. Add or switch your remote to GitHub (e.g. https://github.com/owner/repo).',
     };
@@ -175,33 +141,31 @@ export async function discoverJulesSource(
       }
       pageToken = response.nextPageToken;
     } while (pageToken);
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
+  } catch (error) {
     return {
-      status: 'credentials_missing',
+      status: error instanceof JulesApiError && (error.status === 401 || error.status === 403) ? 'credentials_missing' : 'provider_unavailable',
       githubOwner,
       githubRepo,
       remoteUrl: primaryRemote.url,
-      diagnostic: `Failed to query Jules sources: ${message}`,
-      resolution: 'Verify your Google Jules API key has access to the Jules REST API.',
+      diagnostic: error instanceof JulesApiError && (error.status === 401 || error.status === 403)
+        ? 'Jules rejected the configured credentials.' : 'Jules source discovery is temporarily unavailable.',
+      resolution: 'Verify connectivity and credentials, then retry source discovery.',
     };
   }
 
-  // Match source (case-insensitive)
-  const matchedSource = sources.find((source) => {
-    // Check 1: sources/github/owner/repo in source.name
-    const nameMatch = source.name.toLowerCase().endsWith(`/github/${targetIdentifier}`) ||
-      source.name.toLowerCase() === `sources/github/${targetIdentifier}`;
-    if (nameMatch) return true;
-
-    // Check 2: source.githubRepo { owner, repo }
-    if (source.githubRepo) {
-      const srcId = `${source.githubRepo.owner}/${source.githubRepo.repo}`.toLowerCase();
-      if (srcId === targetIdentifier) return true;
-    }
-
-    return false;
-  });
+  // Provider names are opaque. Only the structured repository contract is authoritative.
+  const matches = sources.filter((source) => source.githubRepo && sameGitHubRepository(
+    { owner: githubOwner, repo: githubRepo },
+    source.githubRepo,
+  ));
+  if (matches.length > 1) {
+    return {
+      status: 'source_conflict', githubOwner, githubRepo, remoteUrl: primaryRemote.url,
+      diagnostic: `Jules returned multiple sources for '${targetIdentifier}'.`,
+      resolution: 'Remove the duplicate Jules source installation before dispatching.',
+    };
+  }
+  const matchedSource = matches[0];
 
   if (!matchedSource) {
     return {
@@ -213,6 +177,20 @@ export async function discoverJulesSource(
       diagnostic: `GitHub repository '${githubOwner}/${githubRepo}' is not connected to Google Jules.`,
       resolution: `Install the Google Jules GitHub App on '${githubOwner}/${githubRepo}' at https://jules.google.com to enable cloud worker execution.`,
     };
+  }
+
+  if (options?.startingBranch) {
+    const branches = matchedSource.githubRepo?.branches?.map((branch) => branch.displayName) ?? [];
+    const defaultBranch = matchedSource.githubRepo?.defaultBranch?.displayName;
+    if (defaultBranch) branches.push(defaultBranch);
+    if (!branches.includes(options.startingBranch)) {
+      return {
+        status: 'branch_missing', githubOwner, githubRepo, remoteUrl: primaryRemote.url,
+        sourceName: matchedSource.name, sourceResource: matchedSource,
+        diagnostic: `Branch '${options.startingBranch}' is not advertised by the matched Jules source.`,
+        resolution: 'Refresh the Jules source after pushing the branch, then retry dispatch.',
+      };
+    }
   }
 
   return {

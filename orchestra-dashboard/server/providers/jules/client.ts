@@ -16,6 +16,7 @@ import {
   parseJulesSession,
   parseJulesSource,
 } from './validation.js';
+import { recordJulesRequest } from './metrics.js';
 
 // ============================================================================
 // Google Jules REST API Client (Authoritative Alpha)
@@ -76,6 +77,7 @@ export class JulesApiClient {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      const startedAt = Date.now();
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(new Error('Request timed out')), this.timeoutMs);
 
@@ -95,6 +97,7 @@ export class JulesApiClient {
           body: body !== undefined ? JSON.stringify(body) : undefined,
           signal: controller.signal,
         });
+        recordJulesRequest(cleanEndpoint, response.status, Date.now() - startedAt);
 
         clearTimeout(timeoutId);
         if (signal) signal.removeEventListener('abort', abortHandler);
@@ -151,6 +154,7 @@ export class JulesApiClient {
         clearTimeout(timeoutId);
         if (signal) signal.removeEventListener('abort', abortHandler);
 
+        if (!(err instanceof JulesApiError) && !(err instanceof JulesContractError)) recordJulesRequest(cleanEndpoint, null, Date.now() - startedAt);
         if (err instanceof JulesApiError) {
           throw err;
         }

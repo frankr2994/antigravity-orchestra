@@ -166,6 +166,7 @@ export async function executeDualEngineRepair(
       reason: decision.reason,
       findingsCount: findings.length,
     });
+    store.manager.julesCapacity.release(taskId);
     onEvent?.({
       name: 'task.disputed',
       payload: { taskId, cycle, reason: decision.reason },
@@ -215,6 +216,11 @@ export async function executeDualEngineRepair(
     // Update cloud session state & task state
     if (cloudSession) {
       store.manager.cloudSessions.update(cloudSession.id, { state: 'IN_PROGRESS' });
+      const cursor = store.manager.activityCursors.ensure(cloudSession.id);
+      store.manager.activityCursors.compareAndSet(cloudSession.id, cursor.version, {
+        nextPollAt: new Date().toISOString(), consecutiveFailures: 0, lastErrorCode: null,
+        lastActivityId: cursor.lastActivityId, lastActivityAt: cursor.lastActivityAt,
+      });
     }
     store.updateTask(taskId, { state: 'running' });
 

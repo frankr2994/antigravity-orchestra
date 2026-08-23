@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import { runProcess } from './process.js';
+import { parseGitHubRepositoryRemote } from './domain/github-repository.js';
 
 export interface GitStatus {
   isGit: boolean;
@@ -22,7 +23,7 @@ export async function getGitStatus(cwd: string): Promise<GitStatus> {
   const [status, branch, head, upstream] = await Promise.all([
     git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], root),
     git(['branch', '--show-current'], root),
-    git(['rev-parse', '--short', 'HEAD'], root).catch(() => ({ code: 1, stdout: '', stderr: '' })),
+    git(['rev-parse', 'HEAD'], root).catch(() => ({ code: 1, stdout: '', stderr: '' })),
     git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], root).catch(() => ({ code: 1, stdout: '', stderr: '' })),
   ]);
   const entries = status.stdout.split('\0').filter(Boolean);
@@ -89,15 +90,13 @@ export function extractGitHubRemoteUrl(text: string): string | null {
 }
 
 export function validateGitHubRemoteUrl(value: string) {
-  const url = new URL(value.trim());
-  const segments = url.pathname.split('/').filter(Boolean);
-  if (url.protocol !== 'https:' || url.hostname.toLowerCase() !== 'github.com' || url.username || url.password || url.search || url.hash || segments.length !== 2) {
+  let remote;
+  try { remote = parseGitHubRepositoryRemote(value); }
+  catch { throw new Error('The local remote connector accepts only a plain HTTPS GitHub repository URL such as https://github.com/owner/repository.'); }
+  if (!value.trim().startsWith('https://')) {
     throw new Error('The local remote connector accepts only a plain HTTPS GitHub repository URL such as https://github.com/owner/repository.');
   }
-  const owner = segments[0];
-  const repository = segments[1].replace(/\.git$/i, '');
-  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repository) || !repository) throw new Error('The GitHub repository URL contains an unsupported owner or repository name.');
-  return `https://github.com/${owner}/${repository}`;
+  return remote.canonicalUrl;
 }
 
 export async function connectGitHubRemote(cwd: string, requestedUrl: string) {

@@ -1,7 +1,9 @@
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
 import { git, getGitStatus } from '../../git.js';
 import { verifyProject, type VerificationResult } from '../../verification.js';
+import { config } from '../../config.js';
 
 // ============================================================================
 // Google Jules Worktree-Isolated Pull Request Review Engine
@@ -31,8 +33,15 @@ export interface WorktreeReviewResult {
 }
 
 export function getWorktreePath(projectRoot: string, taskId: string): string {
-  const cleanTaskId = taskId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32);
-  return join(projectRoot, '.orchestra', 'worktrees', cleanTaskId);
+  const cleanTaskId = taskId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64);
+  if (!cleanTaskId) throw new TypeError('A stable task identity is required for a managed worktree.');
+  const repository = createHash('sha256').update(resolve(projectRoot).toLowerCase()).digest('hex').slice(0, 16);
+  return join(config.dataDir, 'review-worktrees', repository, cleanTaskId);
+}
+
+function assertManagedWorktreePath(path: string): void {
+  const base = resolve(config.dataDir, 'review-worktrees'); const target = resolve(path); const child = relative(base, target);
+  if (!child || child.startsWith('..') || resolve(base, child) !== target) throw new Error('Refusing to modify an unmanaged worktree path.');
 }
 
 export async function fetchPullRequestRef(
@@ -105,6 +114,7 @@ export async function createIsolatedWorktree(
   commitShaOrRef: string
 ): Promise<string> {
   const worktreePath = getWorktreePath(projectRoot, taskId);
+  assertManagedWorktreePath(worktreePath);
   mkdirSync(dirname(worktreePath), { recursive: true });
 
   // If a worktree already exists at this path, remove it cleanly first
@@ -126,18 +136,14 @@ export async function createIsolatedWorktree(
 }
 
 export async function cleanupIsolatedWorktree(projectRoot: string, worktreePath: string): Promise<void> {
-  try {
-    await git(['worktree', 'remove', '--force', worktreePath], projectRoot).catch(() => null);
-    await git(['worktree', 'prune'], projectRoot).catch(() => null);
-  } finally {
-    if (existsSync(worktreePath)) {
-      try {
-        rmSync(worktreePath, { recursive: true, force: true });
-      } catch {
-        /* Windows file lock fallback */
-      }
-    }
+  assertManagedWorktreePath(worktreePath);
+  await git(['worktree', 'remove', '--force', worktreePath], projectRoot).catch(() => null);
+  await git(['worktree', 'prune'], projectRoot).catch(() => null);
+  for (let attempt = 0; existsSync(worktreePath) && attempt < 3; attempt += 1) {
+    try { rmSync(worktreePath, { recursive: true, force: true }); } catch { /* retry expected Windows locks */ }
+    if (existsSync(worktreePath)) await new Promise((resolveDelay) => setTimeout(resolveDelay, 50 * (attempt + 1)));
   }
+  if (existsSync(worktreePath)) throw new Error('Managed worktree cleanup remains pending because files are locked.');
 }
 
 export async function runWorktreeReview(options: WorktreeReviewOptions): Promise<WorktreeReviewResult> {
@@ -147,6 +153,9 @@ export async function runWorktreeReview(options: WorktreeReviewOptions): Promise
   let worktreePath: string | null = null;
 
   try {
+    if (!/^[0-9a-f]{40}$/i.test(baseSha) || (headSha && !/^[0-9a-f]{40}$/i.test(headSha))) {
+      throw new Error('Worktree review requires exact full Git commit identities.');
+    }
     // 1. Fetch remote ref if not skipped
     if (!skipFetch) {
       const fetchRes = await fetchPullRequestRef(projectRoot, { prNumber, headBranch, headSha });
@@ -177,6 +186,10 @@ export async function runWorktreeReview(options: WorktreeReviewOptions): Promise
 
     // 2. Create isolated worktree
     worktreePath = await createIsolatedWorktree(projectRoot, taskId, resolvedHeadSha);
+    const checkedOut = await git(['rev-parse', '--verify', 'HEAD^{commit}'], worktreePath);
+    if (checkedOut.code !== 0 || checkedOut.stdout.trim().toLowerCase() !== resolvedHeadSha.toLowerCase()) {
+      throw new Error('The isolated worktree did not resolve to the requested review commit.');
+    }
 
     // 3. Compute exact diff between baseSha and worktree HEAD
     const [diffResult, nameOnlyResult] = await Promise.all([
@@ -189,6 +202,9 @@ export async function runWorktreeReview(options: WorktreeReviewOptions): Promise
       .split(/\r?\n/)
       .map((f) => f.trim())
       .filter(Boolean);
+    if (diff.length >= 1_900_000 || changedFiles.length > 1_000) {
+      throw new Error('The pull request exceeds the bounded local review limits.');
+    }
 
     // 4. Run project verification within worktree
     let verificationResults: VerificationResult[] = [];
@@ -197,7 +213,7 @@ export async function runWorktreeReview(options: WorktreeReviewOptions): Promise
     if (!skipVerification) {
       const abortSignal = signal ?? new AbortController().signal;
       verificationResults = await verifyProject(worktreePath, abortSignal);
-      verified = verificationResults.every((r) => r.code === 0);
+      verified = verificationResults.length > 0 && verificationResults.every((r) => r.code === 0);
     }
 
     return {
@@ -224,6 +240,7 @@ export async function runWorktreeReview(options: WorktreeReviewOptions): Promise
   } finally {
     // 5. Guaranteed cleanup of isolated worktree
     if (worktreePath) {
+      // Cleanup failure must replace a misleading successful review result.
       await cleanupIsolatedWorktree(projectRoot, worktreePath);
     }
   }

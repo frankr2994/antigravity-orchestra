@@ -29,12 +29,11 @@ test('Phase 8 Source Discovery — parseGitRemoteUrl handles HTTPS and SSH Git r
   assert.equal(sshGit?.owner, 'torvalds');
   assert.equal(sshGit?.repo, 'linux');
 
-  // 4. Non-GitHub host (GitLab)
-  const gitlab = parseGitRemoteUrl('https://gitlab.com/group/project.git');
-  assert.equal(gitlab?.isGitHub, false);
-  assert.equal(gitlab?.host, 'gitlab.com');
-  assert.equal(gitlab?.owner, 'group');
-  assert.equal(gitlab?.repo, 'project');
+  // 4. Non-GitHub and credential-bearing remotes fail closed
+  assert.equal(parseGitRemoteUrl('https://gitlab.com/group/project.git'), null);
+  assert.equal(parseGitRemoteUrl('https://token@github.com/group/project.git'), null);
+  assert.equal(parseGitRemoteUrl('http://github.com/group/project.git'), null);
+  assert.equal(parseGitRemoteUrl('https://github.com/group/project/extra'), null);
 
   // 5. Invalid URL
   assert.equal(parseGitRemoteUrl('not-a-valid-url'), null);
@@ -112,5 +111,16 @@ test('Phase 8 Source Discovery — discoverJulesSource returns credentials_missi
 
   const result = await discoverJulesSource(process.cwd(), { julesClient });
   assert.equal(result.status, 'credentials_missing');
-  assert.match(result.diagnostic, /Failed to query Jules sources/i);
+  assert.match(result.diagnostic, /rejected the configured credentials/i);
+});
+
+test('Phase 8 Source Discovery — opaque source names cannot override structured repository identity', async () => {
+  const julesClient = new JulesApiClient({ apiKey: 'test-key', fetchFn: async () => ({
+    ok: true, status: 200, json: async () => ({ sources: [{
+      name: 'sources/github/frankr2994/antigravity-orchestra',
+      githubRepo: { owner: 'attacker', repo: 'different' },
+    }] }),
+  }) });
+  const result = await discoverJulesSource(process.cwd(), { julesClient });
+  assert.equal(result.status, 'source_not_installed');
 });

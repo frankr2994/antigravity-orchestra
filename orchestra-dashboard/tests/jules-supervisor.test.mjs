@@ -121,6 +121,11 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     assert.equal(terminalEventReceived, null);
 
     // 2. Tick 2: Completed
+    const cursor = store.manager.activityCursors.get(createdCloud.id);
+    store.manager.activityCursors.compareAndSet(createdCloud.id, cursor.version, {
+      nextPollAt: '2000-01-01T00:00:00.000Z', consecutiveFailures: 0,
+      lastActivityId: cursor.lastActivityId, lastActivityAt: cursor.lastActivityAt,
+    });
     currentRemoteState = 'COMPLETED';
     const tick2 = await supervisor.tick();
     assert.equal(tick2.polled, 1);

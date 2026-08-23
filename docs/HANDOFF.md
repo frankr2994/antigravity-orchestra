@@ -131,3 +131,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * Moved frontend API contracts plus shared UI/format primitives out of the application root and added architecture ratchets preventing regression.
 * Verification: dashboard lint, production build, and all 147 offline automated tests pass.
 
+## 2026-08-23 — Jules end-to-end implementation milestone
+
+- Completed strict Jules source discovery, immutable dispatch branches, durable idempotent commands, fenced polling/recovery, exact PR verification/review/repair/integration, and ownership-aware cleanup.
+- Added configurable parallel Jules workflows with dependency DAGs and durable global capacity reservations; the default concurrency is 2 and no provider account limit is hardcoded.
+- Added deterministic auto-routing, feature-specific Jules UI, authenticated operational status, and sanitized provider metrics.
+- Preserved staged rollout and truthful lifecycle behavior: Jules defaults off; unsupported pause/resume/cancel return unavailable rather than recording false success.
+- Added schema migrations through v8 and modular repositories/application services for sources, activity receipts, capacity, batches, cleanup, routing, operations, and PR review.
+- Offline verification: `npm run check` passes 150/150 tests, including temporary-local-Git immutable dispatch and exact PR integration. No live Jules API key or provider repository was used; credentialed smoke acceptance remains required before production rollout.

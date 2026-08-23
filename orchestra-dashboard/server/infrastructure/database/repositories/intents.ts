@@ -61,14 +61,14 @@ export class CommandIntentRepository {
     return this.db.prepare("SELECT * FROM command_intents WHERE state IN ('pending','ambiguous') ORDER BY created_at").all().map(mapIntent);
   }
   transition(id: string, expected: CommandIntentState, next: CommandIntentState, fields: {
-    providerResource?: string | null; response?: Record<string, unknown> | null; errorCode?: string | null;
+    attemptId?: string | null; providerResource?: string | null; response?: Record<string, unknown> | null; errorCode?: string | null;
   } = {}): CommandIntent {
     const response = fields.response === undefined ? undefined
       : fields.response === null ? null : encodeJsonRecord(fields.response, 'command response');
-    const result = this.db.prepare(`UPDATE command_intents SET state=?,
+    const result = this.db.prepare(`UPDATE command_intents SET state=?,attempt_id=COALESCE(?,attempt_id),
       provider_resource=COALESCE(?,provider_resource), response_json=COALESCE(?,response_json),
       error_code=?, updated_at=? WHERE id=? AND state=?`)
-      .run(next, fields.providerResource ?? null, response ?? null, fields.errorCode ?? null, now(), id, expected);
+      .run(next, fields.attemptId ?? null, fields.providerResource ?? null, response ?? null, fields.errorCode ?? null, now(), id, expected);
     if (Number(result.changes) !== 1) throw new Error(`Command intent ${id} is no longer ${expected}`);
     return this.getById(id)!;
   }

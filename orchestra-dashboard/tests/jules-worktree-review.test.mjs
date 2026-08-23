@@ -17,7 +17,8 @@ import {
 
 test('Phase 11 Worktree Review — getWorktreePath generates clean isolated paths', () => {
   const path = getWorktreePath('F:/my-repo', 'task-1234-abcd');
-  assert.equal(path.replace(/\\/g, '/'), 'F:/my-repo/.orchestra/worktrees/task-1234-abcd');
+  assert.match(path.replace(/\\/g, '/'), /\/review-worktrees\/[0-9a-f]{16}\/task-1234-abcd$/);
+  assert.equal(path.replace(/\\/g, '/').startsWith('F:/my-repo/'), false);
 });
 
 test('Phase 11 Worktree Review — createIsolatedWorktree and cleanupIsolatedWorktree', async () => {

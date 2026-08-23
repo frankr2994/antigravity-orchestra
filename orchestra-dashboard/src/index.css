@@ -603,3 +603,19 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 @media (max-width: 620px) {
   .app-shell { display: block; }.sidebar { position: static; width: 100%; height: auto; min-height: 0; flex-direction: row; align-items: center; padding: 8px; }.brand { padding: 0 6px; }.sidebar nav { display: flex; flex: 1; justify-content: center; }.sidebar-project { margin: 0; }.content { padding: 24px 15px; }.chat-panel { height: 80vh; height: 80dvh; min-height: 480px; max-height: none; }.project-card { grid-template-columns: auto 1fr; }.project-actions { grid-column: 1 / -1; }.summary-strip, .monitor-grid { grid-template-columns: 1fr; gap: 12px; }.summary-strip div { border: 0; }.page-header, .live-monitor > header { flex-direction: column; }.page-header .primary { width: 100%; }
 }
+.jules-task-panel { margin: 0 0 18px; padding: 16px; border: 1px solid rgba(91,192,255,.28); border-radius: 12px; background: rgba(10,28,45,.72); display: grid; gap: 12px; }
+.jules-task-panel > header, .jules-task-panel > header > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.jules-task-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: 10px; }
+.jules-task-grid > div { display: grid; gap: 4px; min-width: 0; }
+.jules-task-grid span, .jules-task-panel > small { color: var(--muted); font-size: 11px; }
+.jules-task-grid strong, .jules-task-grid code { overflow: hidden; text-overflow: ellipsis; }
+.jules-task-panel > a { display: inline-flex; align-items: center; gap: 6px; color: var(--cyan); }
+.jules-task-panel > p { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted); }
+.jules-message { display: flex; align-items: flex-end; gap: 8px; }
+.jules-message textarea { flex: 1; }
+.jules-notice { color: var(--cyan) !important; }
+.jules-settings-card { margin: 0 0 20px; padding: 16px; border: 1px solid rgba(91,192,255,.25); border-radius: 12px; background: rgba(10,28,45,.58); display: grid; gap: 10px; }
+.jules-settings-card header, .jules-settings-card header > div, .jules-key-row { display: flex; align-items: center; gap: 8px; }
+.jules-settings-card header { justify-content: space-between; }
+.jules-settings-card p { color: var(--muted); margin: 0; }
+.jules-key-row input { flex: 1; min-width: 180px; }
