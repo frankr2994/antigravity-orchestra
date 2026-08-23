@@ -204,3 +204,30 @@ test('Phase 2 Architecture — Negative Cycle Detection Fixture Verification', (
   const detectedCycles = detectCycles(mockGraphWithCycle);
   assert.ok(detectedCycles.length > 0, 'Circular dependency algorithm must detect intentional cycle');
 });
+
+test('Modularity ratchet — Jules controllers depend only on application/config and shared HTTP code', () => {
+  const controllerDir = join(serverDir, 'api', 'routes', 'jules');
+  const violations = getSourceFiles(controllerDir).flatMap((file) => {
+    const content = readFileSync(file, 'utf8');
+    return /from\s+['"][^'"]*(?:providers|infrastructure|db\.js|tasks\.js)[^'"]*['"]/.test(content)
+      ? [file.replace(serverDir, '').replace(/\\/g, '/')]
+      : [];
+  });
+  assert.deepEqual(violations, []);
+});
+
+test('Modularity ratchet — TaskManager delegates scheduling, events, and Git finalization', () => {
+  const taskManager = readFileSync(join(serverDir, 'tasks.ts'), 'utf8');
+  assert.match(taskManager, /ProjectTaskScheduler/);
+  assert.match(taskManager, /TaskEventPublisher/);
+  assert.match(taskManager, /GitFinalizationService/);
+  assert.doesNotMatch(taskManager, /new EventEmitter|private readonly queue|private readonly controllers/);
+});
+
+test('Modularity ratchet — frontend contracts and UI primitives stay outside App', () => {
+  const app = readFileSync(resolve(serverDir, '..', 'src', 'App.tsx'), 'utf8');
+  assert.match(app, /from ['"]\.\/app\/types['"]/);
+  assert.match(app, /from ['"]\.\/shared\/ui['"]/);
+  assert.doesNotMatch(app, /^type (?:Project|Task|TaskEvent|SettingsData)\s*=/m);
+  assert.doesNotMatch(app, /^function (?:Metric|PageHeader|Card|NavButton|Empty|StatusDot|StateBadge|Field)\b/m);
+});

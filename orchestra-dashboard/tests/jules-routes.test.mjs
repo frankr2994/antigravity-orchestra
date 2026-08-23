@@ -8,7 +8,8 @@ import { git } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
 import { CredentialVault } from '../dist-server/infrastructure/security/vault.js';
 import { JulesApiClient } from '../dist-server/providers/jules/client.js';
-import { createJulesRouter } from '../dist-server/api/routes/jules.js';
+import { composeJulesRouter } from '../dist-server/bootstrap/jules-module.js';
+import { errorHandlerMiddleware } from '../dist-server/api/middleware/error.js';
 
 const testProtector = {
   scheme: 'windows-dpapi-current-user',
@@ -47,7 +48,7 @@ test('Phase 16 Routes — Credential and source endpoints', async () => {
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createJulesRouter({ store, vault, julesClient, rolloutStage: 'connect' }));
+    app.use('/api', composeJulesRouter({ store, vault, julesClient, rolloutStage: 'connect' }));
 
     server = app.listen(0);
     const port = server.address().port;
@@ -117,10 +118,13 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
 
     const project = store.upsertProject({ name: 'route-test-proj', root: fixtureDir, gitRoot: fixtureDir });
     const session = store.createSession(project.id, 'Route Test Session');
+    const otherProject = store.upsertProject({ name: 'other-route-project', root: `${fixtureDir}-other`, gitRoot: null });
+    const otherSession = store.createSession(otherProject.id, 'Other Session');
 
     let approvedPlan = false;
     let feedbackReceived = '';
     let remoteCancelled = false;
+    let remoteCreateCount = 0;
 
     const mockFetch = async (url, opts) => {
       const urlStr = String(url);
@@ -161,6 +165,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
         };
       }
       if (urlStr.includes('/sessions') && opts?.method === 'POST') {
+        remoteCreateCount += 1;
         return {
           ok: true,
           status: 200,
@@ -182,7 +187,8 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createJulesRouter({ store, vault, julesClient, rolloutStage: 'review' }));
+    app.use('/api', composeJulesRouter({ store, vault, julesClient, rolloutStage: 'review' }));
+    app.use(errorHandlerMiddleware);
 
     server = app.listen(0);
     const port = server.address().port;
@@ -195,6 +201,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
       body: JSON.stringify({
         prompt: 'Add cloud execution router test',
         sessionId: session.id,
+        idempotencyKey: 'route-dispatch-1',
       }),
     });
     assert.equal(dispatchRes.status, 201);
@@ -202,6 +209,29 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     assert.equal(dispatchData.ok, true);
     assert.equal(dispatchData.remoteSessionId, 'sess-route-100');
     const taskId = dispatchData.taskId;
+    assert.equal(remoteCreateCount, 1);
+
+    const replayRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Add cloud execution router test', sessionId: session.id, idempotencyKey: 'route-dispatch-1' }),
+    });
+    assert.equal(replayRes.status, 201);
+    assert.equal((await replayRes.json()).taskId, taskId);
+    assert.equal(remoteCreateCount, 1, 'idempotent replay must not create another remote session');
+
+    const wrongSessionRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Wrong owner', sessionId: otherSession.id, idempotencyKey: 'wrong-owner' }),
+    });
+    assert.equal(wrongSessionRes.status, 409);
+    assert.equal((await wrongSessionRes.json()).code, 'SESSION_PROJECT_MISMATCH');
+
+    const coercedBooleanRes = await fetch(`${baseUrl}/projects/${project.id}/jules/dispatch`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Bad boolean', requirePlanApproval: 'false', idempotencyKey: 'bad-boolean' }),
+    });
+    assert.equal(coercedBooleanRes.status, 400);
+    assert.equal((await coercedBooleanRes.json()).code, 'INVALID_REQUEST');
 
     // 2. Get task session
     const getSessRes = await fetch(`${baseUrl}/tasks/${taskId}/jules-session`);
@@ -249,7 +279,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     });
     assert.equal(importRes.status, 501);
     const importData = await importRes.json();
-    assert.equal(importData.code, 'FEATURE_GATED');
+    assert.equal(importData.code, 'JULES_PR_IMPORT_UNAVAILABLE');
   } finally {
     if (server) server.close();
     if (store) store.close();

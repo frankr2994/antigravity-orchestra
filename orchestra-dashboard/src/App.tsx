@@ -5,73 +5,13 @@ import {
   Pencil, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
   Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
-
-type View = 'dashboard' | 'projects' | 'checkpoints' | 'tasks' | 'mcp' | 'settings';
-type CheckpointFile = { path: string; added: number; deleted: number };
-type CheckpointRecord = {
-  sha: string;
-  shortSha: string;
-  message: string;
-  author: string;
-  date: string;
-  isHead: boolean;
-  files: CheckpointFile[];
-  task?: {
-    id: string;
-    title: string;
-    state?: string | null;
-    models: string | null;
-    classification: string | null;
-    result: string | null;
-    error: string | null;
-    pushStatus: string | null;
-  } | null;
-};
-type Project = { id: string; name: string; root: string; gitRoot: string | null; onboardingStatus: string; onboardingVersion: string | null; activeSessionId: string | null; updatedAt: string };
-type Session = { id: string; projectId: string; title: string; antigravityConversationId: string | null; summary: string | null; summaryUpdatedAt: string | null; updatedAt: string };
-type Message = { id: string; taskId: string | null; role: 'user' | 'assistant' | 'system'; agent: string; content: string; createdAt: string };
-type Task = { id: string; projectId: string; sessionId: string; title: string; state: string; classification: string | null; models: string | null; result: string | null; error: string | null; commitSha: string | null; pushStatus: string | null; createdAt: string };
-type TaskEvent = { id: number; taskId: string; agent: string; type: string; payload: Record<string, unknown>; createdAt: string };
-type Stats = { cpu: { load: number; speed: string | null; name: string }; memory: { used: number; total: number; percent: number }; gpu: { load: number | null; name: string; temp: number | null }; timestamp: string };
-type HealthItem = { available?: boolean; version?: string | null; modelAvailable?: boolean; models?: string[]; error?: string };
-type Health = Record<string, HealthItem>;
-type QuotaTierConfig = { antigravityModel: string; antigravityEffort: 'low' | 'medium' | 'high'; codexModel: string | null; codexEffort: 'low' | 'medium' | 'high' | null };
-type QuotaPolicy = { tierAbove20: QuotaTierConfig; tier15to20: QuotaTierConfig; tier10to15: QuotaTierConfig; tier5to10: QuotaTierConfig; tierBelow5: QuotaTierConfig };
-type SettingsData = { lmStudioBaseUrl: string; lmStudioModel: string; telemetryInterval: number; maxGlobalTasks: number; routingMode: string; quotaPolicy: QuotaPolicy };
-type ModelDescriptor = { id: string; name: string };
-type CodexModelDescriptor = {
-  id: string;
-  name: string;
-  description?: string;
-  defaultEffort?: string;
-  supportedEfforts?: Array<{ effort: string; description?: string }>;
-};
-type AvailableModels = {
-  antigravity: ModelDescriptor[];
-  codex: CodexModelDescriptor[];
-  lmStudio?: InstalledLmStudioModel[];
-};
-type ProviderQuotaBucket = { id: string; name?: string; group?: string; window?: string; usedPercent: number | null; remainingPercent: number | null; resetsAt: string | null };
-type ProviderUsage = { available: boolean; source?: string; reason?: string; model?: string; stale?: boolean; agentState?: string; threadId?: string; context?: { usedPercent: number | null; remainingPercent: number | null; windowTokens: number | null; inputTokens?: number | null; outputTokens?: number | null; totalTokens?: number | null }; quotas?: ProviderQuotaBucket[] };
-type McpAgentStatus = { configured: boolean; enabled: boolean; available: boolean; access: 'full' | 'read-only' | 'none'; endpoint: string | null; reason: string | null };
-type McpStatus = { checkedAt: string; server: { name: string; version: string | null; operational: boolean; endpoint: string | null; toolCount: number; latencyMs: number | null; reason: string | null }; agents: Record<'antigravity' | 'codex' | 'gemma', McpAgentStatus> };
-type McpServerRecord = {
-  id: string;
-  name: string;
-  enabled: boolean;
-  transportType: 'http' | 'stdio';
-  endpoint: string | null;
-  command: string | null;
-  args: string[];
-  operational: boolean;
-  toolCount: number;
-  tools: string[];
-  latencyMs: number | null;
-  models: { antigravity: boolean; codex: boolean; gemma: boolean };
-  sources: { antigravityGlobal: boolean; antigravityLocal: boolean; codex: boolean };
-  reason: string | null;
-};
-type RunMonitor = { taskId: string; state: string; health: 'active' | 'waiting' | 'possibly_stalled' | 'needs_attention' | 'complete' | 'failed'; currentAgent: string; phaseStartedAt: string; lastActivityAt: string; elapsedMs: number; inactiveMs: number; processAlive: boolean; reviewCycle: number; repairAttempt: number; changedFiles: string[]; summary: string; stopReason: string | null; providerTelemetry: Record<string, ProviderUsage>; providerActivity: Array<Record<string, unknown>> };
+import type {
+  AvailableModels, CheckpointRecord, Health, InstalledLmStudioModel, McpServerRecord, McpStatus,
+  Message, Project, ProviderUsage, QuotaPolicy, QuotaTierConfig, RunMonitor, Session,
+  SettingsData, Stats, Task, TaskEvent, View,
+} from './app/types';
+import { Card, Empty, Field, Metric, NavButton, PageHeader, StateBadge, StatusDot } from './shared/ui';
+import { formatDate, formatDuration, humanState } from './shared/format';
 
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
@@ -1520,20 +1460,6 @@ function McpServersView({ servers, busy, onToggle, onRefresh }: { servers: McpSe
   );
 }
 
-type InstalledLmStudioModel = {
-  id: string;
-  displayName?: string;
-  publisher?: string;
-  arch?: string;
-  quantization?: string;
-  state: 'loaded' | 'not-loaded';
-  maxContextLength?: number;
-  loadedContextLength?: number;
-  sizeBytes?: number;
-  paramsString?: string;
-  type?: string;
-};
-
 function SettingsView({
   settings,
   health,
@@ -1867,17 +1793,6 @@ function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[
   return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small title={rawPrimary}>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
 }
 
-function Metric({ icon, label, value, detail, percent, color }: { icon: React.ReactNode; label: string; value: string; detail: string; percent: number; color: string }) { return <article className="metric-card"><div className={`metric-icon ${color}`}>{icon}</div><div className="metric-label">{label}</div><strong>{value}</strong><div className="meter"><span className={color} style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></div><small>{detail}</small></article>; }
-function PageHeader({ eyebrow, title, subtitle, action }: { eyebrow: string; title: string; subtitle: string; action?: React.ReactNode }) { return <header className="page-header"><div><span className="eyebrow">{eyebrow}</span><h1>{title}</h1><p>{subtitle}</p></div>{action}</header>; }
-function Card({ title, icon, children }: { title: string; icon: React.ReactNode; children: React.ReactNode }) { return <article className="card"><header>{icon}<strong>{title}</strong></header>{children}</article>; }
-function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactElement; label: string; onClick: () => void }) { return <button className={`nav-button ${active ? 'active' : ''}`} onClick={onClick}>{icon}<span>{label}</span></button>; }
-function Empty({ icon, title, text }: { icon: React.ReactNode; title: string; text: string }) { return <div className="empty">{icon}<strong>{title}</strong><p>{text}</p></div>; }
-function StatusDot({ ok }: { ok: boolean }) { return <span className={`status-dot ${ok ? 'ok' : 'bad'}`} />; }
-function StateBadge({ state }: { state: string }) { return <span className={`state-badge state-${state}`}>{humanState(state)}</span>; }
-function Field({ label, value }: { label: string; value: string }) { return <div className="field"><span>{label}</span><strong>{value}</strong></div>; }
-function humanState(state: string) { return state.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
-function formatDate(value: string) { return new Date(value).toLocaleString(); }
-function formatDuration(value: number) { const seconds = Math.max(0, Math.round(value / 1000)); if (seconds < 60) return `${seconds}s`; const minutes = Math.floor(seconds / 60); if (minutes < 60) return `${minutes}m ${seconds % 60}s`; return `${Math.floor(minutes / 60)}h ${minutes % 60}m`; }
 function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.review-disputed') return `Review consensus dispute: ${String(payload.reason || 'repair attempt limit reached without consensus')}.`; if (event.type === 'task.steer') return `User provided steering guidance: ${String(payload.guidance || '').slice(0, 80)}...`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
 function formatProviderContext(item?: ProviderUsage) { const percent = item?.context?.usedPercent; if (percent !== null && percent !== undefined) return `${percent.toFixed(1)}%`; const tokens = item?.context?.inputTokens ?? item?.context?.totalTokens; return tokens ? `${tokens.toLocaleString()} tokens` : 'Not measured'; }
 

@@ -31,6 +31,15 @@ Implementation and tests should not be changed during a phase review unless a fi
 - `DatabaseManager.transaction` provides a synchronous unit-of-work boundary for coordinated repository writes.
 - Offline evidence covers migration fault rollback, unknown/mismatched histories, unit-of-work rollback, conflicting idempotency reuse, redaction, cursor compare-and-set, competing/stale lease owners, non-reused fencing tokens, Git ownership, SHA-bound evidence uniqueness, and outbox recovery. The full gate passes with 141 tests.
 
+## Repair implementation checkpoint — modular application boundaries (2026-08-23)
+
+- Jules HTTP handling is split into connection, session, and review controllers. Controllers depend on application services and request contracts; provider/database composition occurs once in bootstrap.
+- Strict request parsers reject string-to-boolean coercion, unbounded prompts/tokens, invalid pagination, cross-project session ownership, and dispatch without idempotency identity.
+- Dispatch records durable intent before the remote mutation. An acknowledged replay returns the original task/session without another remote create; ambiguous work fails closed for reconciliation.
+- Unsafe caller-supplied PR SHA import was removed from the reachable controller. The endpoint remains a truthful 501 until exact provider-owned PR resolution is implemented.
+- TaskManager now delegates project-aware scheduling, event publication, and Git finalization to focused services. Frontend API types and shared UI/format primitives are separate modules.
+- Architecture ratchets enforce the new Jules controller boundary, TaskManager delegations, frontend type/UI ownership, and absence of circular imports. The full offline gate passes with 147 tests.
+
 ## Findings index
 
 | ID | Phase | Commit | Severity | Status | Area | Summary |
@@ -3363,8 +3372,10 @@ Deferred adjustment:
 ### R-123 — The dispatch API exposes a production Git-safety bypass and coerces untrusted input
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
 Dependency impact: **Blocks safe cloud dispatch**
+
+Resolution evidence (2026-08-23): the production bypass is absent, dispatch uses exact booleans and bounded strings, requires idempotency identity, verifies session/project ownership, and its HTTP tests reject coercion and prove replay performs one remote create.
 
 Evidence:
 
@@ -3493,8 +3504,10 @@ Deferred adjustment:
 ### R-128 — The Phase 16 controller is a larger cross-layer monolith despite the new boundary rules
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
 Dependency impact: **Blocks maintainable integration of subsequent cloud phases**
+
+Resolution evidence (2026-08-23): the 453-line controller was replaced by three thin feature controllers over connection/session application services and strict request contracts. Concrete provider, vault, session-manager, and store composition moved to bootstrap, with an import-rule regression test.
 
 Evidence:
 

@@ -1,11 +1,14 @@
-import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
+import type { TaskEventType } from './domain/index.js';
+import { ProjectTaskScheduler } from './application/tasks/project-task-scheduler.js';
+import { TaskEventPublisher } from './application/tasks/task-event-publisher.js';
+import { GitFinalizationService } from './application/git/git-finalization-service.js';
+import { appendHandoff } from './application/git/handoff.js';
+export { appendHandoff } from './application/git/handoff.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -14,37 +17,34 @@ import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from 
 import { getMcpStatus, type McpStatus } from './mcp.js';
 
 export class TaskManager {
-  private readonly bus = new EventEmitter();
-  private readonly queue: string[] = [];
-  private readonly runningProjects = new Set<string>();
-  private readonly controllers = new Map<string, AbortController>();
+  private readonly events: TaskEventPublisher;
+  private readonly scheduler: ProjectTaskScheduler;
+  private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
   private antigravityModels: string[] = [];
 
-  constructor(private readonly store: Store, private readonly maxGlobal = 2) {
-    this.bus.setMaxListeners(100);
+  constructor(private readonly store: Store, maxGlobal = 2) {
+    this.events = new TaskEventPublisher(store);
+    this.scheduler = new ProjectTaskScheduler(store, (taskId, signal) => this.execute(taskId, signal), maxGlobal);
+    this.gitFinalization = new GitFinalizationService(store);
     void this.refreshModels();
   }
 
   async refreshModels() { this.antigravityModels = await listAntigravityModels(); }
 
   enqueue(taskId: string) {
-    if (!this.queue.includes(taskId) && !this.controllers.has(taskId)) this.queue.push(taskId);
-    this.drain();
+    this.scheduler.enqueue(taskId);
   }
 
   subscribe(taskId: string, listener: (event: TaskEvent) => void) {
-    const name = `task:${taskId}`;
-    this.bus.on(name, listener);
-    return () => this.bus.off(name, listener);
+    return this.events.subscribe(taskId, listener);
   }
 
   cancel(taskId: string) {
     const task = requireTask(this.store, taskId);
     if (['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) return;
-    const index = this.queue.indexOf(taskId);
-    if (index >= 0) this.queue.splice(index, 1);
-    this.controllers.get(taskId)?.abort();
+    this.scheduler.remove(taskId);
+    this.scheduler.abort(taskId);
     this.transition(taskId, 'cancelled');
     this.emit(taskId, 'system', 'task.state', { state: 'cancelled' });
   }
@@ -83,7 +83,7 @@ export class TaskManager {
   async resolveBaseline(taskId: string) {
     const task = requireTask(this.store, taskId);
     if (task.state !== 'baseline_required') throw new Error(`This task is ${task.state}, so its baseline cannot be resolved again.`);
-    if (this.controllers.has(taskId)) throw new Error('This task is already running. Open its original conversation to follow progress.');
+    if (this.scheduler.isRunning(taskId)) throw new Error('This task is already running. Open its original conversation to follow progress.');
     const project = requireProject(this.store, task.projectId);
     const status = await getGitStatus(project.root);
     if (!status.isGit) throw new Error('This project is not a Git repository.');
@@ -130,30 +130,8 @@ export class TaskManager {
     return requireTask(this.store, taskId);
   }
 
-  private drain() {
-    while (this.controllers.size < this.maxGlobal) {
-      const index = this.queue.findIndex((id) => {
-        const task = this.store.getTask(id);
-        return task && !this.runningProjects.has(task.projectId);
-      });
-      if (index < 0) break;
-      const [taskId] = this.queue.splice(index, 1);
-      const task = this.store.getTask(taskId);
-      if (!task || task.state !== 'queued' && task.state !== 'recovering') continue;
-      const controller = new AbortController();
-      this.controllers.set(taskId, controller);
-      this.runningProjects.add(task.projectId);
-      void this.execute(taskId, controller.signal).finally(() => {
-        this.controllers.delete(taskId);
-        this.runningProjects.delete(task.projectId);
-        this.drain();
-      });
-    }
-  }
-
   activeTaskId(projectId: string) {
-    for (const [taskId] of this.controllers) if (this.store.getTask(taskId)?.projectId === projectId) return taskId;
-    return this.queue.map((taskId) => this.store.getTask(taskId)).find((task) => task?.projectId === projectId)?.id || null;
+    return this.scheduler.activeTaskId(projectId);
   }
 
   async getMonitor(taskId: string): Promise<RunMonitor> {
@@ -165,7 +143,7 @@ export class TaskManager {
     const stateEvent = events.findLast((event) => event.type === 'task.state' && String((event.payload as Record<string, unknown>).state) === task.state);
     const reviewEvent = events.findLast((event) => event.type === 'agent.started' && (event.payload as Record<string, unknown>).role === 'review');
     const repairEvent = events.findLast((event) => event.type === 'task.repair-progress');
-    const processAlive = this.controllers.has(taskId);
+    const processAlive = this.scheduler.isRunning(taskId);
     const lastActivityAt = lastEvent?.createdAt || task.updatedAt;
     const inactiveMs = Math.max(0, now - Date.parse(lastActivityAt));
     let changedFiles: string[] = [];
@@ -740,40 +718,11 @@ export class TaskManager {
   }
 
   private async finalizeGit(taskId: string, project: Project, request: string, _classification: TaskClassification, _models: ModelSelection) {
-    const current = await getGitStatus(project.root);
-    const projectFiles = current.files.filter((file) => !isOrchestraInternalPath(file.path));
-    if (!current.isGit || !projectFiles.length) return;
-    this.transition(taskId, 'summarizing');
-    const diff = await getDiff(project.root);
-    const summary = await summarizeChanges(diff, request);
-    appendHandoff(project.root, summary.summary, safeCommitTitle(summary.title));
-    this.emit(taskId, 'gemma', 'agent.completed', { phase: 'handoff', ...summary });
-    this.transition(taskId, 'committing');
-    const updated = await getGitStatus(project.root);
-    const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
-    if (!paths.length) return;
-
-    this.emit(taskId, 'gemma', 'agent.started', { phase: 'semantic-commit-slicing', changedFiles: paths.length });
-    let slices = [{ title: summary.title, body: summary.summary, files: paths }];
-    try {
-      slices = await sliceSemanticCommits(diff, paths, request);
-      this.emit(taskId, 'gemma', 'agent.completed', { phase: 'semantic-commit-slicing', sliceCount: slices.length });
-    } catch (error) {
-      this.emit(taskId, 'gemma', 'warning', { message: `Semantic commit slicing was unavailable; creating single commit. ${error instanceof Error ? error.message : String(error)}` });
-    }
-
-    let latestSha = '';
-    for (const slice of slices) {
-      latestSha = await commitPaths(project.root, slice.files, safeCommitTitle(slice.title), slice.body);
-      this.emit(taskId, 'git', 'git.commit', { kind: 'task', sha: latestSha, title: slice.title, files: slice.files });
-    }
-
-    this.store.updateTask(taskId, { commitSha: latestSha });
-    this.transition(taskId, 'pushing');
-    const pushed = await pushCurrent(project.root);
-    this.store.updateTask(taskId, { pushStatus: pushed.pushed ? 'pushed' : 'unpushed' });
-    this.store.createGitOperation(project.id, taskId, 'task', latestSha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
-    this.emit(taskId, 'git', 'git.push', pushed);
+    await this.gitFinalization.finalize(
+      taskId, project, request,
+      (state) => this.transition(taskId, state),
+      (agent, type, payload) => this.emit(taskId, agent, type, payload),
+    );
   }
 
   private transition(taskId: string, state: TaskState) {
@@ -825,9 +774,8 @@ export class TaskManager {
     });
   }
 
-  private emit(taskId: string, agent: AgentName, type: string, payload: unknown) {
-    const event = this.store.addEvent(taskId, agent, type, payload);
-    this.bus.emit(`task:${taskId}`, event);
+  private emit(taskId: string, agent: AgentName, type: TaskEventType, payload: unknown) {
+    this.events.publish(taskId, agent, type, payload);
   }
 }
 
@@ -924,14 +872,6 @@ function monitorSummary(input: { state: TaskState; health: RunMonitor['health'];
   const cycle = input.reviewCycle ? ` Review cycle ${input.reviewCycle}.` : '';
   const repair = input.repairAttempt ? ` ${input.repairAttempt} automatic repair attempt${input.repairAttempt === 1 ? '' : 's'} completed.` : '';
   return `${input.currentAgent} is in ${input.state.replaceAll('_', ' ')}. Last activity was ${activity} ago. Health: ${input.health.replaceAll('_', ' ')}.${cycle}${repair} ${input.changedFiles} uncommitted project file${input.changedFiles === 1 ? '' : 's'} detected.`;
-}
-
-export function appendHandoff(root: string, summary: string, title: string) {
-  const path = join(root, 'docs', 'HANDOFF.md');
-  mkdirSync(dirname(path), { recursive: true });
-  const existing = existsSync(path) ? readFileSync(path, 'utf8').trimEnd() : '# Project Handoff';
-  const entry = `\n\n## [${new Date().toISOString()}] ${title}\n\n${summary.trim()}\n`;
-  writeFileSync(path, `${existing}${entry}`, 'utf8');
 }
 
 function requireTask(store: Store, id: string): TaskRecord {

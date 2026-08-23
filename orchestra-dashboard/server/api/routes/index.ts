@@ -7,7 +7,7 @@ import { createSessionsRouter } from './sessions.js';
 import { createTasksRouter } from './tasks.js';
 import { createModelsRouter } from './models.js';
 import { createSettingsRouter } from './settings.js';
-import { createJulesRouter } from './jules.js';
+import { composeJulesRouter } from '../../bootstrap/jules-module.js';
 import { config, type JulesRolloutStage } from '../../config.js';
 
 export interface ApiRouterOptions {
@@ -27,7 +27,7 @@ export function createApiRouter(store: Store, tasks: TaskManager, options: ApiRo
   router.use(createModelsRouter(store));
   router.use(createSettingsRouter(store));
   if (julesEnabled) {
-    router.use(createJulesRouter({ store, rolloutStage: julesRolloutStage }));
+    router.use(composeJulesRouter({ store, rolloutStage: julesRolloutStage }));
   }
 
   return router;
@@ -39,4 +39,3 @@ export * from './sessions.js';
 export * from './tasks.js';
 export * from './models.js';
 export * from './settings.js';
-export * from './jules.js';

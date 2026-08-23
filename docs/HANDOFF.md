@@ -123,3 +123,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * Added fault, concurrency, stale-owner, rollback, redaction, uniqueness, and recovery tests.
 * Verification: dashboard lint, production build, and all 141 offline automated tests pass.
 
+## [2026-08-23] Modular application boundary slice
+
+* Split Jules HTTP controllers by connection, session, and review concerns over application services and strict request contracts; concrete dependencies are composed in bootstrap.
+* Added durable, cross-project-safe, idempotent dispatch entry behavior and removed caller-controlled PR SHA import from reachable code.
+* Extracted TaskManager scheduling, event publication, handoff writing, and Git finalization services.
+* Moved frontend API contracts plus shared UI/format primitives out of the application root and added architecture ratchets preventing regression.
+* Verification: dashboard lint, production build, and all 147 offline automated tests pass.
+

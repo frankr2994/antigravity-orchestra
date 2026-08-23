@@ -1,7 +1,15 @@
 import type { Request, Response, NextFunction } from 'express';
+import { randomUUID } from 'node:crypto';
+import { ApplicationError } from '../../application/errors.js';
+import { redactSecrets } from '../../infrastructure/security/redaction.js';
 
 export function errorHandlerMiddleware(error: unknown, _req: Request, res: Response, _next: NextFunction) {
-  const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
-  res.status(/not found/i.test(message) ? 404 : 400).json({ error: message });
+  if (error instanceof ApplicationError) {
+    res.status(error.status).json({ error: error.message, code: error.code });
+    return;
+  }
+  const correlationId = randomUUID();
+  const message = redactSecrets(error instanceof Error ? error.message : String(error));
+  console.error(`[${correlationId}] ${message}`);
+  res.status(500).json({ error: 'An internal server error occurred.', code: 'INTERNAL_ERROR', correlationId });
 }
