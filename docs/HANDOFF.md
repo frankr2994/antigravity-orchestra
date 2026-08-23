@@ -108,3 +108,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * Unsupported cancellation and unfinished remote deletion now fail closed without provider calls, state changes, or false-success events.
 * Focused route/session tests and the complete offline `npm run check` gate pass with 127 tests.
 
+## [2026-08-23] Stage A Jules contracts and security
+
+* Added strict runtime validation for Jules sources, sessions, outputs, activities, pagination, and empty mutation responses using documented wire shapes; mutating requests are no longer blindly retried.
+* Enforced the canonical task lifecycle and task-event contracts at persistence boundaries, including historical reads, and centralized deep secret redaction.
+* Corrected LM Studio discovery to use the documented `/api/v1/models` response and `loaded_instances` before compatibility fallbacks.
+* Replaced reproducible vault encryption with current-user Windows DPAPI, authenticated legacy migration, atomic replacement, corrupt-vault failure, and safe closed credential-validation statuses.
+* Verification: dashboard lint, production build, and all 135 offline automated tests pass. No live Jules API call was made or required.
+

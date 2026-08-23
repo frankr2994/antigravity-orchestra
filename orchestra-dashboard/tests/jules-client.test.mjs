@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { JulesApiClient, JulesApiError, redactSecrets } from '../dist-server/providers/jules/index.js';
+import { JulesApiClient, JulesApiError, JulesContractError, redactSecrets } from '../dist-server/providers/jules/index.js';
 
 // ============================================================================
 // Phase 6 Jules API Client Contract Conformance Test Suite
@@ -139,7 +139,7 @@ test('Phase 6 Jules Client — approvePlan, sendMessage, deleteSession, and acti
         json: async () => ({
           activities: [
             {
-              name: 'activities/act-1',
+              name: 'sessions/12345/activities/act-1',
               id: 'act-1',
               originator: 'agent',
               planGenerated: {
@@ -252,8 +252,101 @@ test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiEr
       assert.equal(err.status, 400);
       assert.ok(!err.message.includes('AIzaSy'), 'Error message must redact secret API key');
       assert.ok(err.message.includes('[REDACTED_API_KEY]'));
-      assert.deepEqual(err.details, [{ token: '[REDACTED_GH_TOKEN]' }], 'Structured details must be recursively redacted');
+      assert.deepEqual(err.details, [{ token: '[REDACTED]' }], 'Semantic secret fields must be fully redacted');
       return true;
     }
   );
+});
+
+test('Stage A Jules contracts — malformed successful responses fail closed', async () => {
+  const clientFor = (body) => new JulesApiClient({
+    apiKey: 'test-key',
+    maxRetries: 0,
+    fetchFn: async () => ({ ok: true, status: 200, json: async () => body }),
+  });
+
+  await assert.rejects(
+    () => clientFor({ name: 42, state: { bad: true } }).getSession('bad'),
+    (error) => error instanceof JulesContractError && error.code === 'JULES_CONTRACT_INVALID',
+  );
+  await assert.rejects(() => clientFor({}).listSources(), JulesContractError);
+  await assert.rejects(
+    () => clientFor({ sessions: [{ name: 'sessions/good', state: { bad: true } }] }).listSessions(),
+    JulesContractError,
+  );
+  await assert.rejects(
+    () => clientFor({ activities: [{
+      name: 'sessions/s1/activities/a1',
+      originator: 'agent',
+      userMessaged: { message: 'wrong documented field' },
+    }] }).listActivities('s1'),
+    JulesContractError,
+  );
+  await assert.rejects(
+    () => clientFor({ activities: [{
+      name: 'sessions/s1/activities/a1',
+      originator: 'agent',
+      userMessaged: { userMessage: 'one' },
+      agentMessaged: { agentMessage: 'two' },
+    }] }).listActivities('s1'),
+    JulesContractError,
+  );
+});
+
+test('Stage A Jules contracts — documented messages and future activities are represented safely', async () => {
+  const client = new JulesApiClient({
+    apiKey: 'test-key',
+    fetchFn: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        activities: [
+          {
+            name: 'sessions/s1/activities/user-1',
+            originator: 'user',
+            userMessaged: { userMessage: 'Please add integration tests' },
+          },
+          {
+            name: 'sessions/s1/activities/agent-1',
+            originator: 'agent',
+            agentMessaged: { agentMessage: 'The tests are ready' },
+          },
+          {
+            name: 'sessions/s1/activities/future-1',
+            originator: 'system',
+            futureProviderEvent: { token: 'must-not-cross-the-boundary' },
+          },
+        ],
+      }),
+    }),
+  });
+
+  const result = await client.listActivities('s1');
+  assert.equal(result.activities[0].userMessaged.userMessage, 'Please add integration tests');
+  assert.equal(result.activities[1].agentMessaged.agentMessage, 'The tests are ready');
+  assert.deepEqual(result.activities[2].unknownActivity.fields, ['futureProviderEvent']);
+  assert.equal('futureProviderEvent' in result.activities[2], false);
+  assert.equal(JSON.stringify(result.activities[2]).includes('must-not-cross-the-boundary'), false);
+});
+
+test('Stage A Jules client — mutating requests are not blindly retried', async () => {
+  let attempts = 0;
+  const client = new JulesApiClient({
+    apiKey: 'test-key',
+    maxRetries: 3,
+    fetchFn: async () => {
+      attempts += 1;
+      return {
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        json: async () => ({ error: { message: 'ambiguous mutation' } }),
+      };
+    },
+  });
+  await assert.rejects(() => client.createSession({
+    prompt: 'test',
+    sourceContext: { source: 'sources/github/owner/repo' },
+  }), JulesApiError);
+  assert.equal(attempts, 1);
 });

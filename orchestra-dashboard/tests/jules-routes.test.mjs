@@ -10,6 +10,12 @@ import { CredentialVault } from '../dist-server/infrastructure/security/vault.js
 import { JulesApiClient } from '../dist-server/providers/jules/client.js';
 import { createJulesRouter } from '../dist-server/api/routes/jules.js';
 
+const testProtector = {
+  scheme: 'windows-dpapi-current-user',
+  protect: (plaintext) => Buffer.from(plaintext).reverse(),
+  unprotect: (ciphertext) => Buffer.from(ciphertext).reverse(),
+};
+
 // ============================================================================
 // Phase 16 Cloud Execution Route Controller & Routes Test Suite
 // ============================================================================
@@ -23,7 +29,7 @@ test('Phase 16 Routes — Credential and source endpoints', async () => {
 
   try {
     store = new Store(dbPath);
-    const vault = new CredentialVault(vaultPath);
+    const vault = new CredentialVault(vaultPath, testProtector);
 
     const mockFetch = async (url) => {
       const urlStr = String(url);
@@ -106,7 +112,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     await git(['push', '-u', 'origin', 'main'], fixtureDir);
 
     store = new Store(dbPath);
-    const vault = new CredentialVault(vaultPath);
+    const vault = new CredentialVault(vaultPath, testProtector);
     vault.setSecret('jules_api_key', 'test-route-key');
 
     const project = store.upsertProject({ name: 'route-test-proj', root: fixtureDir, gitRoot: fixtureDir });
@@ -140,7 +146,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
           status: 200,
           json: async () => ({
             activities: [
-              { name: 'activities/act-1', id: 'act-1', type: 'THOUGHT', description: 'Examining files' },
+              { name: 'sessions/sess-route-100/activities/act-1', id: 'act-1', originator: 'agent', description: 'Examining files' },
             ],
           }),
         };

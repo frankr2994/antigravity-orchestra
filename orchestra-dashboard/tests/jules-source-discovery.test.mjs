@@ -52,7 +52,7 @@ test('Phase 8 Source Discovery — discoverJulesSource connects matching GitHub 
           githubRepo: {
             owner: 'FrankR2994',
             repo: 'antigravity-orchestra',
-            defaultBranch: 'main',
+            defaultBranch: { displayName: 'main' },
           },
         },
       ],

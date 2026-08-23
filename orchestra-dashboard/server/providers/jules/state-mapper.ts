@@ -120,9 +120,9 @@ export function mapJulesToOrchestraState(
         executionState: 'FAILED',
         requiresUserAction: false,
         isProviderTerminal: true,
-        isTaskTerminal: true,
+        isTaskTerminal: false,
         isTerminal: true,
-        reason: 'Cloud execution failed.',
+        reason: 'Cloud execution failed. The Orchestra task remains recoverable.',
       };
 
     case 'STATE_UNSPECIFIED':

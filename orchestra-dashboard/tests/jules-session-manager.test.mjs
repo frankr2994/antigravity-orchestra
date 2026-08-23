@@ -48,7 +48,7 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
         id: 'act-1',
         name: 'sessions/sess-1234/activities/act-1',
         createTime: '2026-08-22T01:00:00Z',
-        originator: 'AGENT',
+        originator: 'agent',
         description: 'Analyzing repository code',
       },
     ];
@@ -154,7 +154,7 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     assert.equal(cancelledCloud?.state, 'COMPLETED');
 
     const updatedTask = store.getTask(task.id);
-    assert.equal(updatedTask?.state, 'completed');
+    assert.equal(updatedTask?.state, 'reviewing');
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }

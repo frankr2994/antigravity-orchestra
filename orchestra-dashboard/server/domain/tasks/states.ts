@@ -78,7 +78,7 @@ export function isTerminalTaskState(state: OrchestraTaskState): boolean {
  */
 export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonly OrchestraTaskState[]>> = {
   queued: ['preflight', 'routing', 'running', 'failed', 'cancelled'],
-  preflight: ['baseline_required', 'routing', 'running', 'failed', 'cancelled'],
+  preflight: ['baseline_required', 'routing', 'running', 'reviewing', 'failed', 'cancelled'],
   baseline_required: ['queued', 'preflight', 'running', 'failed', 'cancelled'],
   routing: ['running', 'failed', 'cancelled'],
   running: [
@@ -96,7 +96,7 @@ export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonl
   ],
   recovering: ['running', 'reviewing', 'failed', 'cancelled'],
   recovery_required: ['recovering', 'running', 'queued', 'failed', 'cancelled'],
-  reviewing: ['verifying', 'summarizing', 'committing', 'recovering', 'review_disputed', 'completed', 'failed', 'cancelled'],
+  reviewing: ['running', 'verifying', 'summarizing', 'committing', 'recovering', 'review_disputed', 'completed', 'failed', 'cancelled'],
   review_disputed: ['running', 'recovering', 'summarizing', 'committing', 'failed', 'cancelled'],
   verifying: ['summarizing', 'committing', 'recovering', 'reviewing', 'failed', 'cancelled'],
   summarizing: ['committing', 'pushing', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
@@ -104,7 +104,7 @@ export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonl
   pushing: ['completed', 'completed_unpushed', 'failed', 'cancelled'],
   completed: [],
   completed_unpushed: ['pushing', 'completed', 'failed', 'cancelled'],
-  failed: ['queued', 'recovering'],
+  failed: ['queued', 'recovering', 'recovery_required'],
   cancelled: [],
 };
 

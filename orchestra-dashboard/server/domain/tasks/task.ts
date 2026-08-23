@@ -5,6 +5,10 @@ import type { OrchestraTaskState } from './states.js';
 // ============================================================================
 
 export type ExecutionTarget = 'local' | 'cloud' | 'auto';
+export const EXECUTION_TARGETS: readonly ExecutionTarget[] = ['local', 'cloud', 'auto'];
+export function isExecutionTarget(value: unknown): value is ExecutionTarget {
+  return typeof value === 'string' && EXECUTION_TARGETS.includes(value as ExecutionTarget);
+}
 export type ExecutionMode = 'orchestra' | 'direct';
 export type DirectAgent = 'gemma' | 'antigravity' | 'codex';
 

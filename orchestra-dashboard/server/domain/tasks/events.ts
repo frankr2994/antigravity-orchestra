@@ -1,4 +1,4 @@
-import type { OrchestraTaskState } from './states.js';
+import { isOrchestraTaskState, type OrchestraTaskState } from './states.js';
 import type { ReviewVerdict, VerificationResult } from '../execution/review.js';
 
 // ============================================================================
@@ -6,6 +6,8 @@ import type { ReviewVerdict, VerificationResult } from '../execution/review.js';
 // ============================================================================
 
 export type AgentName = 'system' | 'antigravity' | 'codex' | 'gemma' | 'jules' | 'git' | 'verification' | 'orchestra';
+
+export const AGENT_NAMES: readonly AgentName[] = ['system', 'antigravity', 'codex', 'gemma', 'jules', 'git', 'verification', 'orchestra'];
 
 export interface BaseTaskEvent {
   id: number;
@@ -81,6 +83,11 @@ export interface TaskDisputedEvent extends BaseTaskEvent {
 export interface TaskRepairProgressEvent extends BaseTaskEvent {
   type: 'task.repair-progress';
   payload: { cycle: number; strategy: string; description?: string; [key: string]: unknown };
+}
+
+export interface TaskImplementationRetryEvent extends BaseTaskEvent {
+  type: 'task.implementation-retry';
+  payload: { attempt: number; maxAttempts: number; message: string; [key: string]: unknown };
 }
 
 export interface TaskRoutedEvent extends BaseTaskEvent {
@@ -311,6 +318,7 @@ export type TaskEvent =
   | TaskContinuationEvent
   | TaskDisputedEvent
   | TaskRepairProgressEvent
+  | TaskImplementationRetryEvent
   | TaskRoutedEvent
   | TaskTakeoverLocalEvent
   | TaskModelTakeoverEvent
@@ -351,6 +359,68 @@ export type TaskEvent =
   | ProjectOnboardingEvent;
 
 export type TaskEventType = TaskEvent['type'];
+
+export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
+  'task.started', 'task.state', 'task.completed', 'task.failed', 'task.cancelled', 'task.error',
+  'task.recovery', 'task.recovery-required', 'task.retry', 'task.steer', 'task.continuation',
+  'task.disputed', 'task.review-disputed', 'task.repair-progress', 'task.implementation-retry',
+  'task.routed', 'task.takeover_local', 'task.model-takeover', 'task.provider-recovery',
+  'agent.started', 'agent.output', 'agent.progress', 'agent.completed', 'agent.failed',
+  'verification.result', 'review.verdict', 'review.started', 'review.completed', 'review.finding',
+  'git.commit', 'git.push', 'git.remote', 'git.baseline-required',
+  'cloud.dispatching', 'cloud.dispatched', 'cloud.activity', 'cloud.plan_received',
+  'cloud.plan_approved', 'cloud.message_sent', 'cloud.feedback_sent', 'cloud.repair_requested',
+  'cloud.reviewed', 'cloud.completed', 'cloud.failed', 'cloud.cancelled', 'cloud.pr_imported',
+  'routing.decision', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'warning',
+  'provider.telemetry', 'project.onboarding',
+];
+
+export class TaskEventValidationError extends Error {
+  readonly code = 'TASK_EVENT_INVALID';
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskEventValidationError';
+  }
+}
+
+function eventRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TaskEventValidationError('Task event payload must be an object.');
+  }
+  return value as Record<string, unknown>;
+}
+
+export function parseTaskEvent(input: {
+  id: number;
+  taskId: string;
+  agent: unknown;
+  type: unknown;
+  payload: unknown;
+  createdAt: string;
+}): TaskEvent {
+  if (!Number.isSafeInteger(input.id) || input.id < 0) throw new TaskEventValidationError('Task event ID is invalid.');
+  if (!input.taskId) throw new TaskEventValidationError('Task event task ID is required.');
+  if (typeof input.agent !== 'string' || !AGENT_NAMES.includes(input.agent as AgentName)) {
+    throw new TaskEventValidationError(`Unknown task event agent '${String(input.agent)}'.`);
+  }
+  if (typeof input.type !== 'string' || !TASK_EVENT_TYPES.includes(input.type as TaskEventType)) {
+    throw new TaskEventValidationError(`Unknown task event type '${String(input.type)}'.`);
+  }
+  if (!Number.isFinite(Date.parse(input.createdAt))) throw new TaskEventValidationError('Task event timestamp is invalid.');
+  const payload = eventRecord(input.payload);
+  const serializedLength = JSON.stringify(payload).length;
+  if (serializedLength > 1_000_000) throw new TaskEventValidationError('Task event payload exceeds the 1 MB limit.');
+  if (input.type === 'task.state' && (typeof payload.state !== 'string' || !isOrchestraTaskState(payload.state))) {
+    throw new TaskEventValidationError('task.state requires a valid Orchestra task state.');
+  }
+  if ((input.type === 'task.error' || input.type === 'warning') && typeof payload.message !== 'string') {
+    throw new TaskEventValidationError(`${input.type} requires a message.`);
+  }
+  if (input.type === 'agent.output' && typeof payload.text !== 'string') {
+    throw new TaskEventValidationError('agent.output requires text.');
+  }
+  return { ...input, agent: input.agent, type: input.type, payload } as TaskEvent;
+}
 
 export interface ChatMessage {
   id: string;

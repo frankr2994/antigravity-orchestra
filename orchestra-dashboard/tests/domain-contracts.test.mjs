@@ -70,7 +70,7 @@ test('Phase 3 Domain — mapJulesToOrchestraState covers all 9 canonical Jules s
   assert.equal(failed.taskState, 'failed');
   assert.equal(failed.executionState, 'FAILED');
   assert.equal(failed.requiresUserAction, false);
-  assert.equal(failed.isTaskTerminal, true);
+  assert.equal(failed.isTaskTerminal, false);
   assert.equal(failed.isProviderTerminal, true);
 
   // 9. STATE_UNSPECIFIED

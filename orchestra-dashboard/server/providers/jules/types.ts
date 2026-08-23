@@ -20,7 +20,7 @@ export interface JulesSource {
 }
 
 export interface JulesListSourcesResponse {
-  sources?: JulesSource[];
+  sources: JulesSource[];
   nextPageToken?: string;
 }
 
@@ -31,7 +31,9 @@ export interface JulesPullRequestOutput {
 }
 
 export interface JulesSessionOutput {
+  kind: 'pullRequest' | 'unknown';
   pullRequest?: JulesPullRequestOutput;
+  unknownFields?: string[];
 }
 
 export type JulesAutomationMode = 'AUTOMATION_MODE_UNSPECIFIED' | 'AUTO_CREATE_PR';
@@ -40,7 +42,7 @@ export interface JulesSession {
   name: string;
   id?: string;
   title?: string;
-  state: JulesSessionState | string;
+  state: JulesSessionState | UnknownJulesSessionState;
   sourceContext?: {
     source: string;
     githubRepoContext?: {
@@ -56,7 +58,7 @@ export interface JulesSession {
 }
 
 export interface JulesListSessionsResponse {
-  sessions?: JulesSession[];
+  sessions: JulesSession[];
   nextPageToken?: string;
 }
 
@@ -73,7 +75,10 @@ export interface JulesCreateSessionRequest {
   automationMode?: JulesAutomationMode;
 }
 
-export type JulesActivityOriginator = 'user' | 'agent' | 'system' | 'originator_unspecified' | string;
+declare const unknownJulesSessionState: unique symbol;
+export type UnknownJulesSessionState = string & { readonly [unknownJulesSessionState]: true };
+
+export type JulesActivityOriginator = 'user' | 'agent' | 'system';
 
 export interface JulesPlanStep {
   index?: number;
@@ -133,20 +138,14 @@ export interface JulesPlanApprovedActivity extends BaseJulesActivity {
 }
 
 export interface JulesAgentMessageActivity extends BaseJulesActivity {
-  agentMessaged?: {
-    message?: string;
-  };
-  agentMessage?: {
-    message?: string;
+  agentMessaged: {
+    agentMessage: string;
   };
 }
 
 export interface JulesUserMessageActivity extends BaseJulesActivity {
-  userMessaged?: {
-    message?: string;
-  };
-  userMessage?: {
-    message?: string;
+  userMessaged: {
+    userMessage: string;
   };
 }
 
@@ -169,8 +168,10 @@ export interface JulesSessionFailedActivity extends BaseJulesActivity {
   };
 }
 
-export interface JulesGenericActivity extends BaseJulesActivity {
-  [key: string]: unknown;
+export interface JulesUnknownActivity extends BaseJulesActivity {
+  unknownActivity: {
+    fields: string[];
+  };
 }
 
 export type JulesActivity =
@@ -181,10 +182,10 @@ export type JulesActivity =
   | JulesProgressActivity
   | JulesSessionCompletedActivity
   | JulesSessionFailedActivity
-  | JulesGenericActivity;
+  | JulesUnknownActivity;
 
 export interface JulesListActivitiesResponse {
-  activities?: JulesActivity[];
+  activities: JulesActivity[];
   nextPageToken?: string;
 }
 

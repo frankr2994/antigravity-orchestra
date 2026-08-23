@@ -7,6 +7,15 @@ import type {
   JulesSession,
   JulesSource,
 } from './types.js';
+import {
+  JulesContractError,
+  parseEmptyJulesResponse,
+  parseJulesListActivitiesResponse,
+  parseJulesListSessionsResponse,
+  parseJulesListSourcesResponse,
+  parseJulesSession,
+  parseJulesSource,
+} from './validation.js';
 
 // ============================================================================
 // Google Jules REST API Client (Authoritative Alpha)
@@ -56,8 +65,9 @@ export class JulesApiClient {
 
   private async request<T>(
     endpoint: string,
-    method: 'GET' | 'POST' | 'DELETE' = 'GET',
-    body?: unknown,
+    method: 'GET' | 'POST' | 'DELETE',
+    body: unknown,
+    parse: (value: unknown) => T,
     signal?: AbortSignal
   ): Promise<T> {
     const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
@@ -107,7 +117,7 @@ export class JulesApiClient {
           const apiError = new JulesApiError(errorMessage, response.status, url, errorJson);
 
           // Retry on transient status codes
-          if (apiError.isTransient && attempt < this.maxRetries) {
+          if (method === 'GET' && apiError.isTransient && attempt < this.maxRetries) {
             const backoff = this.calculateBackoff(attempt);
             await this.sleep(backoff);
             lastError = apiError;
@@ -119,16 +129,32 @@ export class JulesApiClient {
 
         // 204 No Content
         if (response.status === 204) {
-          return undefined as unknown as T;
+          return parse(undefined);
         }
 
-        const data = (await response.json()) as T;
-        return data;
+        let data: unknown;
+        if (typeof response.text === 'function') {
+          const raw = await response.text();
+          if (!raw.trim()) data = undefined;
+          else {
+            try {
+              data = JSON.parse(raw);
+            } catch {
+              throw new JulesContractError('$', 'response body is not valid JSON');
+            }
+          }
+        } else {
+          data = await response.json();
+        }
+        return parse(data);
       } catch (err: unknown) {
         clearTimeout(timeoutId);
         if (signal) signal.removeEventListener('abort', abortHandler);
 
         if (err instanceof JulesApiError) {
+          throw err;
+        }
+        if (err instanceof JulesContractError) {
           throw err;
         }
 
@@ -138,7 +164,7 @@ export class JulesApiClient {
         lastError = error;
 
         // Network failures retry
-        if (attempt < this.maxRetries && !signal?.aborted) {
+        if (method === 'GET' && attempt < this.maxRetries && !signal?.aborted) {
           const backoff = this.calculateBackoff(attempt);
           await this.sleep(backoff);
           continue;
@@ -157,18 +183,13 @@ export class JulesApiClient {
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
-    const res = await this.request<JulesListSourcesResponse>(`/sources${query}`, 'GET', undefined, signal);
-    return {
-      sources: Array.isArray(res?.sources) ? res.sources : [],
-      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
-    };
+    return this.request<JulesListSourcesResponse>(`/sources${query}`, 'GET', undefined, parseJulesListSourcesResponse, signal);
   }
 
   // 2. Get Source
   async getSource(name: string, signal?: AbortSignal): Promise<JulesSource> {
     const resourceName = name.startsWith('sources/') ? name : `sources/${name}`;
-    const res = await this.request<JulesSource>(`/${resourceName}`, 'GET', undefined, signal);
-    return res;
+    return this.request<JulesSource>(`/${resourceName}`, 'GET', undefined, parseJulesSource, signal);
   }
 
   // 3. Create Session
@@ -183,7 +204,7 @@ export class JulesApiClient {
     if (request.automationMode === 'AUTO_CREATE_PR') {
       cleanRequest.automationMode = 'AUTO_CREATE_PR';
     }
-    return this.request<JulesSession>('/sessions', 'POST', cleanRequest, signal);
+    return this.request<JulesSession>('/sessions', 'POST', cleanRequest, parseJulesSession, signal);
   }
 
   // 4. List Sessions (with pagination)
@@ -192,23 +213,19 @@ export class JulesApiClient {
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
-    const res = await this.request<JulesListSessionsResponse>(`/sessions${query}`, 'GET', undefined, signal);
-    return {
-      sessions: Array.isArray(res?.sessions) ? res.sessions : [],
-      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
-    };
+    return this.request<JulesListSessionsResponse>(`/sessions${query}`, 'GET', undefined, parseJulesListSessionsResponse, signal);
   }
 
   // 5. Get Session
   async getSession(name: string, signal?: AbortSignal): Promise<JulesSession> {
     const resourceName = name.startsWith('sessions/') ? name : `sessions/${name}`;
-    return this.request<JulesSession>(`/${resourceName}`, 'GET', undefined, signal);
+    return this.request<JulesSession>(`/${resourceName}`, 'GET', undefined, parseJulesSession, signal);
   }
 
   // 6. Delete Session
   async deleteSession(name: string, signal?: AbortSignal): Promise<void> {
     const resourceName = name.startsWith('sessions/') ? name : `sessions/${name}`;
-    await this.request<void>(`/${resourceName}`, 'DELETE', undefined, signal);
+    await this.request<void>(`/${resourceName}`, 'DELETE', undefined, parseEmptyJulesResponse, signal);
   }
 
   // 7. List Activities (with pagination)
@@ -223,22 +240,18 @@ export class JulesApiClient {
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
     const query = params.toString() ? `?${params.toString()}` : '';
-    const res = await this.request<JulesListActivitiesResponse>(`/${resourceName}/activities${query}`, 'GET', undefined, signal);
-    return {
-      activities: Array.isArray(res?.activities) ? res.activities : [],
-      nextPageToken: typeof res?.nextPageToken === 'string' ? res.nextPageToken : undefined,
-    };
+    return this.request<JulesListActivitiesResponse>(`/${resourceName}/activities${query}`, 'GET', undefined, parseJulesListActivitiesResponse, signal);
   }
 
   // 8. Approve Plan
   async approvePlan(sessionName: string, signal?: AbortSignal): Promise<void> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
-    await this.request<void>(`/${resourceName}:approvePlan`, 'POST', {}, signal);
+    await this.request<void>(`/${resourceName}:approvePlan`, 'POST', {}, parseEmptyJulesResponse, signal);
   }
 
   // 9. Send Message (authoritative endpoint)
   async sendMessage(sessionName: string, prompt: string, signal?: AbortSignal): Promise<void> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
-    await this.request<void>(`/${resourceName}:sendMessage`, 'POST', { prompt }, signal);
+    await this.request<void>(`/${resourceName}:sendMessage`, 'POST', { prompt }, parseEmptyJulesResponse, signal);
   }
 }

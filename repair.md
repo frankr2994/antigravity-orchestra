@@ -13,6 +13,16 @@ Implementation and tests should not be changed during a phase review unless a fi
 - `Resolved`: The adjustment was implemented and verified.
 - `Accepted`: The behavior was deliberately retained with a documented reason.
 
+## Repair implementation checkpoint — Stage A foundations (2026-08-23)
+
+- Runtime-validated Jules wire DTOs now reject malformed successful responses, preserve bounded unknown activity metadata, use the documented message/activity shapes, and keep mutation requests out of the automatic retry loop.
+- The canonical task lifecycle now validates persisted task states/targets and maps provider completion to local review instead of local completion. Failed provider work remains recoverable.
+- Canonical task-event agents/types are enforced before writes and during historical reads. Event payloads are centrally redacted before persistence.
+- Secret redaction is centralized across provider errors and event storage, including nested errors, structured details, authenticated URLs, and reflected credentials.
+- LM Studio discovery now uses the documented `/api/v1/models` contract first and derives loaded state from `loaded_instances`; compatibility endpoints remain fallbacks.
+- Credential storage now defaults to current-user Windows DPAPI. Authenticated legacy vaults migrate atomically to version 2, corrupt/unsupported vaults fail closed, and credential validation returns closed safe statuses without upstream text.
+- Offline evidence: the focused suites pass and the complete gate reached 134/135 before exposing an obsolete source fixture; correcting its documented `defaultBranch` object shape made the focused source suite pass. A final complete gate is required at the milestone commit.
+
 ## Findings index
 
 | ID | Phase | Commit | Severity | Status | Area | Summary |
@@ -25,14 +35,14 @@ Implementation and tests should not be changed during a phase review unless a fi
 | R-006 | 1 | `2f66be7` | Medium | Open | Documentation | The obsolete `jules.txt` plan was committed beside `julesplan.md`, leaving two conflicting plans. |
 | R-007 | 1 | `2f66be7` | Low | Open | Test stability | Routing assertions freeze exact model version strings rather than a stable routing-policy contract. |
 | R-008 | 2 | `7574a1f` | High | Open | Boundary enforcement | Architecture checks pass vacuously for absent layers and can miss common prohibited-import and persistence patterns. |
-| R-009 | 2 | `7574a1f` | High | Open | Secret redaction | The redaction test recognizes sample secret strings but never passes them through production redaction or event/logging code. |
+| R-009 | 2 | `7574a1f` | High | Resolved | Secret redaction | The redaction test recognizes sample secret strings but never passes them through production redaction or event/logging code. |
 | R-010 | 2 | `7574a1f` | Medium | Open | Circular dependencies | The documentation claims circular dependencies are checked, but the architecture suite contains no cycle detection. |
 | R-011 | 2 | `7574a1f` | Medium | Open | State contracts | The documented and tested Orchestra state list is incomplete and disconnected from the production task-state type. |
 | R-012 | 2 | `7574a1f` | Medium | Open | Transition architecture | The document presents the target module layout as current and enforced without defining legacy exceptions or a migration ratchet. |
 | R-013 | 3 | `ff6f8b2` | High | Open | Provider isolation | Jules-specific API types, mapping logic, and session fields are publicly exported from the provider-neutral domain. |
-| R-014 | 3 | `ff6f8b2` | High | Open | Event contracts | `TaskEvent` still uses an unrestricted string type and unknown payload, so canonical event names and payloads are not enforced. |
-| R-015 | 3 | `ff6f8b2` | High | Open | State persistence | Raw or invalid task states remain accepted at runtime because persistence casts database strings into the domain type without validation. |
-| R-016 | 3 | `ff6f8b2` | Medium | Open | State mapping | Provider completion and unknown-state behavior have ambiguous terminal and user-attention semantics. |
+| R-014 | 3 | `ff6f8b2` | High | Resolved | Event contracts | `TaskEvent` still uses an unrestricted string type and unknown payload, so canonical event names and payloads are not enforced. |
+| R-015 | 3 | `ff6f8b2` | High | Resolved | State persistence | Raw or invalid task states remain accepted at runtime because persistence casts database strings into the domain type without validation. |
+| R-016 | 3 | `ff6f8b2` | Medium | Resolved | State mapping | Provider completion and unknown-state behavior have ambiguous terminal and user-attention semantics. |
 | R-017 | 3 | `ff6f8b2` | Medium | Open | Provider roles | The execution-provider contract permits `auto` providers and treats Codex and Gemma as implementation workers. |
 | R-018 | 3 | `ff6f8b2` | Medium | Open | Contract tests | JavaScript sample-object tests do not compile against or negatively test the TypeScript interfaces they claim to verify. |
 | R-019 | 3 | `ff6f8b2` | Medium | Open | Review invariants | Review verdict and verification interfaces permit internally contradictory combinations. |
@@ -267,7 +277,9 @@ Deferred adjustment:
 ### R-009 — Secret-redaction test does not test redaction
 
 Severity: **High**  
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): Production redaction is exercised through nested errors and the `TaskEventRepository` write/read boundary; raw values are absent from returned and persisted payloads.
 
 Evidence:
 
@@ -399,7 +411,9 @@ Deferred adjustment:
 ### R-014 — Task and timeline events are not canonical contracts
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): `TaskEvent` is a discriminated union backed by canonical runtime agent/type registries. Validation is enforced before persistence and on historical reads, including negative no-write tests.
 
 Evidence:
 
@@ -423,7 +437,9 @@ Deferred adjustment:
 ### R-015 — Task-state separation is not enforced at runtime
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): task mappers reject invalid persisted state and execution-target values, and writes enforce the authoritative transition matrix.
 
 Evidence:
 
@@ -449,7 +465,9 @@ Deferred adjustment:
 ### R-016 — Terminal and unknown-state semantics are ambiguous
 
 Severity: **Medium**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): provider completion maps to nonterminal local review, provider failure remains recoverable, and unknown provider states are explicitly uncertain and nonterminal.
 
 Evidence:
 
@@ -1002,7 +1020,9 @@ Deferred adjustment:
 ### R-037 — The client calls unsupported operations and omits required ones
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): the client uses documented source/session/activity operations, `:sendMessage` with `{ prompt }`, and `DELETE`; unsupported lifecycle operations cannot report success.
 
 Evidence:
 
@@ -1027,7 +1047,9 @@ Deferred adjustment:
 ### R-038 — Wire types contradict the documented Jules schemas
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): provider-local DTOs model output arrays, structured branches, documented message/activity/artifact variants, and bounded unknown variants without invented PR SHA/branch fields.
 
 Evidence:
 
@@ -1051,7 +1073,9 @@ Deferred adjustment:
 ### R-039 — Typed response validation and fixture-based contract tests are absent
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): every successful response crosses explicit runtime parsers; malformed envelopes and members raise `JulesContractError`, with positive and negative authoritative-shape fixtures.
 
 Evidence:
 
@@ -1076,7 +1100,9 @@ Deferred adjustment:
 ### R-040 — Pagination tokens are discarded for sources and activities
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): list methods return validated envelopes with `nextPageToken`; source discovery traverses pages and the diagnostic activities endpoint preserves the token. Durable polling bounds remain tracked separately.
 
 Evidence:
 
@@ -1099,7 +1125,9 @@ Deferred adjustment:
 ### R-041 — Retry and abort behavior can duplicate mutations or ignore cancellation
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): automatic retry is restricted to GET requests, and a negative test proves a transient mutating response makes one provider call. Durable mutation reconciliation remains a persistence-stage requirement.
 
 Evidence:
 
@@ -1123,7 +1151,9 @@ Deferred adjustment:
 ### R-042 — Secret exposure remains possible despite message redaction
 
 Severity: **Medium**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): the client key is private, structured provider details are deeply sanitized, and tests cover nested errors and semantic secret fields.
 
 Evidence:
 
@@ -1187,7 +1217,9 @@ Deferred adjustment:
 ### R-044 — The vault encryption key is reproducible and is not OS-protected
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): version 2 vault ciphertext is protected with current-user Windows DPAPI. Reproducible derivation remains only as an authenticated one-time legacy migration reader and is replaced after successful decryption.
 
 Evidence:
 
@@ -1234,7 +1266,9 @@ Deferred adjustment:
 ### R-046 — Corruption and migration failures are silently treated as an empty vault
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): corrupt, unknown, or undecryptable vaults throw typed errors and are never overwritten through an empty fallback; tests cover verified legacy migration and corrupt version 2 data.
 
 Evidence:
 
@@ -1257,7 +1291,9 @@ Deferred adjustment:
 ### R-047 — Credential validation can accept invalid responses and leak submitted keys
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): validation depends on strict source-list parsing and returns a closed status set with fixed safe messages. A reflected arbitrary submitted secret is proven absent from the result.
 
 Evidence:
 
@@ -1865,7 +1901,9 @@ Deferred adjustment:
 ### R-070 — Completion bypasses mandatory review and produces contradictory states
 
 Severity: **High**
-Status: **Open**
+Status: **Resolved**
+
+Resolution evidence (2026-08-23): Jules `COMPLETED` is provider-terminal but maps the local task to `reviewing`; it cannot mark the task complete before review and verification.
 
 Evidence:
 

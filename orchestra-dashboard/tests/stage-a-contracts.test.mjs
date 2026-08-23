@@ -35,6 +35,9 @@ test('Stage A Contracts — Task State Transitions matrix and invariants', () =>
   assert.equal(isValidTaskStateTransition('running', 'failed'), true);
   assert.equal(isValidTaskStateTransition('failed', 'queued'), true); // Retry
   assert.equal(isValidTaskStateTransition('failed', 'recovering'), true); // Automated repair resume
+  assert.equal(isValidTaskStateTransition('failed', 'recovery_required'), true);
+  assert.equal(isValidTaskStateTransition('preflight', 'reviewing'), true);
+  assert.equal(isValidTaskStateTransition('reviewing', 'running'), true);
   assert.equal(isValidTaskStateTransition('baseline_required', 'queued'), true);
   assert.equal(isValidTaskStateTransition('review_disputed', 'summarizing'), true);
 
@@ -123,7 +126,7 @@ test('Stage A Contracts — mapJulesToOrchestraState maps all canonical Jules st
     { jules: 'IN_PROGRESS', expectedTask: 'running', expectedExec: 'WORKING', isProviderTerminal: false, isTaskTerminal: false },
     { jules: 'PAUSED', expectedTask: 'running', expectedExec: 'PAUSED', isProviderTerminal: false, isTaskTerminal: false },
     { jules: 'COMPLETED', expectedTask: 'reviewing', expectedExec: 'COMPLETED', isProviderTerminal: true, isTaskTerminal: false },
-    { jules: 'FAILED', expectedTask: 'failed', expectedExec: 'FAILED', isProviderTerminal: true, isTaskTerminal: true },
+    { jules: 'FAILED', expectedTask: 'failed', expectedExec: 'FAILED', isProviderTerminal: true, isTaskTerminal: false },
   ];
 
   for (const c of cases) {
@@ -184,6 +187,9 @@ test('Stage A Contracts — TaskRepository enforces state transitions and enum v
     () => repo.update(task.id, { state: 'NON_EXISTENT_STATE' }),
     /Invalid task state/i
   );
+
+  db.prepare('UPDATE tasks SET state=? WHERE id=?').run('CORRUPT_STATE', task.id);
+  assert.throws(() => repo.getById(task.id), /Persisted task contains invalid state/);
 });
 
 test('Stage A Contracts — TaskEventRepository deeply sanitizes secrets at persistence boundary', () => {
@@ -232,5 +238,36 @@ test('Stage A Contracts — isOrchestraTaskState and redactSecretsDeep unit vali
 
   const raw = { password: 'secretpassword', token: 'Bearer ya29.abcdef123456789' };
   const sanitized = redactSecretsDeep(raw);
-  assert.equal(sanitized.token, 'Bearer [REDACTED_TOKEN]');
+  assert.equal(sanitized.password, '[REDACTED]');
+  assert.equal(sanitized.token, '[REDACTED]');
+
+  const nestedError = new Error('request failed with apiKey=AIzaSyB1234567890abcdefghijklmnopqrstuvwxyz', {
+    cause: new Error('Authorization: Bearer hidden-value'),
+  });
+  const safeError = redactSecretsDeep(nestedError);
+  assert.equal(JSON.stringify(safeError).includes('AIzaSy'), false);
+  assert.equal(JSON.stringify(safeError).includes('hidden-value'), false);
+});
+
+test('Stage A Contracts — invalid events are rejected before persistence and on historical reads', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  const repo = new TaskEventRepository(db);
+  assert.throws(() => repo.add('task-1', 'arbitrary-agent', 'warning', { message: 'bad' }), /Unknown task event agent/);
+  assert.throws(() => repo.add('task-1', 'system', 'arbitrary.event', {}), /Unknown task event type/);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM task_events').get().count, 0);
+
+  db.prepare('INSERT INTO task_events (task_id,agent,type,payload,created_at) VALUES (?,?,?,?,?)').run(
+    'task-1', 'system', 'arbitrary.event', '{}', new Date().toISOString(),
+  );
+  assert.throws(() => repo.list('task-1'), /Unknown task event type/);
 });

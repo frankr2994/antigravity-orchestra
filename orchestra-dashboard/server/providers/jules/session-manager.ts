@@ -202,7 +202,7 @@ export class JulesSessionManager {
     try {
       const [sessionRes, activitiesRes] = await Promise.all([
         client.getSession(remoteSessionId),
-        client.listActivities(remoteSessionId).catch(() => ({ activities: [] })),
+        client.listActivities(remoteSessionId),
       ]);
       session = sessionRes;
       activities = activitiesRes.activities || [];
@@ -251,7 +251,7 @@ export class JulesSessionManager {
 
     // Handle terminal transitions
     if (julesState === 'COMPLETED') {
-      this.store.updateTask(cloudSession.taskId, { state: 'completed' });
+      this.store.updateTask(cloudSession.taskId, { state: mapping.taskState });
       this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', {
         remoteSessionId,
         prUrl,

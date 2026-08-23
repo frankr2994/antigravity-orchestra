@@ -6,6 +6,7 @@ import {
   type ExecutionTarget,
   isOrchestraTaskState,
   isValidTaskStateTransition,
+  isExecutionTarget,
 } from '../../../domain/index.js';
 
 function now() { return new Date().toISOString(); }
@@ -13,7 +14,10 @@ function now() { return new Date().toISOString(); }
 function mapTask(row: unknown): TaskRecord {
   const r = row as Record<string, unknown>;
   const rawState = String(r.state);
-  const state: OrchestraTaskState = isOrchestraTaskState(rawState) ? rawState : 'failed';
+  if (!isOrchestraTaskState(rawState)) throw new Error(`Persisted task contains invalid state '${rawState}'.`);
+  const state: OrchestraTaskState = rawState;
+  const rawTarget = r.target ? String(r.target) : 'local';
+  if (!isExecutionTarget(rawTarget)) throw new Error(`Persisted task contains invalid target '${rawTarget}'.`);
 
   return {
     id: String(r.id),
@@ -22,7 +26,7 @@ function mapTask(row: unknown): TaskRecord {
     prompt: String(r.prompt),
     title: String(r.title),
     state,
-    target: (r.target ? String(r.target) : 'local') as ExecutionTarget,
+    target: rawTarget,
     classification: r.classification ? String(r.classification) : null,
     models: r.models ? String(r.models) : null,
     result: r.result ? String(r.result) : null,

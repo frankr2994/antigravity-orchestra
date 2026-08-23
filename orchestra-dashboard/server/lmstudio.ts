@@ -20,48 +20,113 @@ export interface LmStudioInstalledModel {
   capabilities?: string[];
 }
 
-export async function getInstalledLmStudioModels(): Promise<LmStudioInstalledModel[]> {
+type FetchLike = typeof fetch;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+/** Parse the documented LM Studio GET /api/v1/models response. */
+export function parseLmStudioV1Models(value: unknown): LmStudioInstalledModel[] {
+  const body = asRecord(value);
+  if (!body || !Array.isArray(body.models)) {
+    throw new TypeError('LM Studio /api/v1/models response must contain a models array');
+  }
+
+  return body.models.map((raw, index) => {
+    const item = asRecord(raw);
+    if (!item || typeof item.key !== 'string' || item.key.length === 0) {
+      throw new TypeError(`LM Studio model at index ${index} is missing key`);
+    }
+    if (!Array.isArray(item.loaded_instances)) {
+      throw new TypeError(`LM Studio model ${item.key} is missing loaded_instances`);
+    }
+
+    const loadedInstance = asRecord(item.loaded_instances[0]);
+    const loadedConfig = asRecord(loadedInstance?.config);
+    const quantization = asRecord(item.quantization);
+    const capabilities = asRecord(item.capabilities);
+    const enabledCapabilities = capabilities
+      ? Object.entries(capabilities)
+          .filter(([, enabled]) => enabled === true)
+          .map(([name]) => name)
+      : undefined;
+
+    return {
+      id: item.key,
+      displayName: optionalString(item.display_name),
+      publisher: optionalString(item.publisher),
+      arch: optionalString(item.architecture),
+      quantization: optionalString(quantization?.name),
+      state: item.loaded_instances.length > 0 ? 'loaded' : 'not-loaded',
+      maxContextLength: optionalNumber(item.max_context_length),
+      loadedContextLength: optionalNumber(loadedConfig?.context_length),
+      sizeBytes: optionalNumber(item.size_bytes),
+      paramsString: optionalString(item.params_string),
+      type: optionalString(item.type),
+      capabilities: enabledCapabilities,
+    };
+  });
+}
+
+function parseLegacyModels(value: unknown): LmStudioInstalledModel[] {
+  const body = asRecord(value);
+  const rawList = Array.isArray(body?.models)
+    ? body.models
+    : Array.isArray(body?.data)
+      ? body.data
+      : Array.isArray(value)
+        ? value
+        : null;
+  if (!rawList) throw new TypeError('Legacy model response does not contain an array');
+
+  return rawList.flatMap((raw) => {
+    const item = asRecord(raw);
+    const id = optionalString(item?.id) ?? optionalString(item?.key) ?? optionalString(item?.path);
+    if (!item || !id || item.type === 'embeddings') return [];
+    const quantization = asRecord(item.quantization);
+    return [{
+      id,
+      displayName: optionalString(item.displayName) ?? optionalString(item.name),
+      publisher: optionalString(item.publisher),
+      arch: optionalString(item.arch) ?? optionalString(item.architecture),
+      quantization: optionalString(item.quantization) ?? optionalString(quantization?.name),
+      state: item.state === 'loaded' || item.loaded === true || item.isLoaded === true ? 'loaded' : 'not-loaded',
+      maxContextLength: optionalNumber(item.max_context_length) ?? optionalNumber(item.maxContextLength),
+      loadedContextLength: optionalNumber(item.loaded_context_length) ?? optionalNumber(item.loadedContextLength),
+      sizeBytes: optionalNumber(item.sizeBytes) ?? optionalNumber(item.size_bytes),
+      paramsString: optionalString(item.paramsString) ?? optionalString(item.params),
+      type: optionalString(item.type),
+      capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : undefined,
+    } satisfies LmStudioInstalledModel];
+  });
+}
+
+export async function getInstalledLmStudioModels(fetchImpl: FetchLike = fetch): Promise<LmStudioInstalledModel[]> {
   const rawBase = config.lmStudioBaseUrl || 'http://localhost:1234/v1';
   const serverRoot = rawBase.replace(/\/v1\/?$/, '').replace(/\/+$/, '');
   const v1Base = `${serverRoot}/v1`;
 
-  // 1. Try native LM Studio endpoint (/api/v0/models or /api/v1/models)
-  const nativeEndpoints = [`${serverRoot}/api/v0/models`, `${serverRoot}/api/v1/models`];
+  // The documented API is authoritative. Older endpoints remain compatibility fallbacks.
+  const nativeEndpoints = [
+    { url: `${serverRoot}/api/v1/models`, parse: parseLmStudioV1Models },
+    { url: `${serverRoot}/api/v0/models`, parse: parseLegacyModels },
+  ];
   for (const endpoint of nativeEndpoints) {
     try {
-      const response = await fetch(endpoint, { signal: AbortSignal.timeout(3000) });
+      const response = await fetchImpl(endpoint.url, { signal: AbortSignal.timeout(3000) });
       if (response.ok) {
-        const body = (await response.json()) as Record<string, unknown>;
-        const rawList = Array.isArray(body.models)
-          ? body.models
-          : Array.isArray(body.data)
-            ? body.data
-            : Array.isArray(body)
-              ? body
-              : null;
-
-        if (rawList && rawList.length > 0) {
-          return rawList
-            .filter((item: any) => item && (item.id || item.key || item.path) && item.type !== 'embeddings')
-            .map((item: any) => {
-              const id = String(item.id || item.key || item.path);
-              const isLoaded = item.state === 'loaded' || item.loaded === true || item.isLoaded === true;
-              return {
-                id,
-                displayName: typeof item.displayName === 'string' ? item.displayName : typeof item.name === 'string' ? item.name : undefined,
-                publisher: typeof item.publisher === 'string' ? item.publisher : undefined,
-                arch: typeof item.arch === 'string' ? item.arch : item.architecture,
-                quantization: typeof item.quantization === 'string' ? item.quantization : item.quantization?.name,
-                state: isLoaded ? ('loaded' as const) : ('not-loaded' as const),
-                maxContextLength: typeof item.max_context_length === 'number' ? item.max_context_length : item.maxContextLength,
-                loadedContextLength: typeof item.loaded_context_length === 'number' ? item.loaded_context_length : item.loadedContextLength,
-                sizeBytes: typeof item.sizeBytes === 'number' ? item.sizeBytes : item.size_bytes,
-                paramsString: typeof item.paramsString === 'string' ? item.paramsString : item.params,
-                type: typeof item.type === 'string' ? item.type : undefined,
-                capabilities: Array.isArray(item.capabilities) ? item.capabilities.map(String) : undefined,
-              };
-            });
-        }
+        return endpoint.parse(await response.json());
       }
     } catch {
       // Continue to next endpoint
@@ -70,20 +135,11 @@ export async function getInstalledLmStudioModels(): Promise<LmStudioInstalledMod
 
   // 2. Fallback to standard OpenAI-compatible /v1/models endpoint
   try {
-    const response = await fetch(`${v1Base}/models`, { signal: AbortSignal.timeout(3000) });
+    const response = await fetchImpl(`${v1Base}/models`, { signal: AbortSignal.timeout(3000) });
     if (response.ok) {
       const body = (await response.json()) as { data?: Array<Record<string, unknown>> };
       if (Array.isArray(body.data)) {
-        return body.data
-          .filter((item) => item && item.id)
-          .map((item) => {
-            const isLoaded = item.state === 'loaded' || item.loaded === true || item.isLoaded === true;
-            return {
-              id: String(item.id),
-              displayName: typeof item.displayName === 'string' ? item.displayName : undefined,
-              state: isLoaded ? ('loaded' as const) : ('not-loaded' as const),
-            };
-          });
+        return parseLegacyModels(body);
       }
     }
   } catch {

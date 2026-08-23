@@ -1,5 +1,7 @@
 import { CredentialVault } from '../../infrastructure/security/vault.js';
 import { JulesApiClient } from './client.js';
+import { JulesApiError } from './errors.js';
+import { JulesContractError } from './validation.js';
 
 // ============================================================================
 // Google Jules Credential Management & Resolution
@@ -9,6 +11,21 @@ export interface JulesCredentialStatus {
   configured: boolean;
   source: 'env' | 'vault' | 'none';
   masked: string;
+}
+
+export type JulesCredentialValidationStatus =
+  | 'valid'
+  | 'invalid'
+  | 'forbidden'
+  | 'rate_limited'
+  | 'unavailable'
+  | 'contract_error';
+
+export interface JulesCredentialValidationResult {
+  valid: boolean;
+  status: JulesCredentialValidationStatus;
+  error?: string;
+  sourceCount?: number;
 }
 
 export function maskApiKey(key?: string | null): string {
@@ -57,9 +74,9 @@ export function getJulesCredentialStatus(vault?: CredentialVault): JulesCredenti
 export async function validateJulesApiKey(
   apiKey: string,
   fetchFn?: typeof fetch
-): Promise<{ valid: boolean; error?: string; sourceCount?: number }> {
+): Promise<JulesCredentialValidationResult> {
   if (!apiKey || !apiKey.trim()) {
-    return { valid: false, error: 'API key cannot be empty.' };
+    return { valid: false, status: 'invalid', error: 'API key cannot be empty.' };
   }
 
   try {
@@ -73,13 +90,18 @@ export async function validateJulesApiKey(
     const res = await client.listSources();
     return {
       valid: true,
+      status: 'valid',
       sourceCount: res.sources?.length || 0,
     };
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    return {
-      valid: false,
-      error: message,
-    };
+    if (err instanceof JulesContractError) {
+      return { valid: false, status: 'contract_error', error: 'Jules returned an incompatible response.' };
+    }
+    if (err instanceof JulesApiError) {
+      if (err.status === 401) return { valid: false, status: 'invalid', error: 'The Jules API key was rejected.' };
+      if (err.status === 403) return { valid: false, status: 'forbidden', error: 'The Jules API key lacks repository access.' };
+      if (err.status === 429) return { valid: false, status: 'rate_limited', error: 'Jules rate limited credential validation.' };
+    }
+    return { valid: false, status: 'unavailable', error: 'Jules credential validation is temporarily unavailable.' };
   }
 }
