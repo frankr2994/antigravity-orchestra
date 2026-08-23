@@ -4,7 +4,6 @@ import {
   type CloudSessionReference,
   type ExecutionAttempt,
   type OrchestraTaskState,
-  isTerminalTaskState,
 } from '../../domain/index.js';
 import { mapJulesToOrchestraState, isJulesTerminalState, type JulesSessionState } from './state-mapper.js';
 import { JulesApiClient } from './client.js';
@@ -278,32 +277,20 @@ export class JulesSessionManager {
 
   async cancelSession(
     remoteSessionId: string,
-    options?: { julesClient?: JulesApiClient }
-  ): Promise<{ ok: boolean; error?: string }> {
+    _options?: { julesClient?: JulesApiClient }
+  ): Promise<{ ok: false; code: 'JULES_CANCELLATION_UNSUPPORTED'; error: string }> {
     const cloudSession = this.store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
     if (!cloudSession) {
-      return { ok: false, error: `Cloud session '${remoteSessionId}' not found.` };
+      return {
+        ok: false,
+        code: 'JULES_CANCELLATION_UNSUPPORTED',
+        error: `Cloud session '${remoteSessionId}' cannot be cancelled because the Jules API has no confirmed cancellation operation.`,
+      };
     }
-
-    try {
-      const client = this.resolveClient(options?.julesClient);
-      await client.deleteSession(remoteSessionId).catch(() => null);
-    } catch {
-      // Best-effort remote cancel/delete
-    }
-
-    this.store.manager.cloudSessions.update(cloudSession.id, {
-      state: 'CANCELLED',
-    });
-
-    const currentTask = this.store.getTask(cloudSession.taskId);
-    if (currentTask && !isTerminalTaskState(currentTask.state)) {
-      this.store.updateTask(cloudSession.taskId, { state: 'cancelled' });
-    }
-    this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.cancelled', {
-      remoteSessionId,
-    });
-
-    return { ok: true };
+    return {
+      ok: false,
+      code: 'JULES_CANCELLATION_UNSUPPORTED',
+      error: 'The Jules API documents session deletion, not a confirmed cancellation operation.',
+    };
   }
 }

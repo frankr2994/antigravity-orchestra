@@ -147,10 +147,11 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
 
     // 7. Cancel Session
     const cancelResult = await manager.cancelSession('sess-1234', { julesClient });
-    assert.equal(cancelResult.ok, true);
+    assert.equal(cancelResult.ok, false);
+    assert.equal(cancelResult.code, 'JULES_CANCELLATION_UNSUPPORTED');
 
     const cancelledCloud = store.manager.cloudSessions.getByTaskId(task.id);
-    assert.equal(cancelledCloud?.state, 'CANCELLED');
+    assert.equal(cancelledCloud?.state, 'COMPLETED');
 
     const updatedTask = store.getTask(task.id);
     assert.equal(updatedTask?.state, 'completed');

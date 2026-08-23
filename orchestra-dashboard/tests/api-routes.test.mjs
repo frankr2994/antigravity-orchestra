@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
 import { createApp } from '../dist-server/bootstrap/app.js';
+import { createApiRouter } from '../dist-server/api/routes/index.js';
+import { hasJulesCapability, parseJulesRolloutStage, parseStrictBoolean } from '../dist-server/config.js';
+import express from 'express';
 import { generateDynamicSessionTitle } from '../dist-server/api/routes/sessions.js';
 import { Store } from '../dist-server/db.js';
 import { TaskManager } from '../dist-server/tasks.js';
@@ -45,6 +48,36 @@ test('Phase 5 API — createApp mounts modular routers and handles requests', as
 
     store.close();
   } finally {
+    try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
+  }
+});
+
+test('Stage 0 — Jules configuration is strict and capability ordered', () => {
+  assert.equal(parseStrictBoolean(undefined), false);
+  assert.equal(parseStrictBoolean('false'), false);
+  assert.equal(parseStrictBoolean('1'), false);
+  assert.equal(parseStrictBoolean('TRUE'), true);
+  assert.equal(parseJulesRolloutStage('nonsense'), 'connect');
+  assert.equal(parseJulesRolloutStage(' REVIEW '), 'review');
+  assert.equal(hasJulesCapability('review', 'read'), true);
+  assert.equal(hasJulesCapability('read', 'dispatch'), false);
+});
+
+test('Stage 0 — disabled Jules router is not mounted', async () => {
+  const dbPath = join(tmpdir(), `orchestra-app-gate-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  let server;
+  let store;
+  try {
+    store = new Store(dbPath);
+    const tasks = new TaskManager(store, 2);
+    const app = express();
+    app.use('/api', createApiRouter(store, tasks, { julesEnabled: false }));
+    server = app.listen(0);
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/jules/credential-status`);
+    assert.equal(response.status, 404);
+  } finally {
+    if (server) await new Promise((resolve) => server.close(resolve));
+    if (store) store.close();
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
   }
 });

@@ -10,6 +10,41 @@ const localAppData = process.env.LOCALAPPDATA || resolve(process.cwd(), '.local-
 const dataDir = process.env.ORCHESTRA_DATA_DIR || resolve(localAppData, 'AntigravityOrchestra');
 mkdirSync(dataDir, { recursive: true });
 
+export const JULES_ROLLOUT_STAGES = [
+  'off',
+  'connect',
+  'read',
+  'dispatch',
+  'interact',
+  'review',
+  'repair',
+  'integrate',
+  'parallel',
+  'auto',
+] as const;
+
+export type JulesRolloutStage = typeof JULES_ROLLOUT_STAGES[number];
+
+export function parseStrictBoolean(value: string | undefined): boolean {
+  return value?.trim().toLowerCase() === 'true';
+}
+
+export function parseJulesRolloutStage(value: string | undefined): JulesRolloutStage {
+  const normalized = value?.trim().toLowerCase();
+  return JULES_ROLLOUT_STAGES.includes(normalized as JulesRolloutStage)
+    ? normalized as JulesRolloutStage
+    : 'connect';
+}
+
+export function hasJulesCapability(current: JulesRolloutStage, required: JulesRolloutStage): boolean {
+  return JULES_ROLLOUT_STAGES.indexOf(current) >= JULES_ROLLOUT_STAGES.indexOf(required);
+}
+
+const julesEnabled = parseStrictBoolean(process.env.JULES_ENABLED);
+const julesRolloutStage = julesEnabled
+  ? parseJulesRolloutStage(process.env.JULES_ROLLOUT_STAGE)
+  : 'off';
+
 export const config = {
   host: '127.0.0.1',
   port: Number(process.env.ORCHESTRA_PORT || 3001),
@@ -22,4 +57,8 @@ export const config = {
   lmStudioModel: process.env.LM_STUDIO_MODEL || 'gemma-4-e2b-it-qat',
   maxGlobalTasks: 2,
   onboardingVersion: '1.0.0',
+  jules: {
+    enabled: julesEnabled,
+    rolloutStage: julesRolloutStage,
+  },
 };

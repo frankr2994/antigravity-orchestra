@@ -1,5 +1,6 @@
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import type { Store } from '../../db.js';
+import { config, hasJulesCapability, type JulesRolloutStage } from '../../config.js';
 import { CredentialVault } from '../../infrastructure/security/vault.js';
 import { JulesApiClient } from '../../providers/jules/client.js';
 import {
@@ -21,6 +22,7 @@ export interface JulesRouterOptions {
   vault?: CredentialVault;
   sessionManager?: JulesSessionManager;
   julesClient?: JulesApiClient;
+  rolloutStage?: JulesRolloutStage;
 }
 
 export function createJulesRouter(
@@ -33,6 +35,7 @@ export function createJulesRouter(
   let vault: CredentialVault;
   let sessionManager: JulesSessionManager | undefined;
   let customClient: JulesApiClient | undefined;
+  let rolloutStage: JulesRolloutStage = config.jules.rolloutStage;
 
   if (storeOrOptions && 'manager' in storeOrOptions) {
     store = storeOrOptions as Store;
@@ -43,6 +46,7 @@ export function createJulesRouter(
     store = opts.store;
     vault = opts.vault ?? explicitVault ?? new CredentialVault();
     customClient = opts.julesClient;
+    rolloutStage = opts.rolloutStage ?? rolloutStage;
     sessionManager = opts.sessionManager ?? (store ? new JulesSessionManager(store, vault) : undefined);
   } else {
     vault = explicitVault ?? new CredentialVault();
@@ -70,14 +74,26 @@ export function createJulesRouter(
     return sessionManager;
   }
 
+  function requireCapability(res: Response, required: JulesRolloutStage): boolean {
+    if (hasJulesCapability(rolloutStage, required)) return true;
+    res.status(501).json({
+      error: `This Jules operation is unavailable at rollout stage '${rolloutStage}'.`,
+      code: 'JULES_CAPABILITY_UNAVAILABLE',
+      requiredStage: required,
+    });
+    return false;
+  }
+
   // 1. Credentials Status
   router.get('/jules/credential-status', (_req, res) => {
+    if (!requireCapability(res, 'connect')) return;
     res.json(getJulesCredentialStatus(vault));
   });
 
   // 2. Validate Key
   router.post('/jules/validate-key', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'connect')) return;
       let keyToTest = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
       if (!keyToTest) {
         const current = resolveJulesApiKey(vault);
@@ -99,6 +115,7 @@ export function createJulesRouter(
   // 3. Save Key
   router.post('/jules/save-key', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'connect')) return;
       const apiKey = typeof req.body?.apiKey === 'string' ? req.body.apiKey.trim() : '';
       if (!apiKey) {
         res.status(400).json({ error: 'API key cannot be empty.' });
@@ -126,6 +143,7 @@ export function createJulesRouter(
 
   // 4. Clear Key
   router.delete('/jules/clear-key', (_req, res) => {
+    if (!requireCapability(res, 'connect')) return;
     vault.removeSecret('jules_api_key');
     res.json({
       ok: true,
@@ -136,6 +154,7 @@ export function createJulesRouter(
   // 5. Project Source Discovery
   router.get('/projects/:id/jules-source', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'read')) return;
       const s = requireStore();
       const project = s.getProject(req.params.id);
       if (!project) {
@@ -156,6 +175,7 @@ export function createJulesRouter(
   // 6. Explicit Cloud Dispatch
   router.post('/projects/:id/jules/dispatch', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'dispatch')) return;
       const s = requireStore();
       const sm = requireSessionManager();
       const project = s.getProject(req.params.id);
@@ -211,6 +231,7 @@ export function createJulesRouter(
   // 7. Get Task Cloud Session
   router.get('/tasks/:id/jules-session', (req, res, next) => {
     try {
+      if (!requireCapability(res, 'read')) return;
       const s = requireStore();
       const task = s.getTask(req.params.id);
       if (!task) {
@@ -231,6 +252,7 @@ export function createJulesRouter(
   // 8. Approve Plan
   router.post('/tasks/:id/jules/approve-plan', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'interact')) return;
       const s = requireStore();
       const task = s.getTask(req.params.id);
       if (!task) {
@@ -260,6 +282,7 @@ export function createJulesRouter(
   // 9. Send Message to Jules Cloud Session
   const handleSendMessage = async (req: any, res: any, next: any) => {
     try {
+      if (!requireCapability(res, 'interact')) return;
       const s = requireStore();
       const task = s.getTask(req.params.id);
       if (!task) {
@@ -297,55 +320,24 @@ export function createJulesRouter(
   router.post('/tasks/:id/jules/feedback', handleSendMessage);
 
   // 10. Cancel / Delete Cloud Session
-  router.post('/tasks/:id/jules/cancel', async (req, res, next) => {
-    try {
-      const s = requireStore();
-      const sm = requireSessionManager();
-      const task = s.getTask(req.params.id);
-      if (!task) {
-        res.status(404).json({ error: 'Task not found.' });
-        return;
-      }
-
-      const cloudSession = s.manager.cloudSessions.getByTaskId(task.id);
-      if (!cloudSession) {
-        res.status(404).json({ error: 'Cloud session not found for task.' });
-        return;
-      }
-
-      const result = await sm.cancelSession(cloudSession.remoteSessionId, { julesClient: customClient });
-      res.json(result);
-    } catch (error) {
-      next(error);
-    }
+  router.post('/tasks/:id/jules/cancel', (_req, res) => {
+    res.status(501).json({
+      error: 'The Jules API does not expose a confirmed cancellation operation.',
+      code: 'JULES_CANCELLATION_UNSUPPORTED',
+    });
   });
 
-  router.delete('/tasks/:id/jules-session', async (req, res, next) => {
-    try {
-      const s = requireStore();
-      const sm = requireSessionManager();
-      const task = s.getTask(req.params.id);
-      if (!task) {
-        res.status(404).json({ error: 'Task not found.' });
-        return;
-      }
-
-      const cloudSession = s.manager.cloudSessions.getByTaskId(task.id);
-      if (!cloudSession) {
-        res.status(404).json({ error: 'Cloud session not found for task.' });
-        return;
-      }
-
-      const result = await sm.cancelSession(cloudSession.remoteSessionId, { julesClient: customClient });
-      res.json(result);
-    } catch (error) {
-      next(error);
-    }
+  router.delete('/tasks/:id/jules-session', (_req, res) => {
+    res.status(501).json({
+      error: 'Remote Jules session deletion is unavailable until durable deletion semantics are implemented.',
+      code: 'JULES_DELETION_UNAVAILABLE',
+    });
   });
 
   // 11. List Activities (with pagination)
   router.get('/tasks/:id/jules/activities', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'read')) return;
       const s = requireStore();
       const task = s.getTask(req.params.id);
       if (!task) {
@@ -372,6 +364,7 @@ export function createJulesRouter(
   // 12. Import PR & Review (Feature-gated until Phase 19)
   router.post('/tasks/:id/jules/import-pr', async (req, res, next) => {
     try {
+      if (!requireCapability(res, 'review')) return;
       if (process.env.ORCHESTRA_ENABLE_EXPERIMENTAL_PR_IMPORT !== 'true') {
         res.status(501).json({
           error: 'PR import and worktree verification are feature-gated until Phase 19.',

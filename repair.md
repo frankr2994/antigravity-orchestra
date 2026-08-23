@@ -1918,6 +1918,8 @@ Status: **Open**
 
 Evidence:
 
+- Repair checkpoint (2026-08-23): cancellation is now fail-closed at both the HTTP and session-manager boundaries. It returns `JULES_CANCELLATION_UNSUPPORTED`, performs no provider deletion, and does not mutate task, cloud-session, or event state. Focused no-side-effect tests and the complete 127-test offline suite pass. The finding remains open until the later durable lifecycle-control model is complete.
+
 - `cancelSession` calls an undocumented `:pause` endpoint rather than a documented cancellation operation.
 - Every remote error is swallowed, after which the cloud session is unconditionally set to `CANCELLED`, the task is set to `failed`, and `{ ok: true }` is returned.
 - Pausing and cancelling have different semantics; even a successful pause would not prove terminal cancellation.
@@ -3392,6 +3394,8 @@ Status: **Open**
 Dependency impact: **Blocks reliable lifecycle control and recovery**
 
 Evidence:
+
+- Repair checkpoint (2026-08-23): the Jules router is now absent unless `JULES_ENABLED` is explicitly `true`, and an ordered rollout capability gate prevents enabling the master flag from exposing later operations. Cancellation and deletion routes return typed 501 responses without provider or persistence side effects. The finding remains open until durable local automation and truthful remote deletion workflows are implemented.
 
 - Pause and resume call Jules and append events but do not update the cloud session or task state, persist an intent, or validate whether the transition is legal.
 - Cancellation delegates to the existing `cancelSession`, which calls Jules `pause` best-effort, suppresses every remote error, writes local `CANCELLED`, marks the task failed, and returns `ok: true`.

@@ -8,9 +8,17 @@ import { createTasksRouter } from './tasks.js';
 import { createModelsRouter } from './models.js';
 import { createSettingsRouter } from './settings.js';
 import { createJulesRouter } from './jules.js';
+import { config, type JulesRolloutStage } from '../../config.js';
 
-export function createApiRouter(store: Store, tasks: TaskManager): Router {
+export interface ApiRouterOptions {
+  julesEnabled?: boolean;
+  julesRolloutStage?: JulesRolloutStage;
+}
+
+export function createApiRouter(store: Store, tasks: TaskManager, options: ApiRouterOptions = {}): Router {
   const router = Router();
+  const julesEnabled = options.julesEnabled ?? config.jules.enabled;
+  const julesRolloutStage = options.julesRolloutStage ?? config.jules.rolloutStage;
 
   router.use(createBootstrapRouter(store));
   router.use(createProjectsRouter(store));
@@ -18,7 +26,9 @@ export function createApiRouter(store: Store, tasks: TaskManager): Router {
   router.use(createTasksRouter(store, tasks));
   router.use(createModelsRouter(store));
   router.use(createSettingsRouter(store));
-  router.use(createJulesRouter(store));
+  if (julesEnabled) {
+    router.use(createJulesRouter({ store, rolloutStage: julesRolloutStage }));
+  }
 
   return router;
 }

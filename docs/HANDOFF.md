@@ -102,3 +102,9 @@ feat: Implement local Git logger skill for incremental change logging and commit
 * **Foreground enforcement:** Antigravity prompts explicitly prohibit `invoke_subagent`, `manage_task` delegation, pausing for another agent, and background execution. The dashboard emits `task.provider-recovery` when the fallback is used.
 * **Verification:** Dashboard lint, production build, and all 47 automated tests pass.
 
+## [2026-08-23] Stage 0 Jules containment
+
+* Jules API routes are mounted only when `JULES_ENABLED` is explicitly `true` and are further limited by an ordered rollout stage.
+* Unsupported cancellation and unfinished remote deletion now fail closed without provider calls, state changes, or false-success events.
+* Focused route/session tests and the complete offline `npm run check` gate pass with 127 tests.
+

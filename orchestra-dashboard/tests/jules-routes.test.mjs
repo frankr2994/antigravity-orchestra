@@ -41,7 +41,7 @@ test('Phase 16 Routes — Credential and source endpoints', async () => {
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createJulesRouter({ store, vault, julesClient }));
+    app.use('/api', createJulesRouter({ store, vault, julesClient, rolloutStage: 'connect' }));
 
     server = app.listen(0);
     const port = server.address().port;
@@ -176,7 +176,7 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
 
     const app = express();
     app.use(express.json());
-    app.use('/api', createJulesRouter({ store, vault, julesClient }));
+    app.use('/api', createJulesRouter({ store, vault, julesClient, rolloutStage: 'review' }));
 
     server = app.listen(0);
     const port = server.address().port;
@@ -230,10 +230,10 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     const cancelRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/cancel`, {
       method: 'POST',
     });
-    assert.equal(cancelRes.status, 200);
+    assert.equal(cancelRes.status, 501);
     const cancelData = await cancelRes.json();
-    assert.equal(cancelData.ok, true);
-    assert.equal(remoteCancelled, true);
+    assert.equal(cancelData.code, 'JULES_CANCELLATION_UNSUPPORTED');
+    assert.equal(remoteCancelled, false);
 
     // 7. Feature-gated import-pr endpoint returns 501
     const importRes = await fetch(`${baseUrl}/tasks/${taskId}/jules/import-pr`, {
