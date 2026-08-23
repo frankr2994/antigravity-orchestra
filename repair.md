@@ -3613,6 +3613,7 @@ Resolution summary:
 Delivered operational constraints:
 
 - Jules is disabled by default and capabilities advance through explicit rollout stages.
+- Jules enablement is persisted and controlled from the dashboard Settings page; credential setup remains available while disabled, and route/supervisor behavior changes without a process restart.
 - Pause, resume, and cancel remain truthfully unavailable until the provider exposes a confirmed lifecycle contract.
 - Concurrent cloud sessions are configurable (`JULES_MAX_CONCURRENT_SESSIONS`, default 2, local safety bound 1–32); no provider-account maximum is hardcoded.
 - Repository verification executes checked-out PR code on the Orchestra host with a sanitized environment, time/output/resource bounds, and an isolated managed worktree. This is hardened host-local execution, not an OS security sandbox.

@@ -104,23 +104,30 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     const sessionManager = new JulesSessionManager(store);
 
     let terminalEventReceived = null;
+    let enabled = false;
 
     const supervisor = new JulesSupervisor({
       store,
       sessionManager,
       julesClient,
+      isEnabled: () => enabled,
       onTerminal: (event) => {
         terminalEventReceived = event;
       },
     });
 
-    // 1. Tick 1: In Progress
+    // 1. Disabled: no provider polling occurs.
+    const disabledTick = await supervisor.tick();
+    assert.deepEqual(disabledTick, { polled: 0, active: 0, errors: 0 });
+
+    // 2. Enabled: in-progress work resumes without reconstructing the supervisor.
+    enabled = true;
     const tick1 = await supervisor.tick();
     assert.equal(tick1.polled, 1);
     assert.equal(tick1.active, 1);
     assert.equal(terminalEventReceived, null);
 
-    // 2. Tick 2: Completed
+    // 3. Tick 2: Completed
     const cursor = store.manager.activityCursors.get(createdCloud.id);
     store.manager.activityCursors.compareAndSet(createdCloud.id, cursor.version, {
       nextPollAt: '2000-01-01T00:00:00.000Z', consecutiveFailures: 0,
@@ -133,12 +140,12 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     assert.equal(terminalEventReceived?.taskId, task.id);
     assert.equal(terminalEventReceived?.prUrl, 'https://github.com/frankr2994/antigravity-orchestra/pull/99');
 
-    // 3. Tick 3: No more active sessions (completed session is filtered out)
+    // 4. Tick 3: No more active sessions (completed session is filtered out)
     const tick3 = await supervisor.tick();
     assert.equal(tick3.polled, 0);
     assert.equal(tick3.active, 0);
 
-    // 4. Lifecycle start and stop
+    // 5. Lifecycle start and stop
     supervisor.start();
     supervisor.stop();
 

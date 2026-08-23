@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.server.json && tsc -b && vite build",
     "lint": "oxlint",
     "start": "node --enable-source-maps dist-server/index.js",
-    "test": "npm run build:server && node --test tests/*.test.mjs",
+    "test": "npm run build:server && node --test --test-concurrency=1 tests/*.test.mjs",
     "build:server": "tsc -p tsconfig.server.json",
     "check": "npm run lint && npm run build && npm test",
     "preview": "vite preview"

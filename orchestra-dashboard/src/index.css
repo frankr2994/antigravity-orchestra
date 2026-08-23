@@ -619,3 +619,4 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .jules-settings-card header { justify-content: space-between; }
 .jules-settings-card p { color: var(--muted); margin: 0; }
 .jules-key-row input { flex: 1; min-width: 180px; }
+.jules-runtime-state { display: flex; gap: 8px; flex-wrap: wrap; }

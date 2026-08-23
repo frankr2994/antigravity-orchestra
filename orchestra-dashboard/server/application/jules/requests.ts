@@ -28,6 +28,12 @@ export function parseCredentialValidationRequest(value: unknown): { apiKey?: str
   const input = record(value);
   return { apiKey: boundedString(input.apiKey, 'apiKey', 4096, false) };
 }
+
+export function parseJulesEnabledRequest(value: unknown): { enabled: boolean } {
+  const input = record(value);
+  if (!Object.hasOwn(input, 'enabled')) throw new ApplicationError('INVALID_REQUEST', 'enabled is required.');
+  return { enabled: exactBoolean(input.enabled, 'enabled', false) };
+}
 export interface JulesDispatchCommand {
   prompt: string;
   sessionId?: string;

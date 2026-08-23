@@ -1,10 +1,9 @@
 import { Router } from 'express';
 import type { JulesBatchService } from '../../../application/jules/batch-service.js';
 import { parseBatchDispatchRequest } from '../../../application/jules/requests.js';
-import type { JulesRolloutStage } from '../../../config.js';
-import { requireJulesCapability } from './capability.js';
+import { requireJulesCapability, type JulesStageSource } from './capability.js';
 
-export function createJulesBatchRouter(service: JulesBatchService, stage: JulesRolloutStage): Router {
+export function createJulesBatchRouter(service: JulesBatchService, stage: JulesStageSource): Router {
   const router = Router();
   router.post('/projects/:id/jules/dispatch-batch', async (req, res, next) => {
     try {

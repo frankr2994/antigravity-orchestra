@@ -1,10 +1,9 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import type { JulesSessionService } from '../../../application/jules/session-service.js';
 import { parseActivityPage, parseDispatchRequest, parseInteractionRequest, parseMessageRequest } from '../../../application/jules/requests.js';
-import type { JulesRolloutStage } from '../../../config.js';
-import { requireJulesCapability } from './capability.js';
+import { requireJulesCapability, type JulesStageSource } from './capability.js';
 
-export function createJulesSessionsRouter(service: JulesSessionService, stage: JulesRolloutStage): Router {
+export function createJulesSessionsRouter(service: JulesSessionService, stage: JulesStageSource): Router {
   const router = Router();
   const id = (value: string | string[]) => Array.isArray(value) ? value[0]! : value;
   router.post('/projects/:id/jules/dispatch', async (req, res, next) => {

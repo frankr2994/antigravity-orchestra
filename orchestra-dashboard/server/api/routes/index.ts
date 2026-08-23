@@ -8,7 +8,7 @@ import { createTasksRouter } from './tasks.js';
 import { createModelsRouter } from './models.js';
 import { createSettingsRouter } from './settings.js';
 import { composeJulesRouter } from '../../bootstrap/jules-module.js';
-import { config, type JulesRolloutStage } from '../../config.js';
+import type { JulesRolloutStage } from '../../config.js';
 
 export interface ApiRouterOptions {
   julesEnabled?: boolean;
@@ -17,8 +17,7 @@ export interface ApiRouterOptions {
 
 export function createApiRouter(store: Store, tasks: TaskManager, options: ApiRouterOptions = {}): Router {
   const router = Router();
-  const julesEnabled = options.julesEnabled ?? config.jules.enabled;
-  const julesRolloutStage = options.julesRolloutStage ?? config.jules.rolloutStage;
+  const fixedStage = options.julesEnabled === false ? 'off' : options.julesRolloutStage;
 
   router.use(createBootstrapRouter(store));
   router.use(createProjectsRouter(store));
@@ -26,9 +25,9 @@ export function createApiRouter(store: Store, tasks: TaskManager, options: ApiRo
   router.use(createTasksRouter(store, tasks));
   router.use(createModelsRouter(store));
   router.use(createSettingsRouter(store));
-  if (julesEnabled) {
-    router.use(composeJulesRouter({ store, tasks, rolloutStage: julesRolloutStage }));
-  }
+  // Connection settings are always mounted so Jules can be enabled entirely
+  // from the dashboard. Operational routes resolve the persisted stage per request.
+  router.use(composeJulesRouter({ store, tasks, rolloutStage: fixedStage }));
 
   return router;
 }

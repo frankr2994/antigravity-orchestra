@@ -1,5 +1,5 @@
 import type { Server } from 'node:http';
-import { config, hasJulesCapability } from '../config.js';
+import { config } from '../config.js';
 import { Store } from '../db.js';
 import { TaskManager } from '../tasks.js';
 import { ensureAntigravityStatusCollector } from '../observability.js';
@@ -29,34 +29,30 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
   await reconcileStartupTasks(store);
 
   const tasks = new TaskManager(store, config.maxGlobalTasks);
-  let julesSupervisor: JulesSupervisor | null = null;
-  if (config.jules.enabled && hasJulesCapability(config.jules.rolloutStage, 'read')) {
-    const vault = new CredentialVault();
-    const manager = new JulesSessionManager(store, vault);
-    const connection = new JulesConnectionService(store, vault);
-    const sessions = new JulesSessionService(store, vault, manager, () => connection.client());
-    const batches = new JulesBatchService(store, sessions);
-    const cleanup = new JulesCleanupService(store);
-    const reviewer = new JulesReviewService(store);
-    julesSupervisor = new JulesSupervisor({
-      store, sessionManager: manager, pollIntervalMs: config.jules.pollIntervalMs,
-      maxConcurrentPolls: config.jules.maxConcurrentPolls,
-      cleanup: () => cleanup.tick(),
-      onTerminal: hasJulesCapability(config.jules.rolloutStage, 'integrate')
-        ? async ({ taskId, state, prUrl }) => {
-          if (state === 'COMPLETED' && prUrl) {
-            await reviewer.reviewAndIntegrate(taskId);
-            await batches.reconcileTask(taskId);
-          }
-        }
-        : undefined,
-      onError: (error, session) => console.error(`Jules supervisor${session ? ` (${session.remoteSessionId})` : ''}: ${error.message}`),
-    });
-    julesSupervisor.start();
-    if (hasJulesCapability(config.jules.rolloutStage, 'parallel')) {
-      for (const batch of store.manager.cloudWorkflows.listRunning()) void batches.launchReady(batch.id);
-    }
-  }
+  const vault = new CredentialVault();
+  const manager = new JulesSessionManager(store, vault);
+  const connection = new JulesConnectionService(store, vault);
+  const sessions = new JulesSessionService(store, vault, manager, () => connection.client());
+  const batches = new JulesBatchService(store, sessions);
+  const cleanup = new JulesCleanupService(store);
+  const reviewer = new JulesReviewService(store);
+  const julesSupervisor = new JulesSupervisor({
+    store, sessionManager: manager, pollIntervalMs: config.jules.pollIntervalMs,
+    maxConcurrentPolls: config.jules.maxConcurrentPolls,
+    isEnabled: () => connection.hasCapability('read') && connection.credentialStatus().configured,
+    reconcile: async () => {
+      if (!connection.hasCapability('parallel')) return;
+      for (const batch of store.manager.cloudWorkflows.listRunning()) await batches.launchReady(batch.id);
+    },
+    cleanup: () => cleanup.tick(),
+    onTerminal: async ({ taskId, state, prUrl }) => {
+      if (!connection.hasCapability('integrate') || state !== 'COMPLETED' || !prUrl) return;
+      await reviewer.reviewAndIntegrate(taskId);
+      await batches.reconcileTask(taskId);
+    },
+    onError: (error, session) => console.error(`Jules supervisor${session ? ` (${session.remoteSessionId})` : ''}: ${error.message}`),
+  });
+  julesSupervisor.start();
   const antigravityCollector = ensureAntigravityStatusCollector();
   if (!antigravityCollector.configured) {
     console.warn(`Antigravity telemetry: ${antigravityCollector.reason}`);

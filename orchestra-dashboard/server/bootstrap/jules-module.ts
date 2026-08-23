@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import type { Store } from '../db.js';
-import { config, type JulesRolloutStage } from '../config.js';
 import { CredentialVault } from '../infrastructure/security/vault.js';
 import { JulesApiClient } from '../providers/jules/client.js';
 import { JulesSessionManager } from '../providers/jules/session-manager.js';
@@ -18,13 +17,14 @@ import { createJulesOperationsRouter } from '../api/routes/jules/operations.js';
 import type { TaskManager } from '../tasks.js';
 import { JulesRoutingService } from '../application/jules/routing-service.js';
 import { createJulesRoutingRouter } from '../api/routes/jules/routing.js';
+import type { JulesStageSource } from '../api/routes/jules/capability.js';
 
 export interface JulesModuleOptions {
   store?: Store;
   vault?: CredentialVault;
   sessionManager?: JulesSessionManager;
   julesClient?: JulesApiClient;
-  rolloutStage?: JulesRolloutStage;
+  rolloutStage?: JulesStageSource;
   reviewService?: JulesReviewService;
   tasks?: TaskManager;
 }
@@ -34,9 +34,9 @@ export function composeJulesRouter(storeOrOptions?: Store | JulesModuleOptions, 
   const options: JulesModuleOptions = storeOrOptions
     ? isStore(storeOrOptions) ? { store: storeOrOptions, vault: explicitVault } : storeOrOptions
     : { vault: explicitVault };
-  const stage = options.rolloutStage ?? config.jules.rolloutStage;
   const vault = options.vault ?? new CredentialVault();
   const connection = new JulesConnectionService(options.store, vault, options.julesClient);
+  const stage: JulesStageSource = options.rolloutStage ?? (() => connection.runtimeSettings().rolloutStage);
   const router = Router();
   router.use(dashboardTokenMiddleware);
   router.use(createJulesConnectionRouter(connection, stage));

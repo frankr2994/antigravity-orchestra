@@ -7,6 +7,10 @@ import {
 } from '../../providers/jules/credentials.js';
 import { discoverJulesSource } from '../../providers/jules/source-discovery.js';
 import { ApplicationError } from '../errors.js';
+import { config, hasJulesCapability, type JulesRolloutStage, parseJulesRolloutStage } from '../../config.js';
+
+const ENABLED_SETTING = 'jules.enabled';
+const STAGE_SETTING = 'jules.rollout_stage';
 
 export class JulesConnectionService {
   constructor(
@@ -16,6 +20,25 @@ export class JulesConnectionService {
   ) {}
 
   credentialStatus() { return getJulesCredentialStatus(this.vault); }
+  runtimeSettings(): { enabled: boolean; rolloutStage: JulesRolloutStage } {
+    const storedEnabled = this.store?.manager.settings.get(ENABLED_SETTING);
+    const enabled = storedEnabled === null || storedEnabled === undefined
+      ? config.jules.enabled
+      : storedEnabled === 'true';
+    const configuredStage = this.store?.manager.settings.get(STAGE_SETTING);
+    const fallback = config.jules.rolloutStage === 'off' ? 'auto' : config.jules.rolloutStage;
+    const rolloutStage = parseJulesRolloutStage(configuredStage ?? fallback);
+    return { enabled, rolloutStage: enabled ? rolloutStage : 'off' };
+  }
+  setRuntimeEnabled(enabled: boolean): { enabled: boolean; rolloutStage: JulesRolloutStage } {
+    if (!this.store) throw new ApplicationError('STORE_UNAVAILABLE', 'Database store is unavailable.', 503);
+    this.store.manager.settings.set(ENABLED_SETTING, String(enabled));
+    if (!this.store.manager.settings.get(STAGE_SETTING)) this.store.manager.settings.set(STAGE_SETTING, 'auto');
+    return this.runtimeSettings();
+  }
+  hasCapability(required: JulesRolloutStage): boolean {
+    return hasJulesCapability(this.runtimeSettings().rolloutStage, required);
+  }
   async validateCredential(apiKey?: string): Promise<JulesCredentialValidationResult> {
     const selected = apiKey?.trim() || resolveJulesApiKey(this.vault).apiKey;
     if (!selected) throw new ApplicationError('JULES_CREDENTIAL_MISSING', 'No Jules API key is configured.');

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { rmSync } from 'node:fs';
 import { createApp } from '../dist-server/bootstrap/app.js';
 import { createApiRouter } from '../dist-server/api/routes/index.js';
-import { hasJulesCapability, parseJulesRolloutStage, parseStrictBoolean } from '../dist-server/config.js';
+import { config, hasJulesCapability, parseJulesRolloutStage, parseStrictBoolean } from '../dist-server/config.js';
 import express from 'express';
 import { generateDynamicSessionTitle } from '../dist-server/api/routes/sessions.js';
 import { Store } from '../dist-server/db.js';
@@ -63,18 +63,33 @@ test('Stage 0 — Jules configuration is strict and capability ordered', () => {
   assert.equal(hasJulesCapability('read', 'dispatch'), false);
 });
 
-test('Stage 0 — disabled Jules router is not mounted', async () => {
+test('Stage 0 — Jules can be enabled and disabled through persisted application settings', async () => {
   const dbPath = join(tmpdir(), `orchestra-app-gate-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   let server;
   let store;
   try {
     store = new Store(dbPath);
+    store.manager.settings.set('jules.enabled', 'false');
     const tasks = new TaskManager(store, 2);
     const app = express();
-    app.use('/api', createApiRouter(store, tasks, { julesEnabled: false }));
+    app.use(express.json());
+    app.use('/api', createApiRouter(store, tasks));
     server = app.listen(0);
-    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/jules/credential-status`);
-    assert.equal(response.status, 404);
+    const baseUrl = `http://127.0.0.1:${server.address().port}/api`;
+    const headers = { 'X-Orchestra-Token': config.uiToken, 'Content-Type': 'application/json' };
+    const credential = await fetch(`${baseUrl}/jules/credential-status`, { headers });
+    assert.equal(credential.status, 200, 'credential setup stays available while Jules is disabled');
+    const disabled = await fetch(`${baseUrl}/jules/settings`, { headers });
+    assert.equal((await disabled.json()).enabled, false);
+    assert.equal((await fetch(`${baseUrl}/jules/operations`, { headers })).status, 501);
+
+    const enabled = await fetch(`${baseUrl}/jules/settings`, { method: 'PATCH', headers, body: JSON.stringify({ enabled: true }) });
+    assert.deepEqual(await enabled.json(), { enabled: true, rolloutStage: 'auto' });
+    assert.equal((await fetch(`${baseUrl}/jules/operations`, { headers })).status, 200, 'runtime routes observe the toggle without restart');
+
+    const off = await fetch(`${baseUrl}/jules/settings`, { method: 'PATCH', headers, body: JSON.stringify({ enabled: false }) });
+    assert.deepEqual(await off.json(), { enabled: false, rolloutStage: 'off' });
+    assert.equal((await fetch(`${baseUrl}/jules/operations`, { headers })).status, 501);
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (store) store.close();

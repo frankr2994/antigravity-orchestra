@@ -1,9 +1,8 @@
 import { Router } from 'express';
 import type { JulesRoutingService } from '../../../application/jules/routing-service.js';
 import { parseRoutedExecutionRequest } from '../../../application/jules/requests.js';
-import type { JulesRolloutStage } from '../../../config.js';
-import { requireJulesCapability } from './capability.js';
-export function createJulesRoutingRouter(service: JulesRoutingService, stage: JulesRolloutStage): Router {
+import { requireJulesCapability, type JulesStageSource } from './capability.js';
+export function createJulesRoutingRouter(service: JulesRoutingService, stage: JulesStageSource): Router {
   const router = Router();
   router.post('/projects/:id/jules/execute', async (req, res, next) => {
     try {

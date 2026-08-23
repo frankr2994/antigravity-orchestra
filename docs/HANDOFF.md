@@ -139,3 +139,9 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Preserved staged rollout and truthful lifecycle behavior: Jules defaults off; unsupported pause/resume/cancel return unavailable rather than recording false success.
 - Added schema migrations through v8 and modular repositories/application services for sources, activity receipts, capacity, batches, cleanup, routing, operations, and PR review.
 - Offline verification: `npm run check` passes 150/150 tests, including temporary-local-Git immutable dispatch and exact PR integration. No live Jules API key or provider repository was used; credentialed smoke acceptance remains required before production rollout.
+
+### In-application Jules enablement follow-up
+
+- Jules credentials and enablement are now controlled entirely from the Settings UI; no shell environment setup is required.
+- The persisted toggle takes effect without restarting the server. Off blocks operational routes and pauses background polling while leaving credential management available and remote sessions untouched.
+- The test runner serializes file-level integration suites to prevent nondeterministic Windows contention between temporary Git remotes, worktrees, and nested npm processes.

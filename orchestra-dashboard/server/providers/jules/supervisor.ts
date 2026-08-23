@@ -15,6 +15,8 @@ export interface JulesSupervisorOptions {
   pollIntervalMs?: number;
   leaseDurationMs?: number;
   maxConcurrentPolls?: number;
+  isEnabled?: () => boolean;
+  reconcile?: () => Promise<void>;
   cleanup?: () => Promise<void>;
   onTerminal?: (event: {
     taskId: string;
@@ -68,6 +70,7 @@ export class JulesSupervisor {
   }
 
   async tick(): Promise<SupervisorTickResult> {
+    if (this.options.isEnabled && !this.options.isEnabled()) return { polled: 0, active: 0, errors: 0 };
     if (this.isTickInProgress) {
       return { polled: 0, active: 0, errors: 0 };
     }
@@ -75,6 +78,7 @@ export class JulesSupervisor {
     this.isTickInProgress = true;
     let polled = 0; let errors = 0;
     try {
+      await this.options.reconcile?.();
       const nonTerminalSessions = this.options.store.manager.cloudSessions.listNonTerminal();
       for (const session of nonTerminalSessions) this.options.store.manager.activityCursors.ensure(session.id);
       const due = this.options.store.manager.activityCursors.listDue(new Date().toISOString(), 100);
