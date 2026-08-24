@@ -185,6 +185,10 @@ test('Phase 6 Jules Client — approvePlan, sendMessage, deleteSession, and acti
   assert.equal(actRes.activities[0].originator, 'agent');
   assert.equal(actRes.activities[0].planGenerated?.plan?.steps?.length, 1);
   assert.equal(actRes.nextPageToken, 'token-act-2');
+
+  // 5. Incremental activity polling uses Jules' immutable createTime cursor.
+  await client.listActivities('12345', 100, undefined, undefined, '2026-08-22T00:00:00Z');
+  assert.match(calls[4].url, /createTime=2026-08-22T00%3A00%3A00Z/);
 });
 
 test('Phase 6 Jules Client — Transient error retry and redaction in JulesApiError', async () => {

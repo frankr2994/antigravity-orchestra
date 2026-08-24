@@ -37,6 +37,18 @@ export async function reconcileStartupTasks(store: Store): Promise<string[]> {
   ])];
 
   for (const taskId of interruptedTasks) {
+    const task = store.getTask(taskId);
+    const takeover = store.manager.checkpoints.latest(taskId, 'local_takeover');
+    if (task?.target === 'local' && takeover && ['prepared', 'queued'].includes(String(takeover.data.status))) {
+      const findings = Array.isArray(takeover.data.findings)
+        ? takeover.data.findings.map((item) => item && typeof item === 'object' && typeof (item as Record<string, unknown>).explanation === 'string'
+          ? String((item as Record<string, unknown>).explanation) : '').filter(Boolean)
+        : [];
+      const message = task.error || `The dashboard restarted during a Jules local-repair takeover. The imported PR head is preserved and ready to resume.${findings.length ? ` Independent review findings: ${findings.join(' ')}` : ''}`;
+      store.updateTask(taskId, { state: 'recovery_required', error: message });
+      store.addEvent(taskId, 'system', 'task.recovery-required', { message, source: 'jules_local_takeover' });
+      continue;
+    }
     await restoreInterruptedTask(store, taskId);
   }
 

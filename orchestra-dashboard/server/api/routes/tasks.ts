@@ -11,13 +11,13 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
 
   function requireProject(id: string) {
     const value = store.getProject(id);
-    if (!value) throw new Error('Project not found.');
+    if (!value) throw new ApplicationError('PROJECT_NOT_FOUND', 'Project not found.', 404);
     return value;
   }
 
   function requireTask(id: string) {
     const value = store.getTask(id);
-    if (!value) throw new Error('Task not found.');
+    if (!value) throw new ApplicationError('TASK_NOT_FOUND', 'Task not found.', 404);
     return value;
   }
 
@@ -76,7 +76,7 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
       const task = requireTask(req.params.id);
       const question = String(req.body?.question || '').trim();
       if (!question || question.length > 4_000) {
-        throw new Error('A monitor question between 1 and 4,000 characters is required.');
+        throw new ApplicationError('INVALID_MONITOR_QUESTION', 'A monitor question between 1 and 4,000 characters is required.', 400);
       }
       const monitor = await tasks.getMonitor(task.id);
       const events = store
@@ -118,9 +118,28 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
     });
   });
 
-  router.post('/tasks/:id/cancel', (req, res) => {
-    tasks.cancel(requireTask(req.params.id).id);
-    res.status(202).json({ ok: true });
+  router.post('/tasks/:id/pause', async (req, res, next) => {
+    try {
+      res.status(200).json(await tasks.pause(requireTask(req.params.id).id));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tasks/:id/resume', async (req, res, next) => {
+    try {
+      res.status(202).json(await tasks.resume(requireTask(req.params.id).id));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/tasks/:id/cancel', async (req, res, next) => {
+    try {
+      res.status(200).json(await tasks.cancel(requireTask(req.params.id).id));
+    } catch (error) {
+      next(error);
+    }
   });
 
   router.post('/tasks/:id/recover', async (req, res, next) => {

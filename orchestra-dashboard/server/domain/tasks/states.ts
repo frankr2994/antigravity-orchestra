@@ -12,6 +12,7 @@ export type OrchestraTaskState =
   | 'baseline_required'
   | 'routing'
   | 'running'
+  | 'paused'
   | 'recovering'
   | 'recovery_required'
   | 'reviewing'
@@ -31,6 +32,7 @@ export const ALL_ORCHESTRA_TASK_STATES: readonly OrchestraTaskState[] = [
   'baseline_required',
   'routing',
   'running',
+  'paused',
   'recovering',
   'recovery_required',
   'reviewing',
@@ -85,13 +87,14 @@ export function isTerminalTaskState(state: OrchestraTaskState): boolean {
  * Canonical state transition matrix for Orchestra Task State Machine.
  */
 export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonly OrchestraTaskState[]>> = {
-  queued: ['preflight', 'routing', 'running', 'failed', 'cancelled'],
-  preflight: ['baseline_required', 'routing', 'running', 'reviewing', 'failed', 'cancelled'],
+  queued: ['preflight', 'routing', 'running', 'paused', 'failed', 'cancelled'],
+  preflight: ['baseline_required', 'routing', 'running', 'reviewing', 'paused', 'failed', 'cancelled'],
   baseline_required: ['queued', 'preflight', 'running', 'failed', 'cancelled'],
-  routing: ['running', 'failed', 'cancelled'],
+  routing: ['running', 'paused', 'failed', 'cancelled'],
   running: [
     'reviewing',
     'verifying',
+    'paused',
     'recovering',
     'recovery_required',
     'review_disputed',
@@ -102,14 +105,15 @@ export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonl
     'failed',
     'cancelled',
   ],
-  recovering: ['running', 'reviewing', 'failed', 'cancelled'],
+  paused: ['recovering', 'queued', 'recovery_required', 'failed', 'cancelled'],
+  recovering: ['running', 'reviewing', 'recovery_required', 'paused', 'failed', 'cancelled'],
   recovery_required: ['recovering', 'running', 'queued', 'failed', 'cancelled'],
-  reviewing: ['running', 'verifying', 'summarizing', 'committing', 'recovering', 'review_disputed', 'completed', 'failed', 'cancelled'],
+  reviewing: ['running', 'verifying', 'summarizing', 'committing', 'recovering', 'recovery_required', 'paused', 'review_disputed', 'completed', 'failed', 'cancelled'],
   review_disputed: ['running', 'recovering', 'summarizing', 'committing', 'failed', 'cancelled'],
-  verifying: ['summarizing', 'committing', 'recovering', 'reviewing', 'failed', 'cancelled'],
+  verifying: ['summarizing', 'committing', 'recovering', 'reviewing', 'paused', 'review_disputed', 'failed', 'cancelled'],
   summarizing: ['committing', 'pushing', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
-  committing: ['pushing', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
-  pushing: ['completed', 'completed_unpushed', 'failed', 'cancelled'],
+  committing: ['pushing', 'review_disputed', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
+  pushing: ['review_disputed', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
   completed: [],
   completed_unpushed: ['pushing', 'completed', 'failed', 'cancelled'],
   failed: ['queued', 'recovering', 'recovery_required'],

@@ -31,6 +31,9 @@ test('Stage A Contracts — Task State Transitions matrix and invariants', () =>
   // 2. Valid transitions
   assert.equal(isValidTaskStateTransition('queued', 'running'), true);
   assert.equal(isValidTaskStateTransition('running', 'reviewing'), true);
+  assert.equal(isValidTaskStateTransition('running', 'paused'), true);
+  assert.equal(isValidTaskStateTransition('paused', 'recovering'), true);
+  assert.equal(isValidTaskStateTransition('paused', 'cancelled'), true);
   assert.equal(isValidTaskStateTransition('reviewing', 'verifying'), true);
   assert.equal(isValidTaskStateTransition('running', 'failed'), true);
   assert.equal(isValidTaskStateTransition('failed', 'queued'), true); // Retry

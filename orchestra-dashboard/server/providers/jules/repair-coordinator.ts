@@ -137,10 +137,11 @@ export async function executeDualEngineRepair(
 
   // 1. Determine current cycle from existing attempts
   const attempts = store.manager.attempts.listByTaskId(taskId);
-  const cycle = options.cycle ?? (attempts.length + 1);
+  const cloudSession = store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
+  const repairAttempts = attempts.filter((attempt) => attempt.worker === 'jules' && attempt.id !== cloudSession?.attemptId);
+  const cycle = options.cycle ?? (repairAttempts.length + 1);
 
   // 2. Check cloud session state
-  const cloudSession = store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
   const isCloudSessionActive = Boolean(
     cloudSession &&
     cloudSession.state !== 'CANCELLED' &&
@@ -244,35 +245,25 @@ export async function executeDualEngineRepair(
     };
   }
 
-  // 6. Case: Local Takeover with Antigravity
-  const attempt = store.manager.attempts.create({
-    taskId,
-    target: 'local',
-    worker: 'antigravity',
-    baseSha,
-    state: 'WORKING',
-  });
-
-  store.updateTask(taskId, { state: 'running', target: 'local' });
-
+  // 6. Case: request a real local takeover. The review service must first
+  // synchronize the exact reviewed head locally, then queue an executor.
   store.addEvent(taskId, 'orchestra', 'task.takeover_local', {
     cycle,
     reason: decision.reason,
     headSha,
     baseSha,
     findingsCount: findings.length,
-    attemptId: attempt.id,
+    prepared: false,
   });
 
   onEvent?.({
     name: 'task.takeover_local',
-    payload: { taskId, cycle, attemptId: attempt.id, reason: decision.reason },
+    payload: { taskId, cycle, reason: decision.reason },
   });
 
   return {
     strategy: 'local_takeover',
     ok: true,
     cycle,
-    attemptId: attempt.id,
   };
 }

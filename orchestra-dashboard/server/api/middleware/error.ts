@@ -5,7 +5,13 @@ import { redactSecrets } from '../../infrastructure/security/redaction.js';
 
 export function errorHandlerMiddleware(error: unknown, _req: Request, res: Response, _next: NextFunction) {
   if (error instanceof ApplicationError) {
-    res.status(error.status).json({ error: error.message, code: error.code });
+    res.status(error.status).json({
+      error: error.message,
+      code: error.code,
+      ...(error.resolution ? { resolution: error.resolution } : {}),
+      ...(error.nextAction ? { nextAction: error.nextAction } : {}),
+      ...(error.retryable !== undefined ? { retryable: error.retryable } : {}),
+    });
     return;
   }
   const correlationId = randomUUID();

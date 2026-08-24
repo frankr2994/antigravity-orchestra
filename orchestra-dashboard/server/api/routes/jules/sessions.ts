@@ -36,12 +36,15 @@ export function createJulesSessionsRouter(service: JulesSessionService, stage: J
   };
   router.post('/tasks/:id/jules/message', message);
   router.post('/tasks/:id/jules/feedback', message);
-  router.post('/tasks/:id/jules/cancel', (_req, res) => res.status(501).json({
-    error: 'The Jules API does not expose a confirmed cancellation operation.', code: 'JULES_CANCELLATION_UNSUPPORTED',
-  }));
-  router.delete('/tasks/:id/jules-session', (_req, res) => res.status(501).json({
-    error: 'Remote Jules session deletion is unavailable until durable deletion semantics are implemented.', code: 'JULES_DELETION_UNAVAILABLE',
-  }));
+  const cancel = async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (!requireJulesCapability(stage, 'interact', res)) return;
+      const header = typeof req.headers['idempotency-key'] === 'string' ? req.headers['idempotency-key'] : undefined;
+      res.status(200).json(await service.cancel(id(req.params.id), parseInteractionRequest(req.body, header).idempotencyKey));
+    } catch (error) { next(error); }
+  };
+  router.post('/tasks/:id/jules/cancel', cancel);
+  router.delete('/tasks/:id/jules-session', cancel);
   router.get('/tasks/:id/jules/activities', async (req, res, next) => {
     try {
       if (!requireJulesCapability(stage, 'read', res)) return;

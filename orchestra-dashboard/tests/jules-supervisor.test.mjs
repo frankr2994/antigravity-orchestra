@@ -76,6 +76,7 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     assert.equal(createdCloud.remoteSessionId, 'sess-tick-1');
 
     let currentRemoteState = 'IN_PROGRESS';
+    let prAvailable = false;
     const mockFetch = async (url) => {
       const urlStr = String(url);
       if (urlStr.includes('/activities')) {
@@ -88,7 +89,7 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
           name: 'sessions/sess-tick-1',
           id: 'sess-tick-1',
           state: currentRemoteState,
-          outputs: currentRemoteState === 'COMPLETED' ? [
+          outputs: currentRemoteState === 'COMPLETED' && prAvailable ? [
             {
               pullRequest: {
                 url: 'https://github.com/frankr2994/antigravity-orchestra/pull/99',
@@ -104,6 +105,7 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     const sessionManager = new JulesSessionManager(store);
 
     let terminalEventReceived = null;
+    let terminalEventCount = 0;
     let enabled = false;
 
     const supervisor = new JulesSupervisor({
@@ -113,6 +115,8 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
       isEnabled: () => enabled,
       onTerminal: (event) => {
         terminalEventReceived = event;
+        terminalEventCount += 1;
+        if (terminalEventCount === 2) store.updateTask(event.taskId, { state: 'completed' });
       },
     });
 
@@ -138,12 +142,19 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
     assert.equal(tick2.polled, 1);
     assert.ok(terminalEventReceived);
     assert.equal(terminalEventReceived?.taskId, task.id);
+    assert.equal(terminalEventReceived?.prUrl, undefined, 'provider completion can precede PR artifact propagation');
+
+    // 4. A completed provider session remains due until the local handoff
+    // reaches a terminal Orchestra state, making callback failures restart-safe.
+    prAvailable = true;
+    const tick3 = await supervisor.tick();
+    assert.equal(tick3.polled, 1);
+    assert.equal(tick3.active, 0);
+    assert.equal(terminalEventCount, 2);
     assert.equal(terminalEventReceived?.prUrl, 'https://github.com/frankr2994/antigravity-orchestra/pull/99');
 
-    // 4. Tick 3: No more active sessions (completed session is filtered out)
-    const tick3 = await supervisor.tick();
-    assert.equal(tick3.polled, 0);
-    assert.equal(tick3.active, 0);
+    const tick4 = await supervisor.tick();
+    assert.equal(tick4.polled, 0);
 
     // 5. Lifecycle start and stop
     supervisor.start();
@@ -153,5 +164,39 @@ test('Phase 14 Supervisor — tick polls active sessions and triggers onTerminal
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
+  }
+});
+
+test('Phase 14 Supervisor — non-retryable PR identity conflicts stop polling with an actionable dispute', async () => {
+  const dbPath = join(tmpdir(), `orchestra-sup-conflict-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const store = new Store(dbPath);
+  try {
+    const project = store.upsertProject({ name: 'conflict', root: 'F:/conflict', gitRoot: 'F:/conflict' });
+    const conversation = store.createSession(project.id, 'Conflict');
+    const task = store.createTask(project.id, conversation.id, 'Review Jules conflict', null, null, 'cloud');
+    store.updateTask(task.id, { state: 'running' }); store.updateTask(task.id, { state: 'reviewing' });
+    const cloud = store.manager.cloudSessions.create({ taskId: task.id, sourceName: 'sources/test', sessionResourceName: 'sessions/conflict',
+      remoteSessionId: 'conflict', dispatchBranch: 'orchestra/jules/conflict', targetBranch: 'main', baseSha: 'a'.repeat(40),
+      state: 'COMPLETED', prUrl: 'https://github.com/example/repository/pull/1' });
+    store.manager.cloudSessions.update(cloud.id, { prUrl: 'https://github.com/example/repository/pull/1' });
+    store.manager.activityCursors.ensure(cloud.id);
+    store.manager.julesCapacity.restore(task.id);
+    const supervisor = new JulesSupervisor({
+      store,
+      sessionManager: new JulesSessionManager(store),
+      onTerminal: () => {
+        const error = new Error('The target branch changed after dispatch.');
+        error.code = 'TARGET_BRANCH_MOVED';
+        throw error;
+      },
+    });
+    const result = await supervisor.tick();
+    assert.equal(result.errors, 1);
+    assert.equal(store.getTask(task.id).state, 'review_disputed');
+    assert.match(store.getTask(task.id).error, /target branch changed/i);
+    assert.equal(store.manager.activityCursors.get(cloud.id).nextPollAt, '9999-12-31T23:59:59.999Z');
+    assert.equal(store.manager.julesCapacity.activeCount(), 0);
+  } finally {
+    store.close(); try { rmSync(dbPath, { force: true }); } catch {}
   }
 });

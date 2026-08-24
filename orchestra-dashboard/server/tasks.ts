@@ -23,6 +23,7 @@ export class TaskManager {
   private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
   private readonly baselineResolutions = new Set<string>();
+  private readonly controlRequests = new Map<string, 'pause' | 'stop'>();
   private antigravityModels: string[] = [];
 
   constructor(private readonly store: Store, maxGlobal = 2) {
@@ -42,25 +43,119 @@ export class TaskManager {
     return this.events.subscribe(taskId, listener);
   }
 
-  cancel(taskId: string) {
+  async pause(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    if (['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) return;
+    if (task.target === 'cloud') {
+      throw new ApplicationError('JULES_REMOTE_PAUSE_UNAVAILABLE', 'The public Jules API does not expose a pause operation.', 409,
+        { nextAction: 'Pause the session in Jules; Orchestra will detect the PAUSED state automatically.', retryable: false });
+    }
+    if (task.state === 'paused') return task;
+    if (!['queued', 'preflight', 'routing', 'running', 'recovering', 'reviewing', 'verifying'].includes(task.state)) {
+      throw new ApplicationError('TASK_NOT_PAUSABLE', `Task is ${task.state.replaceAll('_', ' ')} and cannot be paused.`, 409,
+        { nextAction: task.state === 'recovery_required' ? 'Use Resume to continue the preserved changes.' : 'Refresh the task and use the action offered for its current state.', retryable: false });
+    }
     this.scheduler.remove(taskId);
-    this.scheduler.abort(taskId);
-    this.transition(taskId, 'cancelled');
-    this.emit(taskId, 'system', 'task.state', { state: 'cancelled' });
+    if (this.scheduler.isRunning(taskId)) {
+      this.controlRequests.set(taskId, 'pause');
+      try { await this.scheduler.abortAndWait(taskId, 'pause'); }
+      finally { this.controlRequests.delete(taskId); }
+    }
+    const latest = requireTask(this.store, taskId);
+    if (['completed', 'completed_unpushed', 'failed', 'cancelled', 'recovery_required', 'review_disputed'].includes(latest.state)) return latest;
+    const message = 'Paused by the user after the active local process stopped. Resume continues this same task with its preserved project state.';
+    this.store.updateTask(taskId, { state: 'paused', error: message });
+    this.emit(taskId, 'system', 'task.paused', { message, nextAction: 'Select Resume to continue this task.' });
+    this.emit(taskId, 'system', 'task.state', { state: 'paused', message });
+    return requireTask(this.store, taskId);
+  }
+
+  async resume(taskId: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    if (task.state !== 'paused') throw new ApplicationError('TASK_NOT_PAUSED', `Task is ${task.state.replaceAll('_', ' ')} and cannot be resumed with this action.`, 409,
+      { nextAction: task.state === 'recovery_required' ? 'Use Resume and review to continue preserved changes.' : 'Refresh the task and use the action offered for its current state.', retryable: false });
+    this.store.updateTask(taskId, { state: 'recovering' });
+    this.emit(taskId, 'system', 'task.resumed', { message: 'Resuming the same task with its preserved local project state.' });
+    this.emit(taskId, 'system', 'task.state', { state: 'recovering' });
+    this.enqueue(taskId);
+    return requireTask(this.store, taskId);
+  }
+
+  async cancel(taskId: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    if (task.target === 'cloud') {
+      throw new ApplicationError('JULES_REMOTE_STOP_REQUIRED', 'Cloud tasks must be stopped through the Jules session control so the remote worker is confirmed deleted.', 409,
+        { nextAction: 'Use Stop Jules in the cloud-session panel.', retryable: false });
+    }
+    if (['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) return task;
+    this.scheduler.remove(taskId);
+    if (this.scheduler.isRunning(taskId)) {
+      this.controlRequests.set(taskId, 'stop');
+      try { await this.scheduler.abortAndWait(taskId, 'stop'); }
+      finally { this.controlRequests.delete(taskId); }
+    }
+    const latest = requireTask(this.store, taskId);
+    if (['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(latest.state)) return latest;
+    const project = requireProject(this.store, latest.projectId);
+    let preservedFiles: Array<{ path: string }> = [];
+    try {
+      preservedFiles = (await getGitStatus(project.root)).files.filter((file) => !isOrchestraInternalPath(file.path));
+    } catch { /* A stop can still finish safely without Git details. */ }
+    if (preservedFiles.length) {
+      const message = `Stopped by the user after the active process exited. ${preservedFiles.length} changed project file${preservedFiles.length === 1 ? ' was' : 's were'} preserved; resume this task to review and finish them.`;
+      this.store.updateTask(taskId, { state: 'recovery_required', error: message });
+      this.emit(taskId, 'system', 'task.recovery-required', { message, files: preservedFiles, nextAction: 'Select Resume to continue, or handle the preserved files explicitly.' });
+      this.emit(taskId, 'system', 'task.state', { state: 'recovery_required', message });
+    } else {
+      this.store.updateTask(taskId, { state: 'cancelled', error: 'Stopped by the user after the active process exited.' });
+      for (const attempt of this.store.manager.attempts.listByTaskId(taskId)) {
+        if (attempt.target === 'local' && attempt.state === 'WORKING') {
+          this.store.manager.attempts.update(attempt.id, { state: 'CANCELLED', completedAt: new Date().toISOString() });
+        }
+      }
+      this.emit(taskId, 'system', 'task.state', { state: 'cancelled' });
+    }
+    return requireTask(this.store, taskId);
+  }
+
+  async resumePreparedJulesTakeover(taskId: string): Promise<TaskRecord> {
+    const task = requireTask(this.store, taskId);
+    const checkpoint = this.store.manager.checkpoints.latest(taskId, 'local_takeover');
+    if (task.target !== 'local' || task.state !== 'recovery_required' || !checkpoint || !['prepared', 'queued'].includes(String(checkpoint.data.status)) || !checkpoint.subjectSha) {
+      throw new ApplicationError('JULES_TAKEOVER_NOT_PREPARED', 'This task does not have a prepared Jules local-repair takeover.', 409);
+    }
+    const existingAttempt = this.store.manager.attempts.listByTaskId(taskId).find((attempt) =>
+      attempt.target === 'local' && attempt.worker === 'antigravity' && attempt.baseSha.toLowerCase() === checkpoint.subjectSha!.toLowerCase() && attempt.state === 'WORKING');
+    const attempt = existingAttempt ?? this.store.manager.attempts.create({
+      taskId,
+      target: 'local',
+      worker: 'antigravity',
+      baseSha: checkpoint.subjectSha,
+      branchName: typeof checkpoint.data.targetBranch === 'string' ? checkpoint.data.targetBranch : null,
+      state: 'WORKING',
+    });
+    if (checkpoint.data.status === 'prepared') {
+      this.store.manager.checkpoints.append({ taskId, attemptId: attempt.id, stage: 'local_takeover', subjectSha: checkpoint.subjectSha,
+        data: { ...checkpoint.data, status: 'queued', localAttemptId: attempt.id } });
+    }
+    this.store.updateTask(taskId, { state: 'recovering' });
+    this.emit(taskId, 'system', 'task.resumed', { message: 'The reviewed Jules PR head is local. Starting the bounded Antigravity repair now.', source: 'jules_local_takeover' });
+    this.emit(taskId, 'system', 'task.state', { state: 'recovering' });
+    this.enqueue(taskId);
+    return requireTask(this.store, taskId);
   }
 
   async recover(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    const disposition = recoveryDisposition(task.state, this.activeTaskId(task.projectId) === task.id);
+    const disposition = recoveryDisposition(task.state, this.scheduler.isRunning(task.id));
     if (disposition === 'already_active') return task;
-    if (disposition === 'reject') throw new Error('Only a failed task with preserved changes can be recovered.');
+    if (disposition === 'reject') throw new ApplicationError('TASK_NOT_RECOVERABLE', 'Only a failed or recovery-required task with preserved changes can be resumed.', 409,
+      { nextAction: 'Refresh the task and use Retry only when the project worktree is clean.', retryable: false });
     const project = requireProject(this.store, task.projectId);
     const classification = parseTaskClassification(task.classification);
     const status = await getGitStatus(project.root);
     const recoverableFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
-    if (!classification?.mutating || !status.isGit || !recoverableFiles.length) throw new Error('This task has no recoverable uncommitted implementation changes.');
+    if (!classification?.mutating || !status.isGit || !recoverableFiles.length) throw new ApplicationError('TASK_HAS_NO_RECOVERABLE_CHANGES', 'This task has no recoverable uncommitted implementation changes.', 409,
+      { nextAction: 'Use Retry to start again from the current clean project state.', retryable: true });
     this.transition(taskId, 'recovering');
     this.emit(taskId, 'system', 'task.recovery', { message: 'Resuming the failed task with its preserved uncommitted changes.' });
     this.enqueue(taskId);
@@ -69,13 +164,16 @@ export class TaskManager {
 
   async retry(taskId: string) {
     const task = requireTask(this.store, taskId);
-    if (task.state !== 'failed') throw new Error('Only a failed task can be retried from a clean project state.');
-    if (this.activeTaskId(task.projectId)) throw new Error('Another task already owns this project. Open that task instead of creating a duplicate queue entry.');
+    if (task.state !== 'failed') throw new ApplicationError('TASK_NOT_RETRYABLE', 'Only a failed task can be retried from a clean project state.', 409,
+      { nextAction: 'Refresh the task and use Resume when preserved changes are present.', retryable: false });
+    if (this.activeTaskId(task.projectId)) throw new ApplicationError('PROJECT_TASK_ACTIVE', 'Another task already owns this project.', 409,
+      { nextAction: 'Open the active task instead of creating a duplicate queue entry.', retryable: false });
     const project = requireProject(this.store, task.projectId);
     const classification = parseTaskClassification(task.classification);
     const status = await getGitStatus(project.root);
     const projectFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
-    if (classification?.mutating && projectFiles.length) throw new Error('This failed task has uncommitted changes. Use Resume so Orchestra preserves task ownership through review and finalization.');
+    if (classification?.mutating && projectFiles.length) throw new ApplicationError('TASK_RETRY_HAS_PRESERVED_CHANGES', 'This failed task has uncommitted changes.', 409,
+      { nextAction: 'Use Resume so Orchestra preserves task ownership through review and finalization.', retryable: false });
     this.store.updateTask(taskId, { state: 'queued', error: null });
     this.emit(taskId, 'system', 'task.retry', { message: 'Retrying the failed task from the current clean project state.' });
     this.emit(taskId, 'system', 'task.state', { state: 'queued' });
@@ -161,13 +259,23 @@ export class TaskManager {
     const stateEvent = events.findLast((event) => event.type === 'task.state' && String((event.payload as Record<string, unknown>).state) === task.state);
     const reviewEvent = events.findLast((event) => event.type === 'agent.started' && (event.payload as Record<string, unknown>).role === 'review');
     const repairEvent = events.findLast((event) => event.type === 'task.repair-progress');
-    const processAlive = this.scheduler.isRunning(taskId);
-    const lastActivityAt = lastEvent?.createdAt || task.updatedAt;
+    const cloud = task.target === 'cloud' ? this.store.manager.cloudSessions.getByTaskId(task.id) : null;
+    const providerState = cloud?.state ?? null;
+    const cloudActive = Boolean(cloud && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(cloud.state));
+    const handoffPending = Boolean(cloud && cloud.state === 'COMPLETED' && task.target === 'cloud' && ['running', 'reviewing', 'verifying', 'committing', 'pushing'].includes(task.state));
+    const latestReviewProgress = events.findLast((event) => event.type === 'cloud.reviewing');
+    const handoffBusy = Boolean(handoffPending && latestReviewProgress && now - Date.parse(latestReviewProgress.createdAt) < 90_000);
+    const processAlive = this.scheduler.isRunning(taskId) || cloudActive || handoffBusy;
+    const durableActivityTimes = [cloud?.lastActivityAt, lastEvent?.createdAt, task.updatedAt].filter((value): value is string => Boolean(value));
+    const lastActivityAt = durableActivityTimes.sort((left, right) => Date.parse(right) - Date.parse(left))[0] || task.updatedAt;
     const inactiveMs = Math.max(0, now - Date.parse(lastActivityAt));
     let changedFiles: string[] = [];
     try { changedFiles = (await getGitStatus(project.root)).files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path)); } catch { /* Monitoring must not alter task execution. */ }
-    const health = evaluateRunHealth(task.state, processAlive, inactiveMs);
-    const currentAgent = agentForState(task.state);
+    const providerNeedsAttention = Boolean(providerState && ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(providerState));
+    const health = task.state === 'paused' || providerNeedsAttention ? 'needs_attention'
+      : handoffPending && !handoffBusy ? 'waiting'
+      : evaluateRunHealth(task.state, processAlive, inactiveMs);
+    const currentAgent = cloud && ['queued', 'preflight', 'running'].includes(task.state) ? 'jules' : agentForState(task.state);
     const reviewCycle = Number((reviewEvent?.payload as Record<string, unknown> | undefined)?.cycle || 0);
     const repairAttempt = Number((repairEvent?.payload as Record<string, unknown> | undefined)?.attempt || 0);
     const session = this.store.getSession(task.sessionId);
@@ -187,13 +295,18 @@ export class TaskManager {
       elapsedMs: Math.max(0, now - Date.parse(task.createdAt)),
       inactiveMs,
       processAlive,
+      providerState,
+      progressDetail: cloud ? cloudProgressDetail(task.state, providerState, Boolean(cloud.prUrl)) : monitorSummary({ state: task.state, health, currentAgent, inactiveMs, reviewCycle, repairAttempt, changedFiles: changedFiles.length }),
+      nextAction: taskNextAction(task.state, providerState),
       reviewCycle,
       repairAttempt,
       changedFiles,
-      summary: monitorSummary({ state: task.state, health, currentAgent, inactiveMs, reviewCycle, repairAttempt, changedFiles: changedFiles.length }),
-      stopReason: ['recovery_required', 'failed', 'cancelled'].includes(task.state) ? task.error : null,
+      summary: cloud ? cloudMonitorSummary(task.state, providerState, inactiveMs, Boolean(cloud.prUrl), repairAttempt) : monitorSummary({ state: task.state, health, currentAgent, inactiveMs, reviewCycle, repairAttempt, changedFiles: changedFiles.length }),
+      stopReason: ['paused', 'recovery_required', 'review_disputed', 'failed', 'cancelled'].includes(task.state) ? task.error : null,
       providerTelemetry: { antigravity: antigravityMatchesProject ? antigravityUsage : { available: false, reason: 'The latest Antigravity snapshot belongs to another project.' }, codex: codexUsage },
-      providerActivity: readAntigravityTranscript(session?.antigravityConversationId || antigravityUsage.conversationId || null),
+      providerActivity: cloud
+        ? events.filter((event) => event.agent === 'jules' || event.type.startsWith('cloud.')).slice(-50).map((event) => ({ agent: event.agent, type: event.type, createdAt: event.createdAt, payload: event.payload }))
+        : readAntigravityTranscript(session?.antigravityConversationId || antigravityUsage.conversationId || null),
     };
   }
 
@@ -521,7 +634,7 @@ export class TaskManager {
       if (classification.mutating) {
         let progress = implementationChangeState(status.head, await getGitStatus(project.root));
         if (progress === 'committed') throw new Error('Antigravity committed project changes directly. Orchestra stopped because it can no longer review and finalize the complete uncommitted change set safely.');
-        const maxImplementationRetries = 2;
+        const maxImplementationRetries = 1;
         for (let retryAttempt = 1; progress === 'none' && retryAttempt <= maxImplementationRetries; retryAttempt += 1) {
           let codexGuidance = '';
           this.transition(taskId, 'reviewing');
@@ -570,25 +683,17 @@ export class TaskManager {
         if (!afterAgent.isGit) throw new Error('The project stopped being a Git repository during implementation. Orchestra will not accept or finalize unreviewable changes.');
         const agentChanges = afterAgent.files.filter((file) => !isOrchestraInternalPath(file.path));
         if (agentChanges.length) {
-          const reviewBaseSha = status.head;
-          // Checkpoint initial implementation so changes are safely recorded
-          try {
-            const checkpointDiff = await getDiff(project.root, 35_000);
-            const checkpointSummary = await summarizeChanges(checkpointDiff, task.prompt);
-            const checkpointPaths = agentChanges.map((file) => file.path);
-            const checkpointSha = await commitPaths(project.root, checkpointPaths, safeCommitTitle(checkpointSummary.title, 'feat: implement initial task changes'), checkpointSummary.summary);
-            this.emit(taskId, 'git', 'git.commit', { kind: 'checkpoint', sha: checkpointSha, title: checkpointSummary.title, files: checkpointPaths });
-            this.emit(taskId, 'gemma', 'agent.completed', { phase: 'checkpoint-commit', sha: checkpointSha });
-          } catch (error) {
-            this.emit(taskId, 'git', 'warning', { message: `The safety checkpoint could not be created; Orchestra will review the uncommitted change set from the original base. ${error instanceof Error ? error.message : String(error)}` });
-          }
-
+          const takeover = this.store.manager.checkpoints.latest(taskId, 'local_takeover');
+          const takeoverBaseSha = takeover && typeof takeover.data.baseSha === 'string' && /^[0-9a-f]{40}$/i.test(takeover.data.baseSha)
+            ? takeover.data.baseSha
+            : null;
+          const reviewBaseSha = takeoverBaseSha || status.head;
           let previousFindings = '';
           let previousReview = '';
           let previousRepairChanged = true;
           let noProgressEscalations = 0;
           let verificationPassed = false;
-          const maxRepairAttempts = 3;
+          const maxRepairAttempts = 2;
           for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
             const reviewStatus = await getGitStatus(project.root);
             const changedFiles = (reviewBaseSha
@@ -701,7 +806,7 @@ export class TaskManager {
 
       this.complete(taskId, agentResult.text, 'antigravity');
     } catch (error) {
-      if (signal.aborted) return this.cancel(taskId);
+      if (signal.aborted || this.controlRequests.has(taskId)) return;
       await this.failOrRequireRecovery(taskId, project, error instanceof Error ? error.message : String(error));
     }
   }
@@ -749,6 +854,11 @@ export class TaskManager {
     const task = requireTask(this.store, taskId);
     const state: TaskState = task.pushStatus === 'unpushed' ? 'completed_unpushed' : 'completed';
     this.store.updateTask(taskId, { state, result });
+    for (const attempt of this.store.manager.attempts.listByTaskId(taskId)) {
+      if (attempt.target === 'local' && attempt.state === 'WORKING') {
+        this.store.manager.attempts.update(attempt.id, { state: 'COMPLETED', headSha: task.commitSha, completedAt: new Date().toISOString() });
+      }
+    }
     this.store.addMessage({ sessionId: task.sessionId, taskId, role: 'assistant', agent, content: result || 'Task completed.' });
     this.emit(taskId, 'system', 'task.state', { state, result });
   }
@@ -768,6 +878,11 @@ export class TaskManager {
 
   private fail(taskId: string, message: string) {
     this.store.updateTask(taskId, { state: 'failed', error: message });
+    for (const attempt of this.store.manager.attempts.listByTaskId(taskId)) {
+      if (attempt.target === 'local' && attempt.state === 'WORKING') {
+        this.store.manager.attempts.update(attempt.id, { state: 'FAILED', error: message.slice(0, 4_000), completedAt: new Date().toISOString() });
+      }
+    }
     this.emit(taskId, 'system', 'task.error', { message });
     this.emit(taskId, 'system', 'task.state', { state: 'failed' });
   }
@@ -832,7 +947,7 @@ export function providerFailoverDisposition(changedFileCount: number): 'review_p
 
 export function evaluateRunHealth(state: TaskState, processAlive: boolean, inactiveMs: number): RunMonitor['health'] {
   if (state === 'completed' || state === 'completed_unpushed') return 'complete';
-  if (state === 'recovery_required' || state === 'baseline_required' || state === 'review_disputed') return 'needs_attention';
+  if (state === 'paused' || state === 'recovery_required' || state === 'baseline_required' || state === 'review_disputed') return 'needs_attention';
   if (state === 'failed' || state === 'cancelled') return 'failed';
   if (!processAlive || inactiveMs >= 5 * 60_000) return 'possibly_stalled';
   if (inactiveMs >= 90_000) return 'waiting';
@@ -900,12 +1015,48 @@ function findRecentGitHubUrl(store: Store, sessionId: string, prompt: string) {
   return null;
 }
 function agentForState(state: TaskState): AgentName {
+  if (state === 'paused') return 'system';
   if (state === 'reviewing') return 'codex';
   if (state === 'running' || state === 'recovering') return 'antigravity';
   if (state === 'verifying') return 'verification';
   if (state === 'summarizing') return 'gemma';
   if (state === 'committing' || state === 'pushing') return 'git';
   return 'system';
+}
+
+function taskNextAction(state: TaskState, providerState: string | null): string | null {
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'Review and approve the Jules plan to continue.';
+  if (providerState === 'AWAITING_USER_FEEDBACK') return 'Send Jules the missing decision or clarification.';
+  if (providerState === 'PAUSED') return 'Send focused guidance to resume Jules, or stop and delete the cloud session.';
+  if (providerState === 'COMPLETED' && ['running', 'reviewing', 'verifying', 'committing', 'pushing'].includes(state)) return 'Keep this task open; Orchestra is reviewing or retrying the exact PR handoff automatically.';
+  if (state === 'paused') return 'Select Resume to continue this task with its preserved state.';
+  if (state === 'recovery_required') return 'Select Resume to continue the preserved implementation through review and verification.';
+  if (state === 'review_disputed') return 'Approve the reviewed diff or provide focused repair guidance.';
+  if (state === 'completed_unpushed') return 'Retry the push after checking the upstream branch and credentials.';
+  if (state === 'failed') return 'Open the error details, then retry from a clean state or resume preserved changes.';
+  return null;
+}
+
+function cloudProgressDetail(taskState: TaskState, providerState: string | null, hasPr: boolean): string {
+  if (taskState === 'reviewing') return hasPr ? 'The Jules PR is being fetched into an isolated local worktree for deterministic checks and independent review.' : 'Jules finished; Orchestra is waiting for a verified pull-request output before local review.';
+  if (taskState === 'verifying') return 'The exact Jules PR head is running the project verification suite in an isolated worktree.';
+  if (taskState === 'pushing' || taskState === 'committing') return 'The reviewed PR head is being integrated into the verified target branch.';
+  if (providerState === 'QUEUED') return 'Jules accepted the session and is waiting for cloud capacity.';
+  if (providerState === 'PLANNING') return 'Jules is inspecting the repository and building its implementation plan.';
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'Jules has produced a plan and is waiting for approval.';
+  if (providerState === 'AWAITING_USER_FEEDBACK') return 'Jules needs an answer before it can continue.';
+  if (providerState === 'PAUSED') return 'The Jules session is paused remotely and is not consuming active work until resumed.';
+  if (providerState === 'IN_PROGRESS') return 'Jules is implementing and testing in its cloud workspace. New provider activities appear below.';
+  if (providerState === 'COMPLETED') return 'Jules execution completed; Orchestra owns the remaining local review and integration stages.';
+  if (providerState === 'FAILED') return 'Jules reported a provider failure. The durable task record remains available for diagnosis.';
+  if (providerState === 'CANCELLED') return 'The Jules session was deleted and its local capacity reservation was released.';
+  return 'Orchestra is reconciling the Jules provider state.';
+}
+
+function cloudMonitorSummary(state: TaskState, providerState: string | null, inactiveMs: number, hasPr: boolean, repairAttempt: number): string {
+  const activity = inactiveMs < 60_000 ? `${Math.round(inactiveMs / 1000)} seconds` : `${Math.round(inactiveMs / 60_000)} minutes`;
+  const repair = repairAttempt ? ` ${repairAttempt} Jules repair request${repairAttempt === 1 ? '' : 's'} recorded.` : '';
+  return `Jules is ${String(providerState || 'being reconciled').replaceAll('_', ' ').toLowerCase()}; Orchestra is ${state.replaceAll('_', ' ')}. Last durable activity was ${activity} ago.${hasPr ? ' A pull request is attached.' : ''}${repair}`;
 }
 function monitorSummary(input: { state: TaskState; health: RunMonitor['health']; currentAgent: AgentName; inactiveMs: number; reviewCycle: number; repairAttempt: number; changedFiles: number }) {
   const activity = input.inactiveMs < 60_000 ? `${Math.round(input.inactiveMs / 1000)} seconds` : `${Math.round(input.inactiveMs / 60_000)} minutes`;

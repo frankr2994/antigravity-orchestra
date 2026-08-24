@@ -6,7 +6,7 @@ import { ApplicationError } from '../errors.js';
 import type { JulesConnectionService } from './connection-service.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const CACHE_MS = 60_000;
+const CACHE_MS = 5 * 60_000;
 const MAX_PAGES = 100;
 const LAST_USAGE_SETTING = 'jules.usage.last_known';
 const WORKING_STATES = new Set(['QUEUED', 'PLANNING', 'IN_PROGRESS']);

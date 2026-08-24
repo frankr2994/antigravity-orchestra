@@ -115,7 +115,7 @@ test('Jules rolling usage pages, deduplicates, excludes the exact boundary, cach
     assert.equal(usage.remainingCount, 13); assert.equal(usage.activeSessions, 1);
     assert.equal(usage.nextSlotAt, new Date(now + 22 * 60 * 60_000).toISOString());
     assert.equal(calls, 2);
-    await dashboard.usage(); assert.equal(calls, 2, 'successful account usage is cached for 60 seconds');
+    await dashboard.usage(); assert.equal(calls, 2, 'successful account usage is cached for five minutes');
     await dashboard.usage(true); assert.equal(calls, 4, 'forced refresh bypasses the cache');
 
     mode = 'malformed';

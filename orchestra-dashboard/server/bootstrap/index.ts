@@ -29,6 +29,12 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
   await reconcileStartupTasks(store);
 
   const tasks = new TaskManager(store, config.maxGlobalTasks);
+  for (const task of store.listTasks().filter((item) => item.target === 'local' && item.state === 'recovery_required')) {
+    const takeover = store.manager.checkpoints.latest(task.id, 'local_takeover');
+    if (takeover && ['prepared', 'queued'].includes(String(takeover.data.status))) {
+      void tasks.resumePreparedJulesTakeover(task.id).catch((error) => console.error(`Jules local takeover (${task.id}): ${error instanceof Error ? error.message : String(error)}`));
+    }
+  }
   const vault = new CredentialVault();
   const manager = new JulesSessionManager(store, vault);
   const connection = new JulesConnectionService(store, vault);
@@ -48,7 +54,8 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
     cleanup: () => cleanup.tick(),
     onTerminal: async ({ taskId, state, prUrl }) => {
       if (!connection.hasCapability('integrate') || state !== 'COMPLETED' || !prUrl) return;
-      await reviewer.reviewAndIntegrate(taskId);
+      const outcome = await reviewer.reviewAndIntegrate(taskId);
+      if (outcome.stage === 'local_takeover') await tasks.resumePreparedJulesTakeover(taskId);
       await batches.reconcileTask(taskId);
     },
     onError: (error, session) => console.error(`Jules supervisor${session ? ` (${session.remoteSessionId})` : ''}: ${error.message}`),

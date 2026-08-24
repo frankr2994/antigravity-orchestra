@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bookmark, Bot, Check, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
   Gauge, GitBranch, GitCommit, GitFork, History, Hexagon, MemoryStick, MessageSquare,
-  Pencil, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
+  Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
   Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
 import type {
@@ -16,7 +16,7 @@ import { JulesTaskPanel } from './features/jules/JulesTaskPanel';
 import { JulesSettingsCard } from './features/jules/JulesSettingsCard';
 import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashboard';
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewed', 'cloud.integrated', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
 
 function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
@@ -118,7 +118,11 @@ function App() {
   const api = useCallback(async <T,>(path: string, options: RequestInit = {}, overrideToken?: string): Promise<T> => {
     const response = await authenticatedFetch(path, options, overrideToken);
     const body = response.status === 204 ? null : await response.json().catch(() => null);
-    if (!response.ok) throw new Error(body?.error || `Request failed (${response.status})`);
+    if (!response.ok) {
+      const detail = body?.resolution || body?.nextAction;
+      const code = body?.code ? ` [${body.code}]` : '';
+      throw new Error(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`);
+    }
     return body as T;
   }, [authenticatedFetch]);
 
@@ -408,10 +412,42 @@ function App() {
 
   async function cancelTask(task = activeTask) {
     if (!task) return;
-    await api(`/api/tasks/${task.id}/cancel`, { method: 'POST', body: '{}' });
-    const cancelled = { ...task, state: 'cancelled' };
-    setActiveTask((current) => current?.id === task.id ? cancelled : current);
-    setTasks((current) => current.map((item) => item.id === task.id ? cancelled : item));
+    if (task.target === 'cloud' && !window.confirm('Stop and delete this Jules cloud session? This cannot be resumed.')) return;
+    try {
+      setBusy(true); setError('');
+      let updated: Task;
+      if (task.target === 'cloud') {
+        await api(`/api/tasks/${task.id}/jules/cancel`, { method: 'POST', headers: { 'Idempotency-Key': crypto.randomUUID() }, body: '{}' });
+        updated = await api<Task>(`/api/tasks/${task.id}`);
+      } else {
+        updated = await api<Task>(`/api/tasks/${task.id}/cancel`, { method: 'POST', body: '{}' });
+      }
+      setActiveTask((current) => current?.id === task.id ? updated : current);
+      setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+  async function pauseTask(task = activeTask) {
+    if (!task) return;
+    try {
+      setBusy(true); setError('');
+      const updated = await api<Task>(`/api/tasks/${task.id}/pause`, { method: 'POST', body: '{}' });
+      setActiveTask((current) => current?.id === task.id ? updated : current);
+      setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  }
+  async function resumeTask(task = activeTask) {
+    if (!task) return;
+    if (task.state === 'recovery_required') return recoverTask(task);
+    try {
+      setBusy(true); setError('');
+      const updated = await api<Task>(`/api/tasks/${task.id}/resume`, { method: 'POST', body: '{}' });
+      setActiveTask((current) => current?.id === task.id ? updated : current);
+      setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
+      setActivity([]); watchTask(task.id);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
   }
   async function recoverTask(task: Task) {
     if (recoveryRequestsRef.current.has(task.id)) return;
@@ -511,7 +547,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
+        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
@@ -679,7 +715,14 @@ function App() {
           )}
         </div>
         <div className="composer">
-          {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <button className="stop-button" onClick={() => void cancelTask()}><Square size={12} fill="currentColor" /> Stop task</button>}
+          {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <div className="monitor-actions">
+            {activeTask.state === 'paused'
+              ? <button className="secondary compact" onClick={() => void resumeTask()} disabled={busy}><Play size={12} fill="currentColor" /> Resume task</button>
+              : activeTask.target !== 'cloud' && ['queued', 'preflight', 'routing', 'running', 'recovering', 'reviewing', 'verifying'].includes(activeTask.state)
+                ? <button className="secondary compact" onClick={() => void pauseTask()} disabled={busy}><Pause size={12} /> Pause task</button>
+                : null}
+            {!(activeTask.target === 'cloud' && monitor?.providerState === 'COMPLETED') && <button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> {activeTask.target === 'cloud' ? 'Stop Jules' : 'Stop task'}</button>}
+          </div>}
           <div className="mode-selector">
             <button
               type="button"
@@ -832,10 +875,10 @@ function formatResetTimer(isoDate: string | null | undefined): string | null {
   return `resets in ${days}d ${remHours}h`;
 }
 
-function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
+function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
-    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
+    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onPause={onPause} onResume={onResume} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
     {activeTask?.target === 'cloud' && <JulesTaskPanel task={activeTask} api={api} />}
     <div className="metrics-grid">
       <Metric icon={<Cpu />} label="CPU" value={`${stats?.cpu.load ?? 0}%`} detail={stats?.cpu.speed || 'Unavailable'} percent={stats?.cpu.load ?? 0} color="blue" />
@@ -916,13 +959,14 @@ function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, m
   </section>;
 }
 
-function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
+function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
   const [showLogs, setShowLogs] = useState(false);
-  const recent = events.filter((event) => ['task.state', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.review-disputed', 'task.steer', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push'].includes(event.type)).slice(-25).reverse();
+  const recent = events.filter((event) => ['task.state', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'task.review-disputed', 'task.steer', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated'].includes(event.type)).slice(-25).reverse();
   const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed' || event.type === 'task.provider-recovery' || event.type === 'task.model-takeover');
   const running = !terminalStates.has(task.state);
+  const stoppable = running && !(task.target === 'cloud' && monitor?.providerState === 'COMPLETED');
   return <article className={`live-monitor health-${monitor?.health || 'waiting'}`}>
-    <header><div><span className="eyebrow">Live run monitor</span><h2>{task.title}</h2></div><div className="monitor-actions"><span className="health-pill"><StatusDot ok={monitor?.health === 'active' || monitor?.health === 'complete'} /> {humanState(monitor?.health || 'loading')}</span><button className="secondary compact" onClick={() => setShowLogs(!showLogs)}><Terminal size={13} /> {showLogs ? 'Hide terminal' : 'Live terminal'}</button>{running && <button className="stop-button" onClick={onStop}><Square size={12} fill="currentColor" /> Stop</button>}</div></header>
+    <header><div><span className="eyebrow">Live run monitor</span><h2>{task.title}</h2></div><div className="monitor-actions"><span className="health-pill"><StatusDot ok={monitor?.health === 'active' || monitor?.health === 'complete'} /> {humanState(monitor?.health || 'loading')}</span><button className="secondary compact" onClick={() => setShowLogs(!showLogs)}><Terminal size={13} /> {showLogs ? 'Hide terminal' : 'Live terminal'}</button>{task.state === 'paused' ? <button className="secondary compact" onClick={() => onResume(task)}><Play size={12} fill="currentColor" /> Resume</button> : running && task.target !== 'cloud' && ['queued', 'preflight', 'routing', 'running', 'recovering', 'reviewing', 'verifying'].includes(task.state) ? <button className="secondary compact" onClick={() => onPause(task)}><Pause size={12} /> Pause</button> : null}{stoppable && <button className="stop-button" onClick={() => onStop(task)}><Square size={12} fill="currentColor" /> {task.target === 'cloud' ? 'Stop Jules' : 'Stop'}</button>}</div></header>
     <div className="monitor-grid">
       <div><span>Phase</span><strong>{humanState(task.state)}</strong><small>{monitor?.currentAgent || 'system'}</small></div>
       <div><span>Elapsed</span><strong>{formatDuration(monitor?.elapsedMs || 0)}</strong><small>phase {formatDuration(Date.now() - Date.parse(monitor?.phaseStartedAt || task.createdAt))}</small></div>
@@ -933,6 +977,7 @@ function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, q
       <div><span>Codex context</span><strong>{formatProviderContext(monitor?.providerTelemetry.codex)}</strong><small>{monitor?.providerTelemetry.codex?.threadId ? 'fresh stage thread' : 'waiting for a Codex turn'}</small></div>
     </div>
     <p className="monitor-summary">{monitor?.summary || 'Loading deterministic run health…'}</p>
+    {monitor?.progressDetail && <div className="latest-work"><strong>Current operation{monitor.providerState ? ` · Jules ${humanState(monitor.providerState)}` : ''}</strong><p>{monitor.progressDetail}</p>{monitor.nextAction && <small><strong>Next:</strong> {monitor.nextAction}</small>}</div>}
     {task.state === 'review_disputed' && (
       <div className="monitor-stop">
         <CircleAlert size={16} />
@@ -957,7 +1002,7 @@ function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, q
       </div>
     )}
     <div className="monitor-detail">
-      <div className="monitor-timeline"><header><strong>Recent timeline</strong><small>Live monitor checks every 5 seconds</small></header>{monitor && <div className="monitor-heartbeat"><time>{new Date().toLocaleTimeString()}</time><span className="agent-dot system" /><b>monitor</b><p>{monitor.processAlive ? `${monitor.currentAgent} process is alive. ` : 'No process currently owns this task. '}{humanState(monitor.health)} · last agent event {formatDuration(monitor.inactiveMs)} ago · {monitor.changedFiles.length} changed files.</p></div>}{recent.length ? recent.map((event) => <div key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString()}</time><span className={`agent-dot ${event.agent}`} /><b>{event.agent}</b><p>{eventText(event)}</p></div>) : <small>Waiting for task events.</small>}</div>
+      <div className="monitor-timeline"><header><strong>Recent timeline</strong><small>Live monitor checks every 5 seconds</small></header>{monitor && <div className="monitor-heartbeat"><time>{new Date().toLocaleTimeString()}</time><span className="agent-dot system" /><b>monitor</b><p>{monitor.processAlive ? `${monitor.currentAgent} owns the active work. ` : task.state === 'paused' ? 'The task is safely paused with no live process. ' : 'No process currently owns this task. '}{humanState(monitor.health)} · last activity {formatDuration(monitor.inactiveMs)} ago · {monitor.changedFiles.length} changed files.</p></div>}{recent.length ? recent.map((event) => <div key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString()}</time><span className={`agent-dot ${event.agent}`} /><b>{event.agent}</b><p>{eventText(event)}</p></div>) : <small>Waiting for task events.</small>}</div>
       <div className="gemma-monitor"><div><strong>Ask Gemma about this run</strong><button className="secondary compact" onClick={onExplain} disabled={explanationBusy}>{explanationBusy ? 'Reading…' : 'Explain status'}</button></div><p>{explanation || 'Gemma answers from the run timeline, review findings, provider telemetry, errors, and sanitized Antigravity activity. Deterministic signals remain authoritative.'}</p><div className="gemma-question"><textarea value={question} onChange={(event) => onQuestion(event.target.value)} placeholder="Why did this enter a second repair cycle?" rows={3} /><button className="primary compact" onClick={onAsk} disabled={explanationBusy || !question.trim()}><Send size={14} /> Ask</button></div></div>
     </div>
   </article>;
@@ -1828,13 +1873,13 @@ function SettingsView({
 }
 
 function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[]; models: Record<string, string> | null }) {
-  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.provider-recovery', 'task.model-takeover', 'task.review-disputed', 'task.steer', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'warning'].includes(event.type)).slice(-8);
+  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.paused', 'task.resumed', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'task.review-disputed', 'task.steer', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'warning'].includes(event.type)).slice(-8);
   const rawPrimary = models?.primary === 'gemma' ? models.gemma : models?.antigravity;
   const primaryModel = rawPrimary ? (rawPrimary.includes('/') ? rawPrimary.split('/').pop() : rawPrimary) : '';
   return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small title={rawPrimary}>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
 }
 
-function eventText(event: TaskEvent) { const payload = event.payload; if (typeof payload.message === 'string') return payload.message; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.review-disputed') return `Review consensus dispute: ${String(payload.reason || 'repair attempt limit reached without consensus')}.`; if (event.type === 'task.steer') return `User provided steering guidance: ${String(payload.guidance || '').slice(0, 80)}...`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return event.type; }
+function eventText(event: TaskEvent) { const payload = event.payload; const next = typeof payload.nextAction === 'string' ? ` Next: ${payload.nextAction}` : typeof payload.resolution === 'string' ? ` Next: ${payload.resolution}` : ''; if (typeof payload.message === 'string') return `${payload.message}${next}`; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'cloud.activity' && payload.activity && typeof payload.activity === 'object') { const activity = payload.activity as Record<string, unknown>; return String(activity.description || activity.message || activity.type || 'Jules activity received.'); } if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.review-disputed') return `Review consensus dispute: ${String(payload.reason || 'repair attempt limit reached without consensus')}.`; if (event.type === 'task.steer') return `User provided steering guidance: ${String(payload.guidance || '').slice(0, 80)}...`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return humanState(event.type); }
 function formatProviderContext(item?: ProviderUsage) { const percent = item?.context?.usedPercent; if (percent !== null && percent !== undefined) return `${percent.toFixed(1)}%`; const tokens = item?.context?.inputTokens ?? item?.context?.totalTokens; return tokens ? `${tokens.toLocaleString()} tokens` : 'Not measured'; }
 
 export default App;

@@ -102,6 +102,22 @@ export class CloudSessionRepository {
       .map(mapCloudSession);
   }
 
+  listPendingIntegration(): CloudSessionReference[] {
+    return this.db.prepare(`
+      SELECT cs.*
+      FROM cloud_sessions cs
+      INNER JOIN tasks t ON t.id = cs.task_id
+      WHERE cs.state = 'COMPLETED'
+        AND t.target = 'cloud'
+        AND t.state IN ('running','reviewing','verifying','committing','pushing')
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_evidence evidence
+          WHERE evidence.task_id = cs.task_id AND evidence.kind = 'integration' AND evidence.outcome = 'integrated'
+        )
+      ORDER BY cs.updated_at ASC
+    `).all().map(mapCloudSession);
+  }
+
   listProjectActivitySince(projectId: string, cutoff: string): ProjectCloudSessionActivity[] {
     const rows = this.db.prepare(`
       SELECT cs.id AS cloud_session_id, cs.task_id, t.title, cs.state AS provider_state,

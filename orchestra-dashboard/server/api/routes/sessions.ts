@@ -3,6 +3,7 @@ import type { Store } from '../../db.js';
 import type { TaskManager } from '../../tasks.js';
 import { config } from '../../config.js';
 import { buildContinuationPrompt, findContinuationRecoveryTask } from '../../agents.js';
+import { ApplicationError } from '../../application/errors.js';
 
 export function generateDynamicSessionTitle(prompt: string): string {
   const clean = prompt
@@ -20,13 +21,13 @@ export function createSessionsRouter(store: Store, tasks: TaskManager): Router {
 
   function requireProject(id: string) {
     const value = store.getProject(id);
-    if (!value) throw new Error('Project not found.');
+    if (!value) throw new ApplicationError('PROJECT_NOT_FOUND', 'Project not found.', 404);
     return value;
   }
 
   function requireSession(id: string) {
     const value = store.getSession(id);
-    if (!value) throw new Error('Conversation not found.');
+    if (!value) throw new ApplicationError('SESSION_NOT_FOUND', 'Conversation not found.', 404);
     return value;
   }
 
@@ -72,10 +73,6 @@ export function createSessionsRouter(store: Store, tasks: TaskManager): Router {
   router.post('/sessions/:id/tasks', async (req, res, next) => {
     try {
       const session = requireSession(req.params.id);
-      const existingTaskId = tasks.activeTaskId(session.projectId);
-      if (existingTaskId) {
-        throw new Error(`This project already has an active or queued task (${existingTaskId}). Open that task instead of creating a duplicate.`);
-      }
       const prompt = String(req.body?.prompt || '').trim();
       if (!prompt || prompt.length > 100_000) {
         throw new Error('A prompt between 1 and 100,000 characters is required.');
@@ -97,6 +94,11 @@ export function createSessionsRouter(store: Store, tasks: TaskManager): Router {
         const recovered = await tasks.recover(recoveryTask.id);
         res.status(202).json(recovered);
         return;
+      }
+      const existingTaskId = tasks.activeTaskId(session.projectId);
+      if (existingTaskId) {
+        throw new ApplicationError('PROJECT_TASK_ACTIVE', `This project already has an active or queued task (${existingTaskId}).`, 409,
+          { nextAction: 'Open that task to follow, pause, resume, or stop it instead of creating a duplicate.', retryable: false });
       }
       const mode = req.body?.mode === 'direct' ? 'direct' : 'orchestra';
       const directAgent = req.body?.directAgent === 'codex' ? 'codex' : req.body?.directAgent === 'antigravity' ? 'antigravity' : 'gemma';

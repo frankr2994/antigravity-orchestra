@@ -6,6 +6,7 @@ export type TaskExecutor = (taskId: string, signal: AbortSignal) => Promise<void
 export class ProjectTaskScheduler {
   private readonly queue: string[] = [];
   private readonly controllers = new Map<string, AbortController>();
+  private readonly runs = new Map<string, Promise<void>>();
   private readonly runningProjects = new Set<string>();
 
   constructor(private readonly store: Store, private readonly executor: TaskExecutor, private readonly maxGlobal = 2) {
@@ -19,11 +20,17 @@ export class ProjectTaskScheduler {
     const index = this.queue.indexOf(taskId);
     if (index >= 0) this.queue.splice(index, 1);
   }
-  abort(taskId: string) { this.controllers.get(taskId)?.abort(); }
+  abort(taskId: string, reason: 'pause' | 'stop' = 'stop') { this.controllers.get(taskId)?.abort(reason); }
+  async abortAndWait(taskId: string, reason: 'pause' | 'stop'): Promise<void> {
+    this.abort(taskId, reason);
+    await this.runs.get(taskId)?.catch(() => undefined);
+  }
   isRunning(taskId: string) { return this.controllers.has(taskId); }
   activeTaskId(projectId: string): string | null {
     for (const [taskId] of this.controllers) if (this.store.getTask(taskId)?.projectId === projectId) return taskId;
-    return this.queue.map((taskId) => this.store.getTask(taskId)).find((task) => task?.projectId === projectId)?.id ?? null;
+    const queued = this.queue.map((taskId) => this.store.getTask(taskId)).find((task) => task?.projectId === projectId)?.id;
+    if (queued) return queued;
+    return this.store.listTasks(projectId).find((task) => !['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state))?.id ?? null;
   }
   private drain() {
     while (this.controllers.size < this.maxGlobal) {
@@ -37,9 +44,11 @@ export class ProjectTaskScheduler {
       if (!task || !['queued', 'recovering'].includes(task.state)) continue;
       const controller = new AbortController();
       this.controllers.set(taskId, controller); this.runningProjects.add(task.projectId);
-      void this.executor(taskId, controller.signal).finally(() => {
+      const run = this.executor(taskId, controller.signal).finally(() => {
         this.controllers.delete(taskId); this.runningProjects.delete(task.projectId); this.drain();
       });
+      this.runs.set(taskId, run);
+      void run.then(() => this.runs.delete(taskId), () => this.runs.delete(taskId));
     }
   }
 }

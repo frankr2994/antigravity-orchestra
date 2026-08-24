@@ -178,6 +178,22 @@ test('Phase 1 Baseline — Task Fixtures: Successful, Failed, Interrupted, Dispu
     const loadedDisputed = store.getTask(disputedTask.id);
     assert.equal(loadedDisputed?.state, 'review_disputed');
 
+    // Durable attention states and a completed Jules provider awaiting local
+    // review survive restart without being mislabeled as failed.
+    const pausedTask = store.createTask(project.id, session.id, 'Paused local work');
+    store.updateTask(pausedTask.id, { state: 'paused' });
+    const cloudReviewTask = store.createTask(project.id, session.id, 'Review completed Jules PR', null, null, 'cloud');
+    store.updateTask(cloudReviewTask.id, { state: 'running' });
+    store.updateTask(cloudReviewTask.id, { state: 'reviewing' });
+    store.manager.cloudSessions.create({ taskId: cloudReviewTask.id, sourceName: 'sources/test', sessionResourceName: 'sessions/restart',
+      remoteSessionId: 'restart', dispatchBranch: 'orchestra/jules/restart', targetBranch: 'main', baseSha: 'a'.repeat(40), state: 'COMPLETED' });
+    const secondRecovery = store.recoverInterruptedTasks();
+    assert.equal(secondRecovery.includes(pausedTask.id), false);
+    assert.equal(secondRecovery.includes(disputedTask.id), false);
+    assert.equal(secondRecovery.includes(cloudReviewTask.id), false);
+    assert.equal(store.getTask(pausedTask.id)?.state, 'paused');
+    assert.equal(store.getTask(cloudReviewTask.id)?.state, 'reviewing');
+
     // 7. Add Timeline Events and Verify Retrieval
     store.addEvent(successfulTask.id, 'antigravity', 'agent.started', { phase: 'implementation' });
     store.addEvent(successfulTask.id, 'codex', 'review.verdict', { verdict: 'approved' });

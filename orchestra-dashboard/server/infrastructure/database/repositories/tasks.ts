@@ -94,12 +94,12 @@ export class TaskRepository {
   }
 
   recoverInterruptedTasks(): string[] {
-    const terminal = ['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required'];
+    const terminal = ['completed', 'completed_unpushed', 'failed', 'cancelled', 'paused', 'baseline_required', 'recovery_required', 'review_disputed'];
     const placeholders = terminal.map(() => '?').join(',');
     const stamp = now();
     const recoverable = `state NOT IN (${placeholders}) AND NOT (
       target='cloud' AND EXISTS (
-        SELECT 1 FROM cloud_sessions cs WHERE cs.task_id=tasks.id AND cs.state NOT IN ('COMPLETED','FAILED','CANCELLED')
+        SELECT 1 FROM cloud_sessions cs WHERE cs.task_id=tasks.id AND cs.state NOT IN ('FAILED','CANCELLED')
       )
     )`;
     const rows = this.db.prepare(`SELECT id FROM tasks WHERE ${recoverable}`).all(...terminal) as Array<{ id: string }>;

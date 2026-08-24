@@ -565,7 +565,7 @@ Jules execution already had durable Orchestra task and cloud-session ownership, 
 Add a Jules dashboard application service between HTTP routes, the validated Jules adapter, Git inspection, settings persistence, and cloud-session repositories.
 
 - Persist an explicit Free, Pro, Ultra, or Custom quota plan and rolling 24-hour limit; never infer a subscription tier from credentials.
-- Calculate account usage from every paginated Jules session, deduplicated by provider resource name, with strict timestamp and pagination validation. Cache verified readings for 60 seconds and persist only the non-secret last-known aggregate.
+- Calculate account usage from every paginated Jules session, deduplicated by provider resource name, with strict timestamp and pagination validation. Cache verified readings for five minutes (with explicit force-refresh) and persist only the non-secret last-known aggregate.
 - Keep disabled mode provider-offline while presenting configured capacity and a stale last-known aggregate.
 - Derive project readiness from the runtime switch, credential presence/provider acceptance, canonical GitHub remote, exactly one Jules source, active branch availability, and verified remaining capacity.
 - Derive live project activity only from durable Orchestra-owned cloud sessions joined through their task ownership. Counters use the full rolling project set; the response list is limited to the 20 most recently updated sessions.
@@ -592,3 +592,44 @@ Add a Jules dashboard application service between HTTP routes, the validated Jul
 - Project APIs expose Jules readiness, setup diagnosis, and a bounded activity summary.
 - `/api/usage` includes a Jules provider with rolling counts, remaining percentage, active sessions, next-slot time, and stale state.
 - The dashboard displays a three-state Jules service light, guided setup dialog, rolling usage counts, and a separate live activity card refreshed on the configured telemetry interval.
+
+## 2026-08-24: Provider-truthful task control and durable Jules integration
+
+### Background
+
+Orchestra used one generic task-stop action for local processes and cloud sessions. Stopping a cloud task only changed local state while Jules continued remotely, local tasks had no paused state, and interrupted work could lose project ownership. Jules terminal polling also made PR review a one-shot callback: a transient review failure was not durably retried. Successful review advanced the remote target branch but left its local branch behind. Full activity history was downloaded repeatedly, and local implementation created a model-generated checkpoint commit before review that could bypass final push metadata.
+
+### Decision
+
+- Separate local scheduler control from remote provider control. Local tasks support durable `paused` state, await process termination, preserve changes and project ownership, and resume the same task. Cloud stop confirms Jules session deletion before recording cancellation.
+- Treat Jules `PAUSED` as provider state. Resume it with focused `sendMessage` guidance; do not expose an undocumented REST pause mutation.
+- Keep provider completion intermediate until exact PR identity, isolated deterministic verification, independent review, bounded Jules repair feedback, target-branch integration, and local branch synchronization finish.
+- Make terminal handoff retryable and idempotent. Persist review/integration evidence by exact head SHA, use repository and review leases, back off transient failures, and never launch a nominal local takeover unless the reviewed head has been made available locally and a local executor is actually queued.
+- Poll immutable activities incrementally from the persisted `createTime` cursor while retaining receipt deduplication. Render progress from durable local events rather than issuing UI-side provider reads.
+- Remove the pre-review checkpoint commit and its duplicate model summary. Review the complete uncommitted diff, then summarize, commit, and push exactly once after review and deterministic verification pass.
+- Return actionable recovery guidance with warning/error codes and display the current stage, latest provider activity, next action, repair count, and integration state in the task UI.
+- Bound ordinary local implementation to one fresh retry, and Jules review repair to two same-session cloud feedback cycles followed by one local takeover. The initial Jules dispatch is not counted as a repair cycle.
+- Cache account-wide Jules usage for five minutes while retaining explicit force-refresh, avoiding repeated full account pagination during routine dashboard refreshes.
+
+### Reasons
+
+- User-visible state must describe confirmed local and provider effects, especially for stop and completion.
+- Paused or partially changed work must continue to own the project so another task cannot accidentally absorb its diff.
+- Exact Git identities and compare-and-swap branch updates prevent stale PR review and unintended branch overwrites.
+- Incremental observation and removing duplicate model work reduce provider and token usage without weakening verification.
+- Jules remains the preferred repair engine for Jules-created PRs; bounded independent review keeps that leverage safe.
+
+### Alternatives
+
+- Map Orchestra pause directly to Jules pause: rejected because no public REST pause endpoint is documented.
+- Mark cloud tasks cancelled without deleting the provider session: rejected because it creates false state and leaks cloud work.
+- Push the PR head remotely without synchronizing local refs: rejected because the user's repository remains stale after a claimed integration.
+- Keep automatic local takeover as a database-only state change: rejected because no local worker would actually own or repair the reviewed PR head.
+
+### Impact
+
+- Local pause, resume, and stop become explicit state-machine operations with preserved ownership.
+- Jules stop is a confirmed remote deletion; paused sessions can receive resume guidance.
+- Activity polling and dashboard refreshes use fewer provider requests.
+- PR review and repair can survive transient failures and restarts without silently losing terminal work.
+- Successful Jules integration leaves both the remote target and its safe local branch ref at the reviewed commit, or reports an actionable local-sync warning without misrepresenting the remote result.

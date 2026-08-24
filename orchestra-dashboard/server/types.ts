@@ -19,6 +19,9 @@ export interface RunMonitor {
   elapsedMs: number;
   inactiveMs: number;
   processAlive: boolean;
+  providerState: string | null;
+  progressDetail: string;
+  nextAction: string | null;
   reviewCycle: number;
   repairAttempt: number;
   changedFiles: string[];

@@ -237,12 +237,14 @@ export class JulesApiClient {
     sessionName: string,
     pageSize?: number,
     pageToken?: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    createTime?: string,
   ): Promise<JulesListActivitiesResponse> {
     const resourceName = sessionName.startsWith('sessions/') ? sessionName : `sessions/${sessionName}`;
     const params = new URLSearchParams();
     if (pageToken) params.set('pageToken', pageToken);
     if (pageSize) params.set('pageSize', String(pageSize));
+    if (createTime) params.set('createTime', createTime);
     const query = params.toString() ? `?${params.toString()}` : '';
     return this.request<JulesListActivitiesResponse>(`/${resourceName}/activities${query}`, 'GET', undefined, parseJulesListActivitiesResponse, signal);
   }

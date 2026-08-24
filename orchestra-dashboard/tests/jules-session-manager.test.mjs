@@ -90,6 +90,9 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
           }),
         };
       }
+      if (urlStr.includes('/sessions/sess-1234') && opts?.method === 'DELETE') {
+        return { ok: true, status: 204 };
+      }
       if (urlStr.includes('/sessions/sess-1234')) {
         return {
           ok: true,
@@ -159,14 +162,13 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
 
     // 7. Cancel Session
     const cancelResult = await manager.cancelSession('sess-1234', { julesClient });
-    assert.equal(cancelResult.ok, false);
-    assert.equal(cancelResult.code, 'JULES_CANCELLATION_UNSUPPORTED');
+    assert.equal(cancelResult.ok, true);
 
     const cancelledCloud = store.manager.cloudSessions.getByTaskId(task.id);
-    assert.equal(cancelledCloud?.state, 'COMPLETED');
+    assert.equal(cancelledCloud?.state, 'CANCELLED');
 
     const updatedTask = store.getTask(task.id);
-    assert.equal(updatedTask?.state, 'reviewing');
+    assert.equal(updatedTask?.state, 'cancelled');
   } finally {
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
     try { rmSync(fixtureDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }

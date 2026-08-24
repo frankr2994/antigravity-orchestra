@@ -192,7 +192,7 @@ export class JulesSessionManager {
       let pageToken: string | undefined;
       const seenTokens = new Set<string>();
       for (let page = 0; page < 100; page += 1) {
-        const response = await client.listActivities(remoteSessionId, 100, pageToken);
+        const response = await client.listActivities(remoteSessionId, 100, pageToken, undefined, cursor.lastActivityAt ?? undefined);
         activities.push(...response.activities);
         if (!response.nextPageToken) break;
         if (seenTokens.has(response.nextPageToken)) throw new Error('Jules activity pagination repeated a page token');
@@ -240,6 +240,15 @@ export class JulesSessionManager {
           newActivities.push(activity);
           this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.activity', translateJulesActivity(activity));
         }
+      }
+      if (julesState !== cloudSession.state) {
+        this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.activity', {
+          kind: 'state',
+          title: `Jules is ${String(julesState).replaceAll('_', ' ').toLowerCase()}`,
+          description: mapping.reason ?? `Provider state changed from ${cloudSession.state} to ${julesState}.`,
+          state: julesState,
+          requiresUserAction: mapping.requiresUserAction,
+        });
       }
       this.store.manager.cloudSessions.update(cloudSession.id, {
         state: julesState, prUrl, lastActivityId: newest?.id || newest?.name || cloudSession.lastActivityId,
@@ -317,20 +326,41 @@ export class JulesSessionManager {
 
   async cancelSession(
     remoteSessionId: string,
-    _options?: { julesClient?: JulesApiClient }
-  ): Promise<{ ok: false; code: 'JULES_CANCELLATION_UNSUPPORTED'; error: string }> {
+    options?: { julesClient?: JulesApiClient }
+  ): Promise<{ ok: boolean; code?: 'CLOUD_SESSION_NOT_FOUND' | 'JULES_CANCELLATION_FAILED'; error?: string }> {
     const cloudSession = this.store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
     if (!cloudSession) {
       return {
         ok: false,
-        code: 'JULES_CANCELLATION_UNSUPPORTED',
-        error: `Cloud session '${remoteSessionId}' cannot be cancelled because the Jules API has no confirmed cancellation operation.`,
+        code: 'CLOUD_SESSION_NOT_FOUND',
+        error: `Cloud session '${remoteSessionId}' was not found.`,
       };
     }
-    return {
-      ok: false,
-      code: 'JULES_CANCELLATION_UNSUPPORTED',
-      error: 'The Jules API documents session deletion, not a confirmed cancellation operation.',
-    };
+    let client = options?.julesClient;
+    if (!client) {
+      const { apiKey } = resolveJulesApiKey();
+      if (!apiKey) return { ok: false, code: 'JULES_CANCELLATION_FAILED', error: 'A Jules API key is required to delete the remote session.' };
+      client = new JulesApiClient({ apiKey });
+    }
+    try {
+      await client.deleteSession(cloudSession.sessionResourceName);
+    } catch (error) {
+      if (!(error instanceof JulesApiError && error.status === 404)) {
+        return { ok: false, code: 'JULES_CANCELLATION_FAILED', error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    this.store.manager.transaction(() => {
+      this.store.manager.cloudSessions.update(cloudSession.id, { state: 'CANCELLED' });
+      for (const attempt of this.store.manager.attempts.listByTaskId(cloudSession.taskId)) {
+        if (attempt.state === 'WORKING') this.store.manager.attempts.update(attempt.id, { state: 'CANCELLED', completedAt: new Date().toISOString() });
+      }
+      const task = this.store.getTask(cloudSession.taskId);
+      if (task && !['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) {
+        this.store.updateTask(task.id, { state: 'cancelled', error: 'The Jules cloud session was deleted at the user\'s request.' });
+      }
+      this.store.manager.julesCapacity.release(cloudSession.taskId);
+      this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.cancelled', { remoteSessionId });
+    });
+    return { ok: true };
   }
 }

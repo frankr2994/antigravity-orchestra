@@ -159,16 +159,16 @@ test('Phase 13 Repair Loop — executeDualEngineRepair orchestrates cloud repair
     assert.equal(takeoverRes.strategy, 'local_takeover');
     assert.equal(takeoverRes.ok, true);
 
-    // listByTaskId returns newest first
+    // Local takeover is only requested here. The review service must first
+    // import the exact PR head before it queues a real local attempt.
     const attemptsAfter2 = store.manager.attempts.listByTaskId(task.id);
-    assert.equal(attemptsAfter2.length, 2);
-    assert.equal(attemptsAfter2[0].target, 'local');
-    assert.equal(attemptsAfter2[0].worker, 'antigravity');
-    assert.equal(attemptsAfter2[1].target, 'cloud');
-    assert.equal(attemptsAfter2[1].worker, 'jules');
+    assert.equal(attemptsAfter2.length, 1);
+    assert.equal(attemptsAfter2[0].target, 'cloud');
+    assert.equal(attemptsAfter2[0].worker, 'jules');
 
     const updatedTask = store.getTask(task.id);
-    assert.equal(updatedTask?.target, 'local');
+    assert.equal(updatedTask?.target, 'cloud');
+    assert.equal(store.listEvents(task.id).at(-1)?.type, 'task.takeover_local');
 
     // 3. Cycle 4: Dispute Escalation
     const disputeRes = await executeDualEngineRepair({

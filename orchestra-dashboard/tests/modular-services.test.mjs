@@ -27,6 +27,30 @@ test('Modular scheduler — enforces global and per-project concurrency independ
   releases.get('a2')(); releases.get('b1')();
 });
 
+test('Modular scheduler — pause waits for process exit and keeps durable project ownership', async () => {
+  const tasks = new Map([['paused-task', { id: 'paused-task', projectId: 'project', state: 'queued' }]]);
+  let abortReason = null;
+  let exited = false;
+  const store = {
+    getTask: (id) => tasks.get(id),
+    listTasks: (projectId) => [...tasks.values()].filter((task) => task.projectId === projectId),
+  };
+  const scheduler = new ProjectTaskScheduler(store, (_id, signal) => new Promise((resolve) => {
+    signal.addEventListener('abort', () => {
+      abortReason = signal.reason;
+      setImmediate(() => { exited = true; resolve(); });
+    }, { once: true });
+  }), 1);
+  scheduler.enqueue('paused-task');
+  await new Promise((resolve) => setImmediate(resolve));
+  await scheduler.abortAndWait('paused-task', 'pause');
+  assert.equal(abortReason, 'pause');
+  assert.equal(exited, true);
+  assert.equal(scheduler.isRunning('paused-task'), false);
+  tasks.get('paused-task').state = 'paused';
+  assert.equal(scheduler.activeTaskId('project'), 'paused-task');
+});
+
 test('Modular event publisher — persists before broadcasting canonical events', () => {
   const calls = [];
   const event = { id: 1, taskId: 'task', agent: 'system', type: 'task.state', payload: { state: 'running' }, createdAt: new Date().toISOString() };
@@ -50,4 +74,3 @@ test('Modular request contracts — reject coercion and bound pagination', () =>
   assert.throws(() => parseActivityPage({ pageSize: '101' }), /pageSize/);
   assert.deepEqual(parseActivityPage({ pageSize: '25', pageToken: ' next ' }), { pageSize: 25, pageToken: 'next' });
 });
-

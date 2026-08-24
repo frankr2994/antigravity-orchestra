@@ -55,6 +55,11 @@ export interface TaskRecoveryEvent extends BaseTaskEvent {
   payload: { message: string; [key: string]: unknown };
 }
 
+export interface TaskControlEvent extends BaseTaskEvent {
+  type: 'task.paused' | 'task.resumed';
+  payload: { message: string; nextAction?: string; [key: string]: unknown };
+}
+
 export interface TaskRecoveryRequiredEvent extends BaseTaskEvent {
   type: 'task.recovery-required';
   payload: { message?: string; reason?: string; files?: string[]; [key: string]: unknown };
@@ -236,6 +241,11 @@ export interface CloudRepairRequestedEvent extends BaseTaskEvent {
   payload: { remoteSessionId: string; cycle?: number; findingsCount?: number; [key: string]: unknown };
 }
 
+export interface CloudReviewingEvent extends BaseTaskEvent {
+  type: 'cloud.reviewing';
+  payload: { message: string; stage: string; headSha?: string; [key: string]: unknown };
+}
+
 export interface CloudReviewedEvent extends BaseTaskEvent {
   type: 'cloud.reviewed';
   payload: { remoteSessionId: string; verdict: string; findingsCount: number; [key: string]: unknown };
@@ -262,7 +272,7 @@ export interface CloudPrImportedEvent extends BaseTaskEvent {
 }
 export interface CloudIntegratedEvent extends BaseTaskEvent {
   type: 'cloud.integrated';
-  payload: { prUrl: string; baseSha: string; headSha: string; targetBranch: string };
+  payload: { prUrl: string; baseSha: string; headSha: string; targetBranch: string; [key: string]: unknown };
 }
 
 // ----------------------------------------------------------------------------
@@ -316,6 +326,7 @@ export type TaskEvent =
   | TaskCancelledEvent
   | TaskErrorEvent
   | TaskRecoveryEvent
+  | TaskControlEvent
   | TaskRecoveryRequiredEvent
   | TaskRetryEvent
   | TaskSteerEvent
@@ -349,6 +360,7 @@ export type TaskEvent =
   | CloudMessageSentEvent
   | CloudFeedbackSentEvent
   | CloudRepairRequestedEvent
+  | CloudReviewingEvent
   | CloudReviewedEvent
   | CloudCompletedEvent
   | CloudFailedEvent
@@ -367,7 +379,7 @@ export type TaskEventType = TaskEvent['type'];
 
 export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
   'task.started', 'task.state', 'task.completed', 'task.failed', 'task.cancelled', 'task.error',
-  'task.recovery', 'task.recovery-required', 'task.retry', 'task.steer', 'task.continuation',
+  'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.retry', 'task.steer', 'task.continuation',
   'task.disputed', 'task.review-disputed', 'task.repair-progress', 'task.implementation-retry',
   'task.routed', 'task.takeover_local', 'task.model-takeover', 'task.provider-recovery',
   'agent.started', 'agent.output', 'agent.progress', 'agent.completed', 'agent.failed',
@@ -375,7 +387,7 @@ export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
   'git.commit', 'git.push', 'git.remote', 'git.baseline-required',
   'cloud.dispatching', 'cloud.dispatched', 'cloud.activity', 'cloud.plan_received',
   'cloud.plan_approved', 'cloud.message_sent', 'cloud.feedback_sent', 'cloud.repair_requested',
-  'cloud.reviewed', 'cloud.completed', 'cloud.failed', 'cloud.cancelled', 'cloud.pr_imported',
+  'cloud.reviewing', 'cloud.reviewed', 'cloud.completed', 'cloud.failed', 'cloud.cancelled', 'cloud.pr_imported',
   'cloud.integrated',
   'routing.decision', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'warning',
   'provider.telemetry', 'project.onboarding',

@@ -86,11 +86,13 @@ export class JulesSessionService {
             this.store.manager.commandIntents.getById(intent.id)!, command.prompt,
           );
           if (reconciled) return reconciled;
-          throw new ApplicationError('JULES_DISPATCH_AMBIGUOUS', 'Jules may have accepted the dispatch. Orchestra will keep reconciling it automatically; do not submit a duplicate.', 503);
+          throw new ApplicationError('JULES_DISPATCH_AMBIGUOUS', 'Jules may have accepted the dispatch. Orchestra will keep reconciling it automatically; do not submit a duplicate.', 503,
+            { nextAction: 'Keep this task open while Orchestra checks Jules for the existing session.', retryable: false });
         }
         this.store.manager.commandIntents.transition(intent.id, 'pending', 'failed', { errorCode: 'JULES_DISPATCH_REJECTED' });
         this.store.manager.julesCapacity.release(taskId);
-        throw new ApplicationError('JULES_DISPATCH_REJECTED', result.error ?? 'Jules dispatch was rejected.', 400);
+        throw new ApplicationError('JULES_DISPATCH_REJECTED', result.error ?? 'Jules dispatch was rejected.', 400,
+          { resolution: result.resolution, nextAction: result.resolution || 'Open Jules setup diagnostics, correct the failed preflight item, and retry.', retryable: true });
       }
       const response = {
         ok: true, taskId, sessionId, remoteSessionId: result.cloudSession?.remoteSessionId,
@@ -125,7 +127,85 @@ export class JulesSessionService {
 
   getTaskSession(taskId: string) {
     const task = this.requireTask(taskId);
-    return { task, cloudSession: this.store.manager.cloudSessions.getByTaskId(task.id) };
+    const cloudSession = this.store.manager.cloudSessions.getByTaskId(task.id);
+    const recentActivity = this.store.listEvents(task.id)
+      .filter((event) => event.agent === 'jules' || event.type.startsWith('cloud.'))
+      .slice(-20)
+      .map((event) => ({ id: event.id, type: event.type, createdAt: event.createdAt, payload: event.payload }));
+    return {
+      task,
+      cloudSession,
+      workflow: cloudSession ? describeCloudWorkflow(task.state, cloudSession.state, Boolean(cloudSession.prUrl)) : null,
+      recentActivity,
+    };
+  }
+
+  async cancel(taskId: string, idempotencyKey: string) {
+    const task = this.requireTask(taskId);
+    const cloud = this.requireCloudSession(taskId);
+    if (cloud.state === 'COMPLETED' && !['completed', 'completed_unpushed', 'failed', 'cancelled', 'review_disputed'].includes(task.state)) {
+      throw new ApplicationError('JULES_HANDOFF_IN_PROGRESS', 'Jules has already completed and Orchestra is reviewing the exact PR locally; deleting the remote session would not safely stop that Git operation.', 409,
+        { nextAction: 'Keep the task open until review finishes. If review needs input, Orchestra will enter Review disputed with explicit controls.', retryable: false });
+    }
+    const requestHash = CommandIntentRepository.requestHash({ taskId, kind: 'jules.delete', remoteSessionId: cloud.remoteSessionId });
+    const found = this.store.manager.commandIntents.getByIdempotencyKey(idempotencyKey);
+    if (found && (found.taskId !== taskId || found.kind !== 'jules.delete' || found.requestHash !== requestHash)) {
+      throw new ApplicationError('IDEMPOTENCY_CONFLICT', 'Idempotency key was reused for another action.', 409);
+    }
+    if (found?.state === 'acknowledged' && found.response) return found.response;
+    if (found?.state === 'failed') throw new ApplicationError('JULES_DELETE_REJECTED', 'Jules previously rejected this stop request. Refresh the session state before trying again.', 409,
+      { nextAction: 'Refresh the session; if it still exists, stop it in the Jules web app and let Orchestra reconcile the provider state.', retryable: true });
+    const { intent } = found ? { intent: found } : this.store.manager.commandIntents.createOrGet({
+      taskId, attemptId: cloud.attemptId, kind: 'jules.delete', idempotencyKey, requestHash,
+    });
+
+    try {
+      await this.client().deleteSession(cloud.sessionResourceName);
+    } catch (error) {
+      if (!(error instanceof JulesApiError && error.status === 404)) {
+        const definite = error instanceof JulesApiError && error.status >= 400 && error.status < 500;
+        if (intent.state === 'pending' || intent.state === 'ambiguous') {
+          this.store.manager.commandIntents.transition(intent.id, intent.state, definite ? 'failed' : 'ambiguous', {
+            errorCode: definite ? 'JULES_DELETE_REJECTED' : 'JULES_DELETE_AMBIGUOUS',
+          });
+        }
+        throw new ApplicationError(
+          definite ? 'JULES_DELETE_REJECTED' : 'JULES_DELETE_AMBIGUOUS',
+          definite
+            ? 'Jules rejected the stop request. Open the remote session and verify its current state.'
+            : 'Jules may have accepted the stop request. Retry this same action to reconcile it; Orchestra has not marked the task cancelled yet.',
+          definite ? 409 : 503,
+          { nextAction: definite
+            ? 'Open the remote Jules session, confirm its current state, then refresh Orchestra.'
+            : 'Retry Stop with the same task after refreshing; Orchestra will not create a duplicate operation.', retryable: !definite },
+        );
+      }
+    }
+
+    const response = { ok: true, taskId, remoteSessionId: cloud.remoteSessionId, state: 'cancelled' };
+    this.store.manager.transaction(() => {
+      const currentIntent = this.store.manager.commandIntents.getById(intent.id)!;
+      if (currentIntent.state !== 'acknowledged') {
+        this.store.manager.commandIntents.transition(intent.id, currentIntent.state, 'acknowledged', {
+          attemptId: cloud.attemptId, providerResource: cloud.sessionResourceName, response,
+        });
+      }
+      this.store.manager.cloudSessions.update(cloud.id, { state: 'CANCELLED' });
+      for (const attempt of this.store.manager.attempts.listByTaskId(taskId)) {
+        if (attempt.state === 'WORKING') this.store.manager.attempts.update(attempt.id, { state: 'CANCELLED', completedAt: new Date().toISOString() });
+      }
+      if (!['completed', 'completed_unpushed', 'failed', 'cancelled'].includes(task.state)) {
+        this.store.updateTask(taskId, { state: 'cancelled', error: 'The Jules cloud session was deleted at the user\'s request.' });
+      }
+      this.store.manager.julesCapacity.release(taskId);
+      this.store.manager.managedGitResources.scheduleTaskCleanup(taskId);
+      this.store.addEvent(taskId, 'jules', 'cloud.cancelled', {
+        remoteSessionId: cloud.remoteSessionId,
+        reason: 'The provider confirmed session deletion.',
+      });
+      this.store.addEvent(taskId, 'system', 'task.state', { state: 'cancelled' });
+    });
+    return response;
   }
   async approvePlan(taskId: string, idempotencyKey: string) {
     const cloud = this.requireCloudSession(taskId);
@@ -242,4 +322,20 @@ export class JulesSessionService {
         definite ? 'Jules rejected the requested action.' : 'Jules may have accepted the action; reconciliation is required.', definite ? 409 : 503);
     }
   }
+}
+
+function describeCloudWorkflow(taskState: string, providerState: string, hasPr: boolean) {
+  if (taskState === 'reviewing') return {
+    stage: 'local_review',
+    detail: hasPr ? 'Fetching and verifying the exact Jules PR head locally.' : 'Waiting for Jules to publish a pull request output.',
+    nextAction: 'No action is needed unless Orchestra reports a review finding.',
+  };
+  if (taskState === 'verifying') return { stage: 'verification', detail: 'Running deterministic checks against the isolated PR worktree.', nextAction: 'Wait for verification to finish.' };
+  if (taskState === 'review_disputed') return { stage: 'needs_attention', detail: 'Automatic review or repair reached a safe stopping boundary.', nextAction: 'Review the findings and provide focused guidance.' };
+  if (taskState === 'completed' || taskState === 'completed_unpushed') return { stage: 'integrated', detail: 'The reviewed Jules result reached its target branch.', nextAction: null };
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return { stage: 'plan_approval', detail: 'Jules generated a plan and is waiting.', nextAction: 'Review and approve the Jules plan.' };
+  if (providerState === 'AWAITING_USER_FEEDBACK') return { stage: 'feedback', detail: 'Jules needs a decision or clarification.', nextAction: 'Send focused guidance to Jules.' };
+  if (providerState === 'PAUSED') return { stage: 'paused', detail: 'The remote Jules session is paused.', nextAction: 'Send focused guidance to resume, or stop and delete the session.' };
+  if (providerState === 'COMPLETED') return { stage: 'handoff', detail: 'Jules completed cloud work; local review handoff is pending.', nextAction: 'Orchestra will reconcile the PR automatically.' };
+  return { stage: 'cloud_execution', detail: `Jules provider state: ${providerState.replaceAll('_', ' ').toLowerCase()}.`, nextAction: null };
 }

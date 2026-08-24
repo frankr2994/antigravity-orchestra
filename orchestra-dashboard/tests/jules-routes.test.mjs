@@ -287,11 +287,14 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     // 6. Cancel session
     const cancelRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/cancel`, {
       method: 'POST',
+      headers: { 'Idempotency-Key': 'cancel-route-1', 'Content-Type': 'application/json' },
+      body: '{}',
     });
-    assert.equal(cancelRes.status, 501);
+    assert.equal(cancelRes.status, 200);
     const cancelData = await cancelRes.json();
-    assert.equal(cancelData.code, 'JULES_CANCELLATION_UNSUPPORTED');
-    assert.equal(remoteCancelled, false);
+    assert.equal(cancelData.state, 'cancelled');
+    assert.equal(remoteCancelled, true);
+    assert.equal(store.getTask(taskId)?.state, 'cancelled');
 
     // 7. Feature-gated import-pr endpoint returns 501
     const importRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/import-pr`, {
