@@ -18,6 +18,7 @@ import type { TaskManager } from '../tasks.js';
 import { JulesRoutingService } from '../application/jules/routing-service.js';
 import { createJulesRoutingRouter } from '../api/routes/jules/routing.js';
 import type { JulesStageSource } from '../api/routes/jules/capability.js';
+import { JulesDashboardService } from '../application/jules/dashboard-service.js';
 
 export interface JulesModuleOptions {
   store?: Store;
@@ -27,6 +28,8 @@ export interface JulesModuleOptions {
   rolloutStage?: JulesStageSource;
   reviewService?: JulesReviewService;
   tasks?: TaskManager;
+  connectionService?: JulesConnectionService;
+  dashboardService?: JulesDashboardService;
 }
 function isStore(value: Store | JulesModuleOptions): value is Store { return 'manager' in value; }
 
@@ -35,11 +38,12 @@ export function composeJulesRouter(storeOrOptions?: Store | JulesModuleOptions, 
     ? isStore(storeOrOptions) ? { store: storeOrOptions, vault: explicitVault } : storeOrOptions
     : { vault: explicitVault };
   const vault = options.vault ?? new CredentialVault();
-  const connection = new JulesConnectionService(options.store, vault, options.julesClient);
+  const connection = options.connectionService ?? new JulesConnectionService(options.store, vault, options.julesClient);
+  const dashboard = options.dashboardService ?? (options.store ? new JulesDashboardService(options.store, connection) : undefined);
   const stage: JulesStageSource = options.rolloutStage ?? (() => connection.runtimeSettings().rolloutStage);
   const router = Router();
   router.use(dashboardTokenMiddleware);
-  router.use(createJulesConnectionRouter(connection, stage));
+  router.use(createJulesConnectionRouter(connection, stage, dashboard));
   if (options.store) {
     const manager = options.sessionManager ?? new JulesSessionManager(options.store, vault);
     const sessions = new JulesSessionService(options.store, vault, manager, () => connection.client(), options.julesClient);

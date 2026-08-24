@@ -4,15 +4,17 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { pathToFileURL } from 'node:url';
+import { attachTrustedLocalArtifacts, buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, codexShellGuidance, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, groundPostflightResult, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
-import { createManualCheckpoint, extractGitHubRemoteUrl, getCommitDiffDetails, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
+import { boundGitDiff, createManualCheckpoint, extractGitHubRemoteUrl, getChangedFilesFromBase, getCommitDiffDetails, getDiffFromBase, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
-import { evaluateRunHealth, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
+import { evaluateRunHealth, hasReviewablePreservedProviderOutput, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
-import { codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
+import { codexAppServerEnvironment, codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
 import { isGemmaRiderToolAllowed } from '../dist-server/mcp.js';
+import { compactHeadAndTail, fitGemmaMessages, gemmaPromptBudget, splitGemmaText } from '../dist-server/application/gemma/context-budget.js';
 import { ProcessIdleTimeoutError, runProcess } from '../dist-server/process.js';
 import { npmInvocation, verificationFailure, verifyProject } from '../dist-server/verification.js';
 
@@ -21,6 +23,33 @@ test('model policy escalates deep sensitive work to Pro and Sol', () => {
   assert.equal(selection.antigravity, 'gemini-3.7-flash-high');
   assert.equal(selection.codex, 'gpt-5.6-sol');
   assert.equal(selection.codexEffort, 'high');
+});
+
+test('Gemma context broker keeps required instructions and bounds 8K requests', () => {
+  const system = 'Required safety instructions and JSON schema.';
+  const oversized = `${'A'.repeat(30_000)}\nIMPORTANT TAIL`;
+  const fitted = fitGemmaMessages([
+    { role: 'system', content: system },
+    { role: 'user', content: oversized },
+  ], 8_192, 900, '{"schema":"overhead"}');
+  assert.equal(fitted.compacted, true);
+  assert.equal(fitted.messages[0].content, system);
+  assert.match(fitted.messages[1].content, /compacted:/);
+  assert.match(fitted.messages[1].content, /IMPORTANT TAIL/);
+  const total = fitted.messages.reduce((sum, message) => sum + String(message.content || '').length, 0);
+  assert.ok(total < gemmaPromptBudget(8_192, 900).inputCharacterLimit);
+});
+
+test('Gemma compaction and chunking preserve both boundaries of oversized evidence', () => {
+  const compacted = compactHeadAndTail(`BEGIN-${'x'.repeat(20_000)}-END`, 2_000, 'evidence');
+  assert.match(compacted, /^BEGIN-/);
+  assert.match(compacted, /-END$/);
+  const diff = `diff --git a/a.ts b/a.ts\n${'a'.repeat(8_000)}\ndiff --git a/b.ts b/b.ts\n${'b'.repeat(8_000)}`;
+  const chunks = splitGemmaText(diff, 10_000);
+  assert.equal(chunks.length, 2);
+  assert.match(chunks[0], /a\/a\.ts/);
+  assert.match(chunks[1], /a\/b\.ts/);
+  assert.equal(chunks.join(''), diff);
 });
 
 test('model policy keeps simple questions on Flash without Codex', () => {
@@ -187,6 +216,13 @@ test('provider process failures deterministically transfer diffs or diagnose cle
   assert.equal(providerFailoverDisposition(0), 'diagnose_and_retry');
 });
 
+test('non-success provider output with preserved changes skips speculative failure triage', () => {
+  assert.equal(hasReviewablePreservedProviderOutput({ incomplete: true, text: 'Implemented and verified the feature.' }, 4), true);
+  assert.equal(hasReviewablePreservedProviderOutput({ incomplete: true, text: '' }, 4), false);
+  assert.equal(hasReviewablePreservedProviderOutput({ incomplete: true, text: 'No changes made.' }, 0), false);
+  assert.equal(hasReviewablePreservedProviderOutput({ incomplete: false, text: 'Done.' }, 4), false);
+});
+
 test('process runner terminates a silent provider before the absolute timeout', async () => {
   await assert.rejects(
     () => runProcess(process.execPath, ['-e', 'setTimeout(() => {}, 500)'], { idleTimeoutMs: 50, timeoutMs: 1_000 }),
@@ -313,6 +349,33 @@ test('Antigravity prompts prohibit background work and identify recovery runs', 
   assert.match(prompt, /cancel or close it before returning/i);
   assert.match(prompt, /Rider MCP is healthy and enabled/i);
   assert.match(prompt, /Do not force unrelated work through MCP/i);
+  assert.match(prompt, /complete and verify only that phase/i);
+});
+
+test('trusted Antigravity plan artifacts are snapshotted while outside links remain references', () => {
+  const root = mkdtempSync(join(tmpdir(), 'orchestra-artifacts-'));
+  const trusted = join(root, 'brain');
+  const outside = join(root, 'outside.md');
+  mkdirSync(trusted, { recursive: true });
+  const plan = join(trusted, 'plan.md');
+  writeFileSync(plan, '# Exact plan\nImplement Phase 1 only.');
+  writeFileSync(outside, '# Do not attach');
+  try {
+    const prompt = attachTrustedLocalArtifacts(`Use [plan](${pathToFileURL(plan)}) and [outside](${pathToFileURL(outside)}).`, trusted);
+    assert.match(prompt, /Attached local artifact snapshots/);
+    assert.match(prompt, /Implement Phase 1 only/);
+    assert.doesNotMatch(prompt, /# Do not attach/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('Codex Windows guidance and app-server environment avoid fragile shell aliases', () => {
+  assert.match(codexShellGuidance('win32'), /PowerShell-compatible/);
+  const source = { Path: 'C:\\Tools;C:\\Users\\Rob\\AppData\\Local\\Microsoft\\WindowsApps;C:\\Windows\\System32' };
+  const sanitized = codexAppServerEnvironment(source);
+  if (process.platform === 'win32') {
+    assert.doesNotMatch(String(sanitized.Path), /WindowsApps/i);
+    assert.match(String(sanitized.Path), /C:\\Tools/);
+  }
 });
 
 test('Antigravity progress reports Rider MCP activity without protocol payloads', () => {
@@ -378,6 +441,36 @@ test('postflight discards corroborating observations but retains factual problem
   const problem = normalizePostflightResult({ status: 'block', confidence: 0.97, issues: ['The response incorrectly claims that missing/File.java exists.'] });
   assert.equal(problem.status, 'block');
   assert.equal(problem.issues.length, 1);
+});
+
+test('postflight drops Gemma findings that are not grounded in the remote response', () => {
+  const response = '### Result\nThe test check completed successfully.\n\n- Repository: F:/orchestra\n- Status: Read-only inspection.';
+  const result = groundPostflightResult({
+    status: 'block',
+    confidence: 1,
+    issues: [{
+      responseQuote: 'The agent plans to modify orchestra-dashboard/server files',
+      problem: 'The orchestra-dashboard/server package is a build artifact and the fix would land in dist.',
+    }],
+  }, response);
+  assert.deepEqual(result, { status: 'pass', confidence: 1, issues: [] });
+});
+
+test('postflight keeps exactly grounded Gemma findings advisory', () => {
+  const response = 'Repository: F:/orchestra\nThe file missing/File.java exists and implements the service.';
+  const result = groundPostflightResult({
+    status: 'block',
+    confidence: 0.99,
+    issues: [{
+      responseQuote: 'missing/File.java exists',
+      problem: 'The response incorrectly claims that missing/File.java exists.',
+    }],
+  }, response);
+  assert.deepEqual(result, {
+    status: 'warn',
+    confidence: 0.99,
+    issues: ['The response incorrectly claims that missing/File.java exists.'],
+  });
 });
 
 test('Gemma JSON parsing repairs raw Windows paths, newlines, and trailing commas', () => {
@@ -659,5 +752,37 @@ test('getProjectCheckpoints returns structured commits with matching task record
   }
 });
 
+test('base-to-head review evidence survives a checkpoint commit and includes later repairs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'orchestra-review-base-'));
+  try {
+    spawnSync('git.exe', ['init', '-b', 'main'], { cwd: dir });
+    spawnSync('git.exe', ['config', 'user.name', 'Tester'], { cwd: dir });
+    spawnSync('git.exe', ['config', 'user.email', 'tester@example.com'], { cwd: dir });
+    writeFileSync(join(dir, 'app.ts'), 'export const value = 1;\n');
+    spawnSync('git.exe', ['add', 'app.ts'], { cwd: dir });
+    spawnSync('git.exe', ['commit', '-m', 'baseline'], { cwd: dir });
+    const base = spawnSync('git.exe', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).stdout.trim();
 
+    writeFileSync(join(dir, 'app.ts'), 'export const value = 2;\n');
+    writeFileSync(join(dir, 'feature.ts'), 'export const feature = true;\n');
+    spawnSync('git.exe', ['add', 'app.ts', 'feature.ts'], { cwd: dir });
+    spawnSync('git.exe', ['commit', '-m', 'checkpoint'], { cwd: dir });
+    writeFileSync(join(dir, 'feature.ts'), 'export const feature = "repaired";\n');
 
+    const files = await getChangedFilesFromBase(dir, base);
+    const diff = await getDiffFromBase(dir, base, 20_000);
+    assert.deepEqual(files.sort(), ['app.ts', 'feature.ts']);
+    assert.match(diff, /value = 2/);
+    assert.match(diff, /feature = "repaired"/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('bounded review diffs preserve evidence from every changed file', () => {
+  const diff = [1, 2, 3].map((index) => `diff --git a/file${index}.ts b/file${index}.ts\n--- a/file${index}.ts\n+++ b/file${index}.ts\n@@ -1 +1 @@\n-${'a'.repeat(3000)}\n+${'b'.repeat(3000)}_FILE_${index}\n`).join('');
+  const bounded = boundGitDiff(diff, 3_000);
+  assert.ok(bounded.length <= 3_000);
+  assert.match(bounded, /file1\.ts/);
+  assert.match(bounded, /file2\.ts/);
+  assert.match(bounded, /file3\.ts/);
+  assert.match(bounded, /_FILE_3/);
+});

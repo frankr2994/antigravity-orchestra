@@ -2,6 +2,17 @@ import type { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { CloudSessionReference } from '../../../domain/index.js';
 
+export interface ProjectCloudSessionActivity {
+  cloudSessionId: string;
+  taskId: string;
+  title: string;
+  providerState: string;
+  workflowPhase: string;
+  prUrl: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
 function now() { return new Date().toISOString(); }
 
 function mapCloudSession(row: unknown): CloudSessionReference {
@@ -89,6 +100,27 @@ export class CloudSessionRepository {
     return this.db.prepare(`SELECT * FROM cloud_sessions WHERE state NOT IN (${placeholders}) ORDER BY created_at ASC`)
       .all(...terminalStates)
       .map(mapCloudSession);
+  }
+
+  listProjectActivitySince(projectId: string, cutoff: string): ProjectCloudSessionActivity[] {
+    const rows = this.db.prepare(`
+      SELECT cs.id AS cloud_session_id, cs.task_id, t.title, cs.state AS provider_state,
+             t.state AS workflow_phase, cs.pr_url, cs.created_at, cs.updated_at
+      FROM cloud_sessions cs
+      INNER JOIN tasks t ON t.id = cs.task_id
+      WHERE t.project_id = ? AND cs.created_at > ?
+      ORDER BY cs.updated_at DESC, cs.id ASC
+    `).all(projectId, cutoff) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      cloudSessionId: String(row.cloud_session_id),
+      taskId: String(row.task_id),
+      title: String(row.title),
+      providerState: String(row.provider_state),
+      workflowPhase: String(row.workflow_phase),
+      prUrl: row.pr_url ? String(row.pr_url) : null,
+      createdAt: String(row.created_at),
+      updatedAt: String(row.updated_at),
+    }));
   }
 
   acquirePollingLease(id: string, leaseDurationMs = 30_000): boolean {

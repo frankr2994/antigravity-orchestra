@@ -384,6 +384,20 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 9,
+    name: 'repair_cloud_session_attempt_link',
+    up: (db) => {
+      // Some installations applied the original v3 migration before attempt_id
+      // was added to that migration definition. A forward repair is required;
+      // editing an already-applied migration cannot upgrade those databases.
+      const columns = db.prepare('PRAGMA table_info(cloud_sessions)').all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'attempt_id')) {
+        db.exec('ALTER TABLE cloud_sessions ADD COLUMN attempt_id TEXT REFERENCES execution_attempts(id) ON DELETE SET NULL;');
+      }
+      db.exec('CREATE INDEX IF NOT EXISTS idx_cloud_sessions_attempt ON cloud_sessions(attempt_id);');
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): number {

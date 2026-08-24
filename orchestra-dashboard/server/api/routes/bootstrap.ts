@@ -4,8 +4,13 @@ import { config } from '../../config.js';
 import { getHealth, getStats, getUsage } from '../../telemetry.js';
 import { getMcpStatus } from '../../mcp.js';
 import { publicSettings } from './settings.js';
+import { parseForceRefresh } from '../../application/jules/requests.js';
 
-export function createBootstrapRouter(store: Store): Router {
+export interface BootstrapTelemetryExtensions {
+  julesUsage?: (force: boolean) => Promise<unknown>;
+}
+
+export function createBootstrapRouter(store: Store, extensions: BootstrapTelemetryExtensions = {}): Router {
   const router = Router();
 
   router.get('/bootstrap', async (_req, res) => {
@@ -30,9 +35,10 @@ export function createBootstrapRouter(store: Store): Router {
     }
   });
 
-  router.get('/usage', async (_req, res, next) => {
+  router.get('/usage', async (req, res, next) => {
     try {
-      res.json(await getUsage());
+      const force = parseForceRefresh(req.query.force);
+      res.json(await getUsage(extensions.julesUsage ? () => extensions.julesUsage!(force) : undefined));
     } catch (error) {
       next(error);
     }

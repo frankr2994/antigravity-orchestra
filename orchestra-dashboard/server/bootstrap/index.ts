@@ -41,6 +41,7 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
     maxConcurrentPolls: config.jules.maxConcurrentPolls,
     isEnabled: () => connection.hasCapability('read') && connection.credentialStatus().configured,
     reconcile: async () => {
+      await sessions.reconcilePendingDispatches();
       if (!connection.hasCapability('parallel')) return;
       for (const batch of store.manager.cloudWorkflows.listRunning()) await batches.launchReady(batch.id);
     },

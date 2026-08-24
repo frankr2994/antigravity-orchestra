@@ -1,6 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { delimiter, join } from 'node:path';
+import { existsSync } from 'node:fs';
 
-const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
+const windowsCodexAlias = join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WindowsApps', 'codex.exe');
+const CODEX = process.platform === 'win32' && existsSync(windowsCodexAlias) ? windowsCodexAlias : process.platform === 'win32' ? 'codex.exe' : 'codex';
 
 type JsonRecord = Record<string, any>;
 type NotificationHandler = (method: string, params: JsonRecord) => void;
@@ -34,6 +37,19 @@ export interface CodexTurnOptions {
   signal: AbortSignal;
   onOutput: (message: string) => void;
   onTelemetry?: (value: CodexContextSnapshot | Record<string, unknown>) => void;
+}
+
+export function codexAppServerEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (process.platform !== 'win32') return { ...source };
+  const environment = { ...source };
+  for (const key of Object.keys(environment)) {
+    if (key.toLowerCase() !== 'path') continue;
+    environment[key] = String(environment[key] || '')
+      .split(delimiter)
+      .filter((entry) => !/\\WindowsApps(?:\\|$)/i.test(entry))
+      .join(delimiter);
+  }
+  return environment;
 }
 
 export function normalizeCodexTokenUsage(params: JsonRecord): CodexContextSnapshot | null {
@@ -225,7 +241,7 @@ class CodexAppServer {
   }
 
   private async start() {
-    const child = spawn(CODEX, ['app-server'], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = spawn(CODEX, ['app-server'], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: codexAppServerEnvironment() });
     this.child = child;
     this.buffer = '';
     this.stderr = '';

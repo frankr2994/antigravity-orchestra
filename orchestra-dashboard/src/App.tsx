@@ -6,7 +6,7 @@ import {
   Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
 import type {
-  AvailableModels, CheckpointRecord, Health, InstalledLmStudioModel, McpServerRecord, McpStatus,
+  AvailableModels, CheckpointRecord, Health, InstalledLmStudioModel, JulesActivitySummary, JulesReadiness, McpServerRecord, McpStatus,
   Message, Project, ProviderUsage, QuotaPolicy, QuotaTierConfig, RunMonitor, Session,
   SettingsData, Stats, Task, TaskEvent, View,
 } from './app/types';
@@ -14,6 +14,7 @@ import { Card, Empty, Field, Metric, NavButton, PageHeader, StateBadge, StatusDo
 import { formatDate, formatDuration, humanState } from './shared/format';
 import { JulesTaskPanel } from './features/jules/JulesTaskPanel';
 import { JulesSettingsCard } from './features/jules/JulesSettingsCard';
+import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashboard';
 
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewed', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
@@ -45,6 +46,8 @@ function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health>({});
   const [usage, setUsage] = useState<Record<string, ProviderUsage>>({});
+  const [julesReadiness, setJulesReadiness] = useState<JulesReadiness | null>(null);
+  const [julesActivity, setJulesActivity] = useState<JulesActivitySummary | null>(null);
   const [mcp, setMcp] = useState<McpStatus | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerRecord[]>([]);
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -149,6 +152,18 @@ function App() {
     } catch { /* ignore */ }
   }, [api]);
 
+  const refreshJulesDashboard = useCallback(async (force = false) => {
+    const suffix = force ? '?force=true' : '';
+    const nextUsage = await api<Record<string, ProviderUsage>>(`/api/usage${suffix}`);
+    setUsage(nextUsage);
+    if (!project?.id) { setJulesReadiness(null); setJulesActivity(null); return; }
+    const [nextReadiness, nextActivity] = await Promise.all([
+      api<JulesReadiness>(`/api/projects/${project.id}/jules-readiness${suffix}`),
+      api<JulesActivitySummary>(`/api/projects/${project.id}/jules-activity-summary`),
+    ]);
+    setJulesReadiness(nextReadiness); setJulesActivity(nextActivity);
+  }, [api, project?.id]);
+
   async function toggleServer(id: string, enabled: boolean) {
     setMcpBusy(true);
     try {
@@ -184,13 +199,13 @@ function App() {
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<typeof usage>('/api/usage'), api<McpStatus>('/api/mcp/status'), fetchMcpServers(), fetchAvailableModels()])
-      .then(([nextStats, nextHealth, nextUsage, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setUsage(nextUsage); setMcp(nextMcp); })
+    const update = () => Promise.all([api<Stats>('/api/stats'), api<Health>('/api/health'), api<McpStatus>('/api/mcp/status'), fetchMcpServers(), fetchAvailableModels(), refreshJulesDashboard()])
+      .then(([nextStats, nextHealth, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setMcp(nextMcp); })
       .catch((reason) => setError(reason.message));
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
     return () => clearInterval(timer);
-  }, [api, fetchMcpServers, fetchAvailableModels, settings, token]);
+  }, [api, fetchMcpServers, fetchAvailableModels, refreshJulesDashboard, settings, token]);
 
   useEffect(() => {
     if (!monitoredTaskId) { setMonitor(null); setMonitorExplanation(''); return; }
@@ -384,9 +399,11 @@ function App() {
   async function resolveBaseline() {
     if (!project || !activeTask) return;
     try {
+      setBusy(true); setError('');
       await api(`/api/projects/${project.id}/baseline`, { method: 'POST', body: JSON.stringify({ taskId: activeTask.id }) });
       setActiveTask({ ...activeTask, state: 'queued' }); watchTask(activeTask.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
   }
 
   async function cancelTask(task = activeTask) {
@@ -494,7 +511,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} />}
+        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
@@ -604,7 +621,7 @@ function App() {
             </article>
           ))}
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
-          {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>External changes detected</strong><p>Uncommitted modifications were detected from outside Orchestra. Gemma can review, summarize in HANDOFF.md, and commit them automatically before this task starts.</p><button className="primary" onClick={resolveBaseline}>Auto-commit baseline with Gemma</button></div>}
+          {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>External changes detected</strong><p>Uncommitted modifications were detected from outside Orchestra. Gemma can review, summarize in HANDOFF.md, and commit them automatically before this task starts.</p><button className="primary" onClick={resolveBaseline} disabled={busy}>{busy ? 'Gemma is reviewing baseline…' : 'Auto-commit baseline with Gemma'}</button></div>}
           {activeTask?.state === 'recovery_required' && <div className="baseline-card"><CircleAlert /><strong>Partial task changes preserved</strong><p>Resume this same task so Antigravity can finish and Codex can review the complete change set. These files will not be committed as a separate baseline.</p><button className="primary" onClick={() => recoverTask(activeTask)}>Resume and review</button></div>}
           {activeTask?.state === 'review_disputed' && (
             <div className="baseline-card disputed-card">
@@ -815,7 +832,7 @@ function formatResetTimer(isoDate: string | null | undefined): string | null {
   return `resets in ${days}d ${remHours}h`;
 }
 
-function Dashboard({ api, stats, health, usage, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
+function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onStop: () => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
     {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
@@ -826,12 +843,12 @@ function Dashboard({ api, stats, health, usage, mcp, project, tasks, activeTask,
       <Metric icon={<Activity />} label="GPU" value={stats?.gpu.load === null || stats?.gpu.load === undefined ? 'N/A' : `${stats.gpu.load}%`} detail={stats ? `${stats.gpu.temp === null ? 'Temp N/A' : `${stats.gpu.temp}°C`} · ${stats.gpu.name}` : 'Loading'} percent={stats?.gpu.load ?? 0} color="green" />
     </div>
     <div className="two-column">
-      <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}</div></Card>
+      <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot status={item.status} ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}<JulesServiceRow api={api} projectId={project?.id ?? null} readiness={julesReadiness} onConfigure={onConfigureJules} onRefresh={onRefreshJules} /></div></Card>
       <Card title="Provider usage & Quotas" icon={<Zap />}>
         <div className="provider-usage-grid">
-          {(['antigravity', 'codex'] as const).map((name) => {
+          {(['antigravity', 'codex', 'jules'] as const).map((name) => {
             const item = usage[name];
-            const displayName = name === 'antigravity' ? 'Antigravity' : 'OpenAI Codex';
+            const displayName = name === 'antigravity' ? 'Antigravity' : name === 'codex' ? 'OpenAI Codex' : 'Google Jules';
             const quotas = item?.quotas || [];
             const context = item?.context;
             return (
@@ -848,6 +865,13 @@ function Dashboard({ api, stats, health, usage, mcp, project, tasks, activeTask,
                     </span>
                   )}
                 </div>
+                {name === 'jules' && item?.limitCount !== null && item?.limitCount !== undefined && <div className="jules-usage-counts">
+                  <span><strong>{item.usedCount ?? '—'}</strong> used</span>
+                  <span><strong>{item.remainingCount ?? '—'}</strong> remaining</span>
+                  <span><strong>{item.limitCount}</strong> limit</span>
+                  <span><strong>{item.activeSessions ?? '—'}</strong> active</span>
+                  {item.stale && <span className="pill">Stale</span>}
+                </div>}
                 {item?.available && quotas.length > 0 ? (
                   <div className="quota-pill-list">
                     {quotas.map((q) => {
@@ -883,6 +907,7 @@ function Dashboard({ api, stats, health, usage, mcp, project, tasks, activeTask,
         </div>
       </Card>
     </div>
+    <div className="jules-live-card"><JulesLiveActivity summary={julesActivity} /></div>
     <div className="mcp-panel"><Card title="Rider MCP" icon={<Terminal />}>
       <div className="mcp-server"><StatusDot ok={mcp?.server.operational === true} /><div><strong>{mcp?.server.name || 'Checking Rider MCP…'}</strong><small>{mcp?.server.operational ? `${mcp.server.toolCount} tools · v${mcp.server.version || 'unknown'} · ${mcp.server.latencyMs ?? '?'} ms` : mcp?.server.reason || 'Waiting for the first protocol check.'}</small><code>{mcp?.server.endpoint || 'No endpoint discovered'}</code></div></div>
       <div className="mcp-agent-grid">{(['antigravity', 'codex', 'gemma'] as const).map((agent) => { const status = mcp?.agents[agent]; return <div key={agent}><StatusDot ok={status?.available === true} /><strong>{agent}</strong><span>{status?.available ? `${status.access} access` : 'unavailable'}</span><small>{status?.available ? agent === 'gemma' ? 'Orchestra read-only tool bridge ready' : 'Configured and endpoint operational' : status?.reason || 'Checking configuration…'}</small></div>; })}</div>

@@ -4,6 +4,7 @@ import type { TaskManager } from '../../tasks.js';
 import { answerRunQuestion, explainRunHealth, suggestSteeringGuidance } from '../../agents.js';
 import { pushCurrent } from '../../git.js';
 import { writeEvent } from '../sse/stream.js';
+import { ApplicationError } from '../../application/errors.js';
 
 export function createTasksRouter(store: Store, tasks: TaskManager): Router {
   const router = Router();
@@ -161,8 +162,9 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
 
   router.post('/projects/:id/baseline', async (req, res, next) => {
     try {
-      requireProject(req.params.id);
+      const project = requireProject(req.params.id);
       const task = requireTask(String(req.body?.taskId || ''));
+      if (task.projectId !== project.id) throw new ApplicationError('TASK_PROJECT_MISMATCH', 'The baseline task does not belong to the selected project.', 409);
       await tasks.resolveBaseline(task.id);
       res.status(202).json({ ok: true });
     } catch (error) {

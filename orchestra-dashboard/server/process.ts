@@ -38,20 +38,20 @@ export function runProcess(command: string, args: string[], options: RunOptions 
     });
     let stdout = ''; let stderr = ''; let settled = false;
     let idleTimer: NodeJS.Timeout | undefined;
-    const finish = (error?: Error, code = -1) => {
+    const finish = (error?: Error, code = -1, shouldTerminate = false) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
       if (idleTimer) clearTimeout(idleTimer);
       options.signal?.removeEventListener('abort', abort);
-      terminateTree(child.pid);
+      if (shouldTerminate) terminateTree(child.pid);
       if (error) reject(error); else resolve({ code, stdout, stderr });
     };
-    const abort = () => { terminateTree(child.pid); finish(new Error('Process cancelled')); };
-    const timer = options.timeoutMs ? setTimeout(() => { terminateTree(child.pid); finish(new ProcessTimeoutError(options.timeoutMs!, stdout, stderr)); }, options.timeoutMs) : undefined;
+    const abort = () => finish(new Error('Process cancelled'), -1, true);
+    const timer = options.timeoutMs ? setTimeout(() => finish(new ProcessTimeoutError(options.timeoutMs!, stdout, stderr), -1, true), options.timeoutMs) : undefined;
     const resetIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
-      if (options.idleTimeoutMs) idleTimer = setTimeout(() => { terminateTree(child.pid); finish(new ProcessIdleTimeoutError(options.idleTimeoutMs!, stdout, stderr)); }, options.idleTimeoutMs);
+      if (options.idleTimeoutMs) idleTimer = setTimeout(() => finish(new ProcessIdleTimeoutError(options.idleTimeoutMs!, stdout, stderr), -1, true), options.idleTimeoutMs);
     };
     resetIdleTimer();
     options.signal?.addEventListener('abort', abort, { once: true });
@@ -73,7 +73,7 @@ export async function commandAvailable(command: string): Promise<boolean> {
 function terminateTree(pid: number | undefined) {
   if (!pid) return;
   if (process.platform === 'win32') {
-    spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' });
+    spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { shell: false, windowsHide: true, stdio: 'ignore' }).unref();
   } else {
     try { process.kill(-pid, 'SIGTERM'); } catch { /* already stopped */ }
   }

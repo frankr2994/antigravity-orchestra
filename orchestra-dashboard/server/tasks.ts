@@ -10,17 +10,19 @@ import { appendHandoff } from './application/git/handoff.js';
 export { appendHandoff } from './application/git/handoff.js';
 import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
-import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getDiff, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
+import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getChangedFilesFromBase, getDiff, getDiffFromBase, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
 import { verificationFailure as describeVerificationFailure, verifyProject } from './verification.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
 import { getMcpStatus, type McpStatus } from './mcp.js';
+import { ApplicationError } from './application/errors.js';
 
 export class TaskManager {
   private readonly events: TaskEventPublisher;
   private readonly scheduler: ProjectTaskScheduler;
   private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
+  private readonly baselineResolutions = new Set<string>();
   private antigravityModels: string[] = [];
 
   constructor(private readonly store: Store, maxGlobal = 2) {
@@ -84,28 +86,44 @@ export class TaskManager {
     const task = requireTask(this.store, taskId);
     if (task.state !== 'baseline_required') throw new Error(`This task is ${task.state}, so its baseline cannot be resolved again.`);
     if (this.scheduler.isRunning(taskId)) throw new Error('This task is already running. Open its original conversation to follow progress.');
+    if (this.baselineResolutions.has(taskId)) throw new ApplicationError('BASELINE_ALREADY_RUNNING', 'Gemma is already reviewing and committing this baseline.', 409);
+    this.baselineResolutions.add(taskId);
     const project = requireProject(this.store, task.projectId);
-    const status = await getGitStatus(project.root);
-    if (!status.isGit) throw new Error('This project is not a Git repository.');
-    const baselineFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
-    if (baselineFiles.length) {
-      const diff = await getDiff(project.root);
-      const summary = await summarizeChanges(diff, 'Review and preserve changes that existed before the dashboard task.');
-      appendHandoff(project.root, summary.summary, 'Baseline changes');
-      const updated = await getGitStatus(project.root);
-      const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
-      if (!paths.length) throw new Error('No project files remained after excluding Orchestra internal state from the baseline.');
-      const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore: preserve existing changes'), summary.summary);
-      const pushed = await pushCurrent(project.root);
-      this.store.createGitOperation(project.id, task.id, 'baseline', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
-      this.emit(task.id, 'git', 'git.commit', { kind: 'baseline', sha });
-      this.emit(task.id, 'git', 'git.push', pushed);
+    try {
+      const status = await getGitStatus(project.root);
+      if (!status.isGit) throw new ApplicationError('BASELINE_NOT_GIT', 'This project is not a Git repository.', 409);
+      const baselineFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
+      if (baselineFiles.length) {
+        this.emit(task.id, 'gemma', 'agent.started', { phase: 'baseline-review', files: baselineFiles.length });
+        let summary;
+        try {
+          const diff = await getDiff(project.root);
+          summary = await summarizeChanges(diff, 'Review and preserve changes that existed before the dashboard task.');
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          this.emit(task.id, 'gemma', 'warning', { message: `Baseline review could not complete. The working tree was left unchanged. ${detail}` });
+          throw new ApplicationError('BASELINE_REVIEW_UNAVAILABLE', 'Gemma could not finish reviewing the existing changes. Nothing was committed; check the task activity and retry.', 503, { cause: error });
+        }
+        appendHandoff(project.root, summary.summary, 'Baseline changes');
+        const updated = await getGitStatus(project.root);
+        const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
+        if (!paths.length) throw new ApplicationError('BASELINE_EMPTY', 'No project files remained after excluding Orchestra internal state from the baseline.', 409);
+        const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore: preserve existing changes'), summary.summary);
+        const pushed = await pushCurrent(project.root);
+        this.store.createGitOperation(project.id, task.id, 'baseline', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
+        this.emit(task.id, 'git', 'git.commit', { kind: 'baseline', sha, title: summary.title, files: paths });
+        this.emit(task.id, 'git', 'git.push', pushed);
+        this.emit(task.id, 'gemma', 'agent.completed', { phase: 'baseline-review', sha, summary: summary.summary });
+      }
+      const latestProject = requireProject(this.store, project.id);
+      const onboarding = await onboardProject(this.store, { ...latestProject, onboardingStatus: 'pending' });
+      this.emit(task.id, 'system', 'project.onboarding', onboarding);
+      this.store.updateTask(task.id, { state: 'queued', error: null });
+      this.emit(task.id, 'system', 'task.state', { state: 'queued' });
+      this.enqueue(task.id);
+    } finally {
+      this.baselineResolutions.delete(taskId);
     }
-    const latestProject = requireProject(this.store, project.id);
-    const onboarding = await onboardProject(this.store, { ...latestProject, onboardingStatus: 'pending' });
-    this.emit(task.id, 'system', 'project.onboarding', onboarding);
-    this.store.updateTask(task.id, { state: 'queued', error: null });
-    this.enqueue(task.id);
   }
 
   async approveDisputed(taskId: string): Promise<TaskRecord> {
@@ -413,6 +431,14 @@ export class TaskManager {
 
         let changedFiles: string[] = [];
         try { changedFiles = (await getGitStatus(project.root)).files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path)); } catch { /* Codex receives the Git failure if inspection remains unavailable. */ }
+        if (hasReviewablePreservedProviderOutput(result, changedFiles.length)) {
+          result.continuationGuidance = 'Review the complete preserved change set against the original request and repair only concrete findings.';
+          this.emit(taskId, 'system', 'task.model-takeover', {
+            message: `Antigravity returned a final response with terminal status ${result.terminalStatus || 'ERROR'}, but preserved ${changedFiles.length} changed file${changedFiles.length === 1 ? '' : 's'}. Orchestra will skip speculative failure triage and send the complete change set directly to independent review.`,
+            from: 'antigravity', to: 'codex-review', stage, category: 'preserved_non_success', changedFiles: changedFiles.length,
+          });
+          return result;
+        }
         const fallback: ProviderFailureTriage = {
           category: result.terminalStatus === 'TIMEOUT' || result.terminalStatus === 'IDLE_TIMEOUT' ? 'timeout' : result.terminalStatus === 'PROCESS_ERROR' ? 'process_exit' : /subagent|paus|wait/i.test(result.text) ? 'delegated_wait' : 'unknown',
           summary: result.failureReason || result.warning || 'Antigravity ended before returning a usable completion.',
@@ -544,6 +570,7 @@ export class TaskManager {
         if (!afterAgent.isGit) throw new Error('The project stopped being a Git repository during implementation. Orchestra will not accept or finalize unreviewable changes.');
         const agentChanges = afterAgent.files.filter((file) => !isOrchestraInternalPath(file.path));
         if (agentChanges.length) {
+          const reviewBaseSha = status.head;
           // Checkpoint initial implementation so changes are safely recorded
           try {
             const checkpointDiff = await getDiff(project.root, 35_000);
@@ -552,7 +579,9 @@ export class TaskManager {
             const checkpointSha = await commitPaths(project.root, checkpointPaths, safeCommitTitle(checkpointSummary.title, 'feat: implement initial task changes'), checkpointSummary.summary);
             this.emit(taskId, 'git', 'git.commit', { kind: 'checkpoint', sha: checkpointSha, title: checkpointSummary.title, files: checkpointPaths });
             this.emit(taskId, 'gemma', 'agent.completed', { phase: 'checkpoint-commit', sha: checkpointSha });
-          } catch { /* proceed to review even if checkpoint commit fails */ }
+          } catch (error) {
+            this.emit(taskId, 'git', 'warning', { message: `The safety checkpoint could not be created; Orchestra will review the uncommitted change set from the original base. ${error instanceof Error ? error.message : String(error)}` });
+          }
 
           let previousFindings = '';
           let previousReview = '';
@@ -562,8 +591,14 @@ export class TaskManager {
           const maxRepairAttempts = 3;
           for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
             const reviewStatus = await getGitStatus(project.root);
-            const changedFiles = reviewStatus.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
-            const diff = await getDiff(project.root, 80_000);
+            const changedFiles = (reviewBaseSha
+              ? await getChangedFilesFromBase(project.root, reviewBaseSha)
+              : reviewStatus.files.map((file) => file.path))
+              .filter((path) => !isOrchestraInternalPath(path));
+            const diff = reviewBaseSha ? await getDiffFromBase(project.root, reviewBaseSha, 80_000) : await getDiff(project.root, 80_000);
+            if (!changedFiles.length || !diff.trim()) {
+              throw new Error('Orchestra could not construct a reviewable base-to-head change set after implementation. The task was stopped before spending review quota on an empty evidence packet.');
+            }
             let triage: ReviewTriage = { risk: 'normal', summary: 'Local triage was unavailable; review the bounded diff directly.', focusFiles: [], concerns: [] };
             this.emit(taskId, 'gemma', 'agent.started', { phase: 'review-triage', cycle: cycle + 1, changedFiles: changedFiles.length });
             try {
@@ -640,14 +675,14 @@ export class TaskManager {
               });
               return;
             }
-            const beforeRepair = diffFingerprint(await getDiff(project.root));
+            const beforeRepair = diffFingerprint(reviewBaseSha ? await getDiffFromBase(project.root, reviewBaseSha) : await getDiff(project.root));
             this.transition(taskId, 'running');
             const priorIncomplete = agentResult.incomplete;
             agentResult = await runAntigravityWithFailover({ root: project.root, prompt: `Address every blocking finding in this Codex review, then rerun relevant verification. ${repeatedWithoutProgress ? 'The previous repair made no progress, so use a different implementation approach in this fresh turn. ' : ''}Perform the repair directly in this foreground turn; do not invoke or wait for subagents, delegate the repair, use scheduled waits, or pause before synchronous verification completes:\n\n${review}`, model: models.antigravity, effort: 'high', mutating: true, conversationId: priorIncomplete || repeatedWithoutProgress ? null : agentResult.conversationId || session.antigravityConversationId, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) }, `repair cycle ${cycle + 1}`);
             hadIncompleteAgentRun ||= agentResult.incomplete;
             if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
             if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's repair turn ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra preserved the repair diff and is returning it to Codex review automatically.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: cycle + 1 });
-            const afterRepair = diffFingerprint(await getDiff(project.root));
+            const afterRepair = diffFingerprint(reviewBaseSha ? await getDiffFromBase(project.root, reviewBaseSha) : await getDiff(project.root));
             previousRepairChanged = beforeRepair !== afterRepair;
             previousFindings = findings;
             previousReview = review;
@@ -691,7 +726,8 @@ export class TaskManager {
   }
 
   private async postflight(taskId: string, root: string, prompt: string, response: string, evidence: RepositoryEvidence) {
-    this.emit(taskId, 'gemma', 'agent.started', { phase: 'postflight-validation', model: config.lmStudioModel });
+    const activeModel = await getActiveLmStudioModel().catch(() => null);
+    this.emit(taskId, 'gemma', 'agent.started', { phase: 'postflight-validation', model: activeModel || config.lmStudioModel });
     let validation;
     try {
       validation = await validateAgentResponse({ root, prompt, response, evidence });
@@ -814,6 +850,10 @@ export function implementationChangeState(beforeHead: string | null, after: { he
   if (after.files.some((file) => !isOrchestraInternalPath(file.path))) return 'working_tree' as const;
   if (beforeHead && after.head && beforeHead !== after.head) return 'committed' as const;
   return 'none' as const;
+}
+
+export function hasReviewablePreservedProviderOutput(result: Pick<AgentRunResult, 'incomplete' | 'text'>, changedFileCount: number) {
+  return result.incomplete && changedFileCount > 0 && Boolean(result.text.trim());
 }
 
 function diffFingerprint(diff: string) { return createHash('sha256').update(diff).digest('hex'); }

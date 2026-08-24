@@ -54,7 +54,46 @@ export async function getDiff(cwd: string, maxChars = 80_000): Promise<string> {
     getGitStatus(cwd),
   ]);
   const extra = untracked.files.filter((file) => file.index === '?' && file.worktree === '?').map((file) => `UNTRACKED: ${file.path}`).join('\n');
-  return `${staged.stdout}\n${unstaged.stdout}\n${extra}`.slice(0, maxChars);
+  return boundGitDiff(`${staged.stdout}\n${unstaged.stdout}\n${extra}`, maxChars);
+}
+
+export async function getDiffFromBase(cwd: string, baseSha: string, maxChars = 80_000): Promise<string> {
+  const [tracked, status] = await Promise.all([
+    git(['diff', '--no-ext-diff', baseSha, '--'], cwd),
+    getGitStatus(cwd),
+  ]);
+  if (tracked.code !== 0) throw new Error(tracked.stderr || `Git could not compare the task change set with base ${baseSha}.`);
+  const untracked = status.files
+    .filter((file) => file.index === '?' && file.worktree === '?')
+    .map((file) => `UNTRACKED: ${file.path}`)
+    .join('\n');
+  return boundGitDiff(`${tracked.stdout}\n${untracked}`, maxChars);
+}
+
+export function boundGitDiff(diff: string, maxChars: number): string {
+  if (diff.length <= maxChars) return diff;
+  const sections = diff.split(/(?=^diff --git )/m).filter(Boolean);
+  if (sections.length <= 1) return `${diff.slice(0, Math.max(0, maxChars - 80))}\n... [diff truncated at ${maxChars.toLocaleString()} characters] ...\n`;
+  const budget = Math.max(400, Math.floor((maxChars - sections.length * 45) / sections.length));
+  const bounded = sections.map((section) => {
+    if (section.length <= budget) return section;
+    const head = Math.floor(budget * 0.72);
+    const tail = Math.max(0, budget - head - 45);
+    return `${section.slice(0, head)}\n... [file diff compacted] ...\n${section.slice(-tail)}`;
+  }).join('');
+  return bounded.slice(0, maxChars);
+}
+
+export async function getChangedFilesFromBase(cwd: string, baseSha: string): Promise<string[]> {
+  const [tracked, status] = await Promise.all([
+    git(['diff', '--name-only', '-z', baseSha, '--'], cwd),
+    getGitStatus(cwd),
+  ]);
+  if (tracked.code !== 0) throw new Error(tracked.stderr || `Git could not list changes since base ${baseSha}.`);
+  return [...new Set([
+    ...tracked.stdout.split('\0').filter(Boolean),
+    ...status.files.filter((file) => file.index === '?' && file.worktree === '?').map((file) => file.path),
+  ])];
 }
 
 export async function getRecentCommits(cwd: string, count = 10): Promise<string> {

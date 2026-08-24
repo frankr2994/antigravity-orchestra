@@ -199,11 +199,13 @@ export async function getCodexModels(): Promise<CodexModelDescriptor[]> {
   ];
 }
 
-export async function getUsage() {
-  return {
+export async function getUsage(jules?: () => Promise<unknown>) {
+  const usage: Record<string, unknown> = {
     antigravity: await readAntigravityUsage(),
     codex: await readCodexUsage(),
   };
+  if (jules) usage.jules = await jules();
+  return usage;
 }
 
 async function version(command: string) {

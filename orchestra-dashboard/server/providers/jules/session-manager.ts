@@ -38,6 +38,13 @@ export interface JulesDispatchResult {
   ambiguous?: boolean;
 }
 
+export interface JulesDispatchIdentity {
+  sourceName: string;
+  dispatchBranch: string;
+  targetBranch: string;
+  baseSha: string;
+}
+
 export interface JulesPollResult {
   ok: boolean;
   remoteSessionId: string;
@@ -122,29 +129,10 @@ export class JulesSessionManager {
       };
     }
 
-    const remoteSessionId = julesSession.id || julesSession.name.split('/').pop()!;
-
     // 4. Persist every local consequence of the provider acknowledgement atomically.
-    let attempt!: ExecutionAttempt;
-    let cloudSession!: CloudSessionReference;
-    this.store.manager.transaction(() => {
-      attempt = this.store.manager.attempts.create({
-        taskId, target: 'cloud', worker: 'jules', baseSha: preflight.baseSha!,
-        branchName: preflight.dispatchBranch, state: 'WORKING', providerSessionId: remoteSessionId,
-      });
-      cloudSession = this.store.manager.cloudSessions.create({
-        taskId, attemptId: attempt.id, sourceName: preflight.sourceName!, sessionResourceName: julesSession.name,
-        remoteSessionId, dispatchBranch: preflight.dispatchBranch!, targetBranch: preflight.targetBranch!,
-        baseSha: preflight.baseSha!, state: julesSession.state || 'QUEUED',
-      });
-      this.store.manager.activityCursors.ensure(cloudSession.id);
-      this.store.addEvent(taskId, 'jules', 'cloud.dispatched', {
-        remoteSessionId, sessionName: julesSession.name, dispatchBranch: preflight.dispatchBranch,
-        targetBranch: preflight.targetBranch, baseSha: preflight.baseSha, state: julesSession.state,
-      });
-      this.store.manager.checkpoints.append({ taskId, attemptId: attempt.id, stage: 'dispatch', subjectSha: preflight.baseSha,
-        data: { status: 'provider_acknowledged', remoteSessionId, dispatchBranch: preflight.dispatchBranch! } });
-      this.store.updateTask(taskId, { state: 'running' });
+    const { attempt, cloudSession, remoteSessionId } = this.recordDispatchAcknowledgement(taskId, julesSession, {
+      sourceName: preflight.sourceName!, dispatchBranch: preflight.dispatchBranch!,
+      targetBranch: preflight.targetBranch!, baseSha: preflight.baseSha!,
     });
 
     options.onEvent?.({
@@ -286,6 +274,45 @@ export class JulesSessionManager {
       activities,
       newActivitiesCount,
     };
+  }
+
+  recordDispatchAcknowledgement(taskId: string, julesSession: JulesSession, identity: JulesDispatchIdentity): {
+    attempt: ExecutionAttempt;
+    cloudSession: CloudSessionReference;
+    remoteSessionId: string;
+  } {
+    const existing = this.store.manager.cloudSessions.getByTaskId(taskId);
+    if (existing) {
+      const attempt = existing.attemptId ? this.store.manager.attempts.getById(existing.attemptId) : null;
+      if (!attempt) throw new Error(`Cloud session for task ${taskId} has no recoverable execution attempt`);
+      return { attempt, cloudSession: existing, remoteSessionId: existing.remoteSessionId };
+    }
+    const remoteSessionId = julesSession.id || julesSession.name.split('/').pop()!;
+    let attempt!: ExecutionAttempt;
+    let cloudSession!: CloudSessionReference;
+    this.store.manager.transaction(() => {
+      attempt = this.store.manager.attempts.create({
+        taskId, target: 'cloud', worker: 'jules', baseSha: identity.baseSha,
+        branchName: identity.dispatchBranch, state: 'WORKING', providerSessionId: remoteSessionId,
+      });
+      cloudSession = this.store.manager.cloudSessions.create({
+        taskId, attemptId: attempt.id, sourceName: identity.sourceName, sessionResourceName: julesSession.name,
+        remoteSessionId, dispatchBranch: identity.dispatchBranch, targetBranch: identity.targetBranch,
+        baseSha: identity.baseSha, state: julesSession.state || 'QUEUED',
+      });
+      this.store.manager.activityCursors.ensure(cloudSession.id);
+      this.store.addEvent(taskId, 'jules', 'cloud.dispatched', {
+        remoteSessionId, sessionName: julesSession.name, dispatchBranch: identity.dispatchBranch,
+        targetBranch: identity.targetBranch, baseSha: identity.baseSha, state: julesSession.state,
+      });
+      this.store.manager.checkpoints.append({ taskId, attemptId: attempt.id, stage: 'dispatch', subjectSha: identity.baseSha,
+        data: { status: 'provider_acknowledged', remoteSessionId, dispatchBranch: identity.dispatchBranch } });
+      if (this.store.getTask(taskId)?.state === 'failed') {
+        this.store.updateTask(taskId, { state: 'queued', error: null });
+      }
+      this.store.updateTask(taskId, { state: 'running', error: null });
+    });
+    return { attempt, cloudSession, remoteSessionId };
   }
 
   async cancelSession(

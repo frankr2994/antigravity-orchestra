@@ -8,6 +8,8 @@ import type { JulesDispatchCommand } from './requests.js';
 import { createHash } from 'node:crypto';
 import { JulesApiError } from '../../providers/jules/errors.js';
 import { config } from '../../config.js';
+import type { CommandIntent } from '../../domain/index.js';
+import type { JulesSession } from '../../providers/jules/types.js';
 
 export class JulesSessionService {
   constructor(
@@ -49,6 +51,10 @@ export class JulesSessionService {
         });
         return response;
       }
+      if (existing.state === 'pending' || existing.state === 'ambiguous') {
+        const reconciled = await this.reconcileDispatch(existing, command.prompt);
+        if (reconciled) return reconciled;
+      }
       throw new ApplicationError('DISPATCH_RECONCILIATION_REQUIRED', 'This dispatch is pending reconciliation.', 409);
     }
 
@@ -74,7 +80,14 @@ export class JulesSessionService {
       });
       const intent = this.store.manager.commandIntents.getByIdempotencyKey(command.idempotencyKey)!;
       if (!result.ok) {
-        if (result.ambiguous) throw new ApplicationError('JULES_DISPATCH_AMBIGUOUS', 'Jules may have accepted the dispatch; reconciliation is required before retrying.', 503);
+        if (result.ambiguous) {
+          this.store.manager.commandIntents.transition(intent.id, 'pending', 'ambiguous', { errorCode: 'JULES_DISPATCH_AMBIGUOUS' });
+          const reconciled = await this.reconcileDispatch(
+            this.store.manager.commandIntents.getById(intent.id)!, command.prompt,
+          );
+          if (reconciled) return reconciled;
+          throw new ApplicationError('JULES_DISPATCH_AMBIGUOUS', 'Jules may have accepted the dispatch. Orchestra will keep reconciling it automatically; do not submit a duplicate.', 503);
+        }
         this.store.manager.commandIntents.transition(intent.id, 'pending', 'failed', { errorCode: 'JULES_DISPATCH_REJECTED' });
         this.store.manager.julesCapacity.release(taskId);
         throw new ApplicationError('JULES_DISPATCH_REJECTED', result.error ?? 'Jules dispatch was rejected.', 400);
@@ -97,6 +110,17 @@ export class JulesSessionService {
       if (intent?.state === 'failed') this.store.manager.julesCapacity.release(taskId);
       throw error;
     }
+  }
+
+  async reconcilePendingDispatches(): Promise<number> {
+    let count = 0;
+    for (const intent of this.store.manager.commandIntents.listPending()) {
+      if (intent.kind !== 'jules.dispatch') continue;
+      const task = this.store.getTask(intent.taskId);
+      if (!task || ['cancelled', 'completed', 'completed_unpushed'].includes(task.state)) continue;
+      if (await this.reconcileDispatch(intent, task.prompt)) count += 1;
+    }
+    return count;
   }
 
   getTaskSession(taskId: string) {
@@ -128,6 +152,55 @@ export class JulesSessionService {
     const task = this.store.getTask(taskId);
     if (!task) throw new ApplicationError('TASK_NOT_FOUND', 'Task not found.', 404);
     return task;
+  }
+  private async reconcileDispatch(intent: CommandIntent, prompt: string): Promise<Record<string, unknown> | null> {
+    const task = this.store.getTask(intent.taskId);
+    const checkpoint = this.store.manager.checkpoints.latest(intent.taskId, 'preflight');
+    if (!task || !checkpoint) return null;
+    const sourceName = typeof checkpoint.data.sourceName === 'string' ? checkpoint.data.sourceName : null;
+    const dispatchBranch = typeof checkpoint.data.dispatchBranch === 'string' ? checkpoint.data.dispatchBranch : null;
+    const targetBranch = typeof checkpoint.data.targetBranch === 'string' ? checkpoint.data.targetBranch : null;
+    const baseSha = typeof checkpoint.data.baseSha === 'string' ? checkpoint.data.baseSha : checkpoint.subjectSha;
+    if (!sourceName || !dispatchBranch || !targetBranch || !baseSha) return null;
+
+    const title = `Orchestra Task: ${intent.taskId.slice(0, 8)}`;
+    const matches = new Map<string, JulesSession>();
+    const seenTokens = new Set<string>();
+    let pageToken: string | undefined;
+    try {
+      for (let page = 0; page < 100; page += 1) {
+        const response = await this.client().listSessions(100, pageToken);
+        for (const session of response.sessions) {
+          if (session.title !== title) continue;
+          if (session.sourceContext?.source !== sourceName) continue;
+          if (session.sourceContext.githubRepoContext?.startingBranch !== dispatchBranch) continue;
+          if (session.prompt !== undefined && session.prompt !== prompt) continue;
+          matches.set(session.name, session);
+        }
+        if (!response.nextPageToken) break;
+        if (seenTokens.has(response.nextPageToken)) return null;
+        seenTokens.add(response.nextPageToken);
+        pageToken = response.nextPageToken;
+        if (page === 99) return null;
+      }
+    } catch {
+      return null;
+    }
+    if (matches.size !== 1) return null;
+    const session = [...matches.values()][0]!;
+    const adopted = this.manager.recordDispatchAcknowledgement(intent.taskId, session, {
+      sourceName, dispatchBranch, targetBranch, baseSha,
+    });
+    const response = { ok: true, taskId: intent.taskId, sessionId: task.sessionId,
+      remoteSessionId: adopted.remoteSessionId, cloudSession: adopted.cloudSession };
+    this.store.manager.transaction(() => {
+      this.store.manager.commandIntents.transition(intent.id, intent.state, 'acknowledged', {
+        attemptId: adopted.attempt.id, providerResource: adopted.cloudSession.sessionResourceName, response,
+      });
+      this.store.manager.checkpoints.append({ taskId: intent.taskId, attemptId: adopted.attempt.id,
+        stage: 'dispatch', subjectSha: baseSha, data: { status: 'provider_reconciled', remoteSessionId: adopted.remoteSessionId } });
+    });
+    return response;
   }
   private requireCloudSession(taskId: string) {
     const task = this.requireTask(taskId);

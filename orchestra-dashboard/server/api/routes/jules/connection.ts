@@ -1,10 +1,11 @@
 import { Router } from 'express';
 import type { JulesConnectionService } from '../../../application/jules/connection-service.js';
-import { parseCredentialSaveRequest, parseCredentialValidationRequest, parseJulesEnabledRequest } from '../../../application/jules/requests.js';
+import { parseCredentialSaveRequest, parseCredentialValidationRequest, parseForceRefresh, parseJulesSettingsRequest } from '../../../application/jules/requests.js';
+import type { JulesDashboardService } from '../../../application/jules/dashboard-service.js';
 import type { JulesStageSource } from './capability.js';
 import { requireJulesCapability } from './capability.js';
 
-export function createJulesConnectionRouter(service: JulesConnectionService, stage: JulesStageSource): Router {
+export function createJulesConnectionRouter(service: JulesConnectionService, stage: JulesStageSource, dashboard?: JulesDashboardService): Router {
   const router = Router();
   const id = (value: string | string[]) => Array.isArray(value) ? value[0]! : value;
   router.get('/jules/credential-status', (_req, res) => {
@@ -12,7 +13,7 @@ export function createJulesConnectionRouter(service: JulesConnectionService, sta
   });
   router.get('/jules/settings', (_req, res) => res.json(service.runtimeSettings()));
   router.patch('/jules/settings', (req, res, next) => {
-    try { res.json(service.setRuntimeEnabled(parseJulesEnabledRequest(req.body).enabled)); }
+    try { res.json(service.setRuntimeSettings(parseJulesSettingsRequest(req.body))); }
     catch (error) { next(error); }
   });
   router.post('/jules/validate-key', async (req, res, next) => {
@@ -36,6 +37,24 @@ export function createJulesConnectionRouter(service: JulesConnectionService, sta
     try {
       if (!requireJulesCapability(stage, 'read', res)) return;
       res.json(await service.discoverProjectSource(id(req.params.id)));
+    } catch (error) { next(error); }
+  });
+  router.get('/projects/:id/jules-readiness', async (req, res, next) => {
+    try {
+      if (!dashboard) throw new Error('Jules dashboard service is unavailable.');
+      res.json(await dashboard.readiness(id(req.params.id), parseForceRefresh(req.query.force)));
+    } catch (error) { next(error); }
+  });
+  router.post('/projects/:id/jules/setup-diagnosis', async (req, res, next) => {
+    try {
+      if (!dashboard) throw new Error('Jules dashboard service is unavailable.');
+      res.json(await dashboard.setupDiagnosis(id(req.params.id)));
+    } catch (error) { next(error); }
+  });
+  router.get('/projects/:id/jules-activity-summary', (req, res, next) => {
+    try {
+      if (!dashboard) throw new Error('Jules dashboard service is unavailable.');
+      res.json(dashboard.activitySummary(id(req.params.id)));
     } catch (error) { next(error); }
   });
   return router;

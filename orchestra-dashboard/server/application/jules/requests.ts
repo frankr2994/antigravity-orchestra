@@ -34,6 +34,60 @@ export function parseJulesEnabledRequest(value: unknown): { enabled: boolean } {
   if (!Object.hasOwn(input, 'enabled')) throw new ApplicationError('INVALID_REQUEST', 'enabled is required.');
   return { enabled: exactBoolean(input.enabled, 'enabled', false) };
 }
+
+export type JulesQuotaPlan = 'free' | 'pro' | 'ultra' | 'custom';
+
+export interface JulesSettingsPatch {
+  enabled?: boolean;
+  quotaPlan?: JulesQuotaPlan;
+  rolling24HourLimit?: number;
+}
+
+const JULES_QUOTA_PRESETS: Record<Exclude<JulesQuotaPlan, 'custom'>, number> = {
+  free: 15,
+  pro: 100,
+  ultra: 300,
+};
+
+export function parseJulesSettingsRequest(value: unknown): JulesSettingsPatch {
+  const input = record(value);
+  const result: JulesSettingsPatch = {};
+  if (Object.hasOwn(input, 'enabled')) result.enabled = exactBoolean(input.enabled, 'enabled', false);
+  if (Object.hasOwn(input, 'quotaPlan')) {
+    if (typeof input.quotaPlan !== 'string' || !['free', 'pro', 'ultra', 'custom'].includes(input.quotaPlan)) {
+      throw new ApplicationError('INVALID_JULES_QUOTA_PLAN', 'quotaPlan must be free, pro, ultra, or custom.');
+    }
+    result.quotaPlan = input.quotaPlan as JulesQuotaPlan;
+  }
+  if (Object.hasOwn(input, 'rolling24HourLimit')) {
+    if (!Number.isSafeInteger(input.rolling24HourLimit) || Number(input.rolling24HourLimit) < 1 || Number(input.rolling24HourLimit) > 10_000) {
+      throw new ApplicationError('INVALID_JULES_QUOTA_LIMIT', 'rolling24HourLimit must be an integer from 1 to 10,000.');
+    }
+    result.rolling24HourLimit = Number(input.rolling24HourLimit);
+  }
+  if (!Object.keys(result).length) throw new ApplicationError('INVALID_REQUEST', 'At least one Jules setting is required.');
+  if (result.quotaPlan && result.quotaPlan !== 'custom') {
+    const expected = JULES_QUOTA_PRESETS[result.quotaPlan];
+    if (result.rolling24HourLimit !== undefined && result.rolling24HourLimit !== expected) {
+      throw new ApplicationError('INVALID_JULES_QUOTA_LIMIT', `${result.quotaPlan} requires a rolling24HourLimit of ${expected}.`);
+    }
+    result.rolling24HourLimit = expected;
+  }
+  if (result.quotaPlan === 'custom' && result.rolling24HourLimit === undefined) {
+    throw new ApplicationError('INVALID_JULES_QUOTA_LIMIT', 'Custom quota plans require rolling24HourLimit.');
+  }
+  if (!result.quotaPlan && result.rolling24HourLimit !== undefined) {
+    throw new ApplicationError('INVALID_JULES_QUOTA_PLAN', 'quotaPlan is required when changing rolling24HourLimit.');
+  }
+  return result;
+}
+
+export function parseForceRefresh(value: unknown): boolean {
+  if (value === undefined) return false;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new ApplicationError('INVALID_FORCE_REFRESH', 'force must be true or false.');
+}
 export interface JulesDispatchCommand {
   prompt: string;
   sessionId?: string;

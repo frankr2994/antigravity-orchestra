@@ -155,9 +155,15 @@ export async function getLoadedLmStudioModels(): Promise<string[]> {
 }
 
 export async function getActiveLmStudioModel(): Promise<string> {
-  const loaded = await getLoadedLmStudioModels();
-  if (loaded.length > 0) return loaded[0]!;
-  return config.lmStudioModel;
+  return (await getActiveLmStudioModelInfo()).id;
+}
+
+export async function getActiveLmStudioModelInfo(): Promise<{ id: string; contextLength: number | undefined }> {
+  const models = await getInstalledLmStudioModels();
+  const loaded = models.find((model) => model.state === 'loaded');
+  return loaded
+    ? { id: loaded.id, contextLength: loaded.loadedContextLength }
+    : { id: config.lmStudioModel, contextLength: undefined };
 }
 
 export async function loadLmStudioModel(

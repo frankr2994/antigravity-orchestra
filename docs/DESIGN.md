@@ -553,3 +553,42 @@ After a task entered `recovery_required`, the user submitted the one-word prompt
 - `continue` cannot be downgraded to an isolated repository question while a session has preserved task changes.
 - An erroneous newer summary cannot hide the true recovery owner.
 - Explicit deferral is treated as incomplete work regardless of model confidence.
+
+## 2026-08-23: Project-scoped Jules readiness and account-wide rolling capacity
+
+### Background
+
+Jules execution already had durable Orchestra task and cloud-session ownership, but the dashboard exposed only credential/runtime controls and per-task details. Users could not tell whether the selected repository was usable by Jules, how much rolling account capacity remained, or which Jules sessions were active for the selected project.
+
+### Decision
+
+Add a Jules dashboard application service between HTTP routes, the validated Jules adapter, Git inspection, settings persistence, and cloud-session repositories.
+
+- Persist an explicit Free, Pro, Ultra, or Custom quota plan and rolling 24-hour limit; never infer a subscription tier from credentials.
+- Calculate account usage from every paginated Jules session, deduplicated by provider resource name, with strict timestamp and pagination validation. Cache verified readings for 60 seconds and persist only the non-secret last-known aggregate.
+- Keep disabled mode provider-offline while presenting configured capacity and a stale last-known aggregate.
+- Derive project readiness from the runtime switch, credential presence/provider acceptance, canonical GitHub remote, exactly one Jules source, active branch availability, and verified remaining capacity.
+- Derive live project activity only from durable Orchestra-owned cloud sessions joined through their task ownership. Counters use the full rolling project set; the response list is limited to the 20 most recently updated sessions.
+- Keep repository authorization user-controlled. Setup diagnosis supplies validated repository/branch/status facts to Gemma only for advisory wording and always returns deterministic instructions and official Jules/GitHub links.
+
+### Reasons
+
+- Account-wide provider sessions are the authoritative observable input for a rolling quota; project-owned sessions alone would undercount external Jules use.
+- Persisted cloud-session ownership is the authoritative input for project activity; polling Jules account sessions cannot prove Orchestra project ownership.
+- Failing closed on malformed timestamps or pagination prevents falsely reporting available capacity.
+- Separating provider completion from Orchestra workflow phase prevents the dashboard from implying that reviewed or integrated code has landed.
+- Advisory model output can improve setup clarity without gaining credentials or permission-changing authority.
+
+### Alternatives
+
+- Infer the Jules tier from the API key: rejected because Jules exposes no authoritative subscription-tier contract.
+- Count only Orchestra-created sessions for quota: rejected because work created outside Orchestra consumes the same account capacity.
+- Automate GitHub App installation: rejected because repository authorization requires explicit action in the official Jules/GitHub interface.
+- Query live provider sessions for the activity card: rejected because provider records alone do not prove durable Orchestra project ownership.
+
+### Impact
+
+- `GET/PATCH /api/jules/settings` includes `quotaPlan` and `rolling24HourLimit`.
+- Project APIs expose Jules readiness, setup diagnosis, and a bounded activity summary.
+- `/api/usage` includes a Jules provider with rolling counts, remaining percentage, active sessions, next-slot time, and stale state.
+- The dashboard displays a three-state Jules service light, guided setup dialog, rolling usage counts, and a separate live activity card refreshed on the configured telemetry interval.
