@@ -107,3 +107,27 @@ coverage.xml
 !docs/images/*.png
 /plans/
 /docs/modernization-plan-*.md
+
+# BEGIN ANTIGRAVITY ORCHESTRA
+# Local agent state and raw execution records
+/.orchestra/
+/logs/codex-responses/
+/.agents/logs/
+
+# Root-level scratch notes, logs, and generated captures
+/*.log
+/notes*.md
+/scratch*.md
+/todo-notes*.md
+/*screenshot*.png
+/*screenshot*.jpg
+/*capture*.png
+
+# Tool output
+/coverage/
+/.coverage
+/.cache/
+/node_modules/
+/dist/
+/build/
+# END ANTIGRAVITY ORCHESTRA
