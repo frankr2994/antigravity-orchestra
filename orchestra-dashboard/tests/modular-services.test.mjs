@@ -51,6 +51,30 @@ test('Modular scheduler — pause waits for process exit and keeps durable proje
   assert.equal(scheduler.activeTaskId('project'), 'paused-task');
 });
 
+test('Modular scheduler — recovery requested during worker cleanup runs after ownership is released', async () => {
+  const task = { id: 'recovering-task', projectId: 'project', state: 'queued' };
+  const started = [];
+  let releaseFirst;
+  const scheduler = new ProjectTaskScheduler(
+    { getTask: () => task, listTasks: () => [task] },
+    (id) => {
+      started.push(id);
+      if (started.length === 1) return new Promise((resolve) => { releaseFirst = resolve; });
+      return Promise.resolve();
+    },
+    1,
+  );
+
+  scheduler.enqueue(task.id);
+  task.state = 'recovering';
+  scheduler.enqueueAfterCurrent(task.id);
+  assert.deepEqual(started, [task.id]);
+  releaseFirst();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, [task.id, task.id]);
+});
+
 test('Modular event publisher — persists before broadcasting canonical events', () => {
   const calls = [];
   const event = { id: 1, taskId: 'task', agent: 'system', type: 'task.state', payload: { state: 'running' }, createdAt: new Date().toISOString() };

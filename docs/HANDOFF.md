@@ -153,3 +153,12 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Make disputed approvals idempotent: repeated clicks on an already-completed task reconcile to completed without creating duplicate commits or erroring
 - Surface real failure reasons (no Git repo, failed push) as actionable 409 responses instead of generic 500s
 - Add comprehensive contract tests for the new deterministic paths and all upstream failure modes
+
+
+## [2026-08-24 17:46:03] Handoff Update
+- Add `enqueueAfterCurrent` to the task scheduler for queuing work after current ownership is released
+- Implement recovery guidance flow: record user steering as a system message and deduplicate identical submissions
+- Route steer requests through `resumePreservedTask` when a task has already transitioned to recovering or recovery_required
+- Introduce `ApiRequestError` with error codes so the frontend can distinguish between transient state races and real failures
+- Add client-side retry for guidance submission during rapid state transitions, showing an informative warning instead of failing silently
+- Extend test suite with roundtrip tests for repair guidance following a task into recovery and concurrent enqueueing under worker cleanup

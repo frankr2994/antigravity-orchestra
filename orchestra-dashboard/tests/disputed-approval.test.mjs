@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import express from 'express';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../dist-server/db.js';
@@ -54,6 +55,50 @@ test('disputed approval is idempotent after completion and never returns INTERNA
     const repeated = await fetch(base, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
     assert.equal(repeated.status, 202);
     assert.equal((await repeated.json()).state, 'completed');
+  } finally {
+    if (server) await closeServer(server);
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('repair guidance follows the same task into recovery and duplicate submission does not duplicate its prompt', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'orchestra-disputed-recovery-'));
+  const store = new Store(join(root, 'orchestra.db'));
+  let server;
+  try {
+    assert.equal(spawnSync('git.exe', ['init', '-b', 'main'], { cwd: root }).status, 0);
+    assert.equal(spawnSync('git.exe', ['config', 'user.name', 'Tester'], { cwd: root }).status, 0);
+    assert.equal(spawnSync('git.exe', ['config', 'user.email', 'tester@example.com'], { cwd: root }).status, 0);
+    writeFileSync(join(root, 'app.ts'), 'export const value = 1;\n');
+    assert.equal(spawnSync('git.exe', ['add', 'app.ts'], { cwd: root }).status, 0);
+    assert.equal(spawnSync('git.exe', ['commit', '-m', 'baseline'], { cwd: root }).status, 0);
+    writeFileSync(join(root, 'app.ts'), 'export const value = 2;\n');
+
+    const fixture = createDisputedTask(store, root);
+    store.updateTask(fixture.task.id, { classification: JSON.stringify({ mutating: true }) });
+    const manager = new TaskManager(store, 1);
+    let enqueueCalls = 0;
+    manager.scheduler.enqueue = () => { enqueueCalls += 1; };
+    const guidance = 'Keep the existing diff and add a regression test for the review blocker.';
+    assert.equal((await manager.steerDisputed(fixture.task.id, guidance)).state, 'recovering');
+    store.updateTask(fixture.task.id, { state: 'recovery_required', error: 'The worker stopped after preserving its files.' });
+
+    const app = express();
+    app.use(express.json());
+    app.use('/api', createTasksRouter(store, manager));
+    app.use(errorHandlerMiddleware);
+    server = app.listen(0);
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/api/tasks/${fixture.task.id}/steer-disputed`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ guidance }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 202);
+    assert.equal(body.state, 'recovering');
+    assert.equal(enqueueCalls, 2);
+    assert.equal(store.listMessages(fixture.session.id).filter((message) => message.content === `Steering guidance:\n${guidance}`).length, 1);
+    assert.ok(store.listEvents(fixture.task.id).some((event) => event.type === 'task.recovery' && /supplied repair guidance/.test(event.payload.message)));
   } finally {
     if (server) await closeServer(server);
     store.close();

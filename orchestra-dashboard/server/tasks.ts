@@ -147,6 +147,10 @@ export class TaskManager {
 
   async recover(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
+    return this.resumePreservedTask(task);
+  }
+
+  private async resumePreservedTask(task: TaskRecord, guidance?: string): Promise<TaskRecord> {
     const disposition = recoveryDisposition(task.state, this.scheduler.isRunning(task.id));
     if (disposition === 'already_active') return task;
     if (disposition === 'reject') throw new ApplicationError('TASK_NOT_RECOVERABLE', 'Only a failed or recovery-required task with preserved changes can be resumed.', 409,
@@ -157,10 +161,35 @@ export class TaskManager {
     const recoverableFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
     if (!classification?.mutating || !status.isGit || !recoverableFiles.length) throw new ApplicationError('TASK_HAS_NO_RECOVERABLE_CHANGES', 'This task has no recoverable uncommitted implementation changes.', 409,
       { nextAction: 'Use Retry to start again from the current clean project state.', retryable: true });
-    this.transition(taskId, 'recovering');
-    this.emit(taskId, 'system', 'task.recovery', { message: 'Resuming the failed task with its preserved uncommitted changes.' });
-    this.enqueue(taskId);
-    return requireTask(this.store, taskId);
+    const normalizedGuidance = guidance?.trim();
+    if (normalizedGuidance) this.recordRecoveryGuidance(task, normalizedGuidance);
+    this.transition(task.id, 'recovering');
+    if (normalizedGuidance) {
+      this.emit(task.id, 'system', 'task.steer', {
+        guidance: normalizedGuidance,
+        message: 'Resuming preserved task changes with the user-supplied repair guidance.',
+        resumedFrom: task.state,
+      });
+    }
+    this.emit(task.id, 'system', 'task.recovery', {
+      message: normalizedGuidance
+        ? 'Resuming the preserved task and applying the supplied repair guidance.'
+        : 'Resuming the failed task with its preserved uncommitted changes.',
+    });
+    if (this.scheduler.isRunning(task.id)) this.scheduler.enqueueAfterCurrent(task.id);
+    else this.enqueue(task.id);
+    return requireTask(this.store, task.id);
+  }
+
+  private recordRecoveryGuidance(task: TaskRecord, guidance: string) {
+    const content = `Steering guidance:\n${guidance}`;
+    if (this.latestTaskGuidanceMatches(task, content)) return;
+    this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content });
+  }
+
+  private latestTaskGuidanceMatches(task: TaskRecord, content: string) {
+    const lastTaskMessage = this.store.listMessages(task.sessionId).filter((message) => message.taskId === task.id).at(-1);
+    return lastTaskMessage?.role === 'user' && lastTaskMessage.content === content;
   }
 
   async retry(taskId: string) {
@@ -294,15 +323,19 @@ export class TaskManager {
 
   async steerDisputed(taskId: string, guidance: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    if (task.state !== 'review_disputed') throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
-      { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
     if (task.target === 'cloud') throw new ApplicationError('JULES_REVIEW_ACTION_REQUIRED', 'A Jules PR handoff must be steered through its Jules session.', 409,
       { nextAction: 'Use the Jules task panel to send feedback or retry the PR review handoff.', retryable: false });
     if (!guidance.trim()) throw new ApplicationError('DISPUTED_GUIDANCE_REQUIRED', 'Steering guidance cannot be empty.', 400,
       { nextAction: 'Describe the repair you want Antigravity to make, then retry.', retryable: false });
+    if (task.state === 'recovery_required') return this.resumePreservedTask(task, guidance);
+    if (['recovering', 'running', 'reviewing', 'verifying'].includes(task.state)
+      && this.latestTaskGuidanceMatches(task, `Steering guidance:\n${guidance.trim()}`)) return task;
+    if (task.state !== 'review_disputed') throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
+      { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
     this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content: `Steering guidance:\n${guidance.trim()}` });
     this.store.updateTask(taskId, { state: 'recovering', error: null });
     this.emit(taskId, 'system', 'task.steer', { guidance: guidance.trim(), message: 'Resuming task with user-supplied steering guidance.' });
+    this.emit(taskId, 'system', 'task.state', { state: 'recovering', message: 'Repair guidance accepted; the same task is resuming.' });
     this.enqueue(taskId);
     return requireTask(this.store, taskId);
   }

@@ -2,13 +2,33 @@ param (
     [string]$ModelName = "local-model" # LM Studio typically uses whatever model is loaded
 )
 
+function Invoke-GitChecked {
+    param ([string[]]$Arguments)
+    $output = & git @Arguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $detail = ($output | Out-String).Trim()
+        throw "git $($Arguments -join ' ') failed with exit code $LASTEXITCODE. $detail"
+    }
+    return $output
+}
+
 # 1. Get the diff
-$diff = git diff
+try {
+    $diff = Invoke-GitChecked -Arguments @("diff")
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
 $isStaged = $false
 
 if ([string]::IsNullOrWhiteSpace($diff)) {
     # If no unstaged changes, check for staged changes
-    $diff = git diff --cached
+    try {
+        $diff = Invoke-GitChecked -Arguments @("diff", "--cached")
+    } catch {
+        Write-Error $_.Exception.Message
+        exit 1
+    }
     if ([string]::IsNullOrWhiteSpace($diff)) {
         Write-Output "No changes found to log."
         exit 0
@@ -85,13 +105,23 @@ Write-Host "Staging and Committing..." -ForegroundColor Cyan
 # Only stage tracked updates plus the handoff file created by this script. New files
 # must be selected explicitly before invoking the logger so unrelated untracked
 # workspace files are never swept into an automated commit.
-git add --update
-git add -- $handoffFile
+try {
+    Invoke-GitChecked -Arguments @("add", "--update") | Out-Null
+    Invoke-GitChecked -Arguments @("add", "--", $handoffFile) | Out-Null
+} catch {
+    Write-Error "Git staging failed. The generated handoff entry and project changes remain uncommitted. $($_.Exception.Message)"
+    exit 1
+}
 
 # Create a short title for the commit message (first line of summary)
 $firstLine = ($summary -split '\r?\n')[0] -replace '^[\-\*\s]+',''
 $commitTitle = "Update: $firstLine"
 
-git commit -m $commitTitle -m $summary | Out-Null
+try {
+    Invoke-GitChecked -Arguments @("commit", "-m", $commitTitle, "-m", $summary) | Out-Null
+} catch {
+    Write-Error "Git commit failed. The staged changes and generated handoff entry were preserved. $($_.Exception.Message)"
+    exit 1
+}
 
 Write-Host "Success! Changes logged to $handoffFile and committed to git." -ForegroundColor Green

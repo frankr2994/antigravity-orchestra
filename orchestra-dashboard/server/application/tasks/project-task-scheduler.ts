@@ -16,6 +16,10 @@ export class ProjectTaskScheduler {
     if (!this.queue.includes(taskId) && !this.controllers.has(taskId)) this.queue.push(taskId);
     this.drain();
   }
+  enqueueAfterCurrent(taskId: string) {
+    if (!this.queue.includes(taskId)) this.queue.push(taskId);
+    this.drain();
+  }
   remove(taskId: string) {
     const index = this.queue.indexOf(taskId);
     if (index >= 0) this.queue.splice(index, 1);

@@ -669,3 +669,35 @@ A Wiring task reached the bounded local review-repair limit and exposed an `Appr
 - A stale repeat click returns the authoritative completed task without creating another commit.
 - The UI reports the actual repair reason and file count and prevents duplicate clicks while finalization is active.
 - LM Studio remains active in finalization, with deterministic fallback for availability and output failures.
+
+## 2026-08-24: Repair guidance continues across recovery boundaries
+
+### Background
+
+Repair guidance was accepted only while a task remained in `review_disputed`. If the worker preserved the same task's files under `recovery_required` before the request arrived, the guidance route returned `TASK_STATE_CHANGED` and told the user to refresh. A recovery request made while the prior worker was still releasing its scheduler ownership could also be acknowledged without scheduling the continuation.
+
+### Decision
+
+- Treat focused repair guidance as a continuation of the same local task when its durable state is either `review_disputed` or `recovery_required`.
+- Validate that a recovery-required task still has a mutating classification, a Git repository, and recoverable project files before recording guidance or scheduling work.
+- Deduplicate only the latest identical task guidance so retrying a request does not enlarge the model prompt, while a later intentional reuse remains possible.
+- Add an explicit scheduler operation for queuing a recovery after the currently unwinding worker releases project ownership.
+- Preserve structured API error codes in the client. Reconcile changed task state automatically, retry the guidance once when it moved to recoverable preserved work, and present other stale-state reconciliation as an informational warning instead of a generic failure.
+
+### Reasons
+
+- Review dispute and recovery-required are different durable states of the same owned change set; a state race must not invalidate the user's repair instruction.
+- Immediate recovery during worker cleanup is a normal concurrency boundary and must produce a later execution, not a false acknowledgement.
+- Idempotent retries prevent duplicate context and unnecessary model work without limiting local-model use.
+
+### Alternatives
+
+- Require a refresh followed by a separate Resume action: rejected because it discards the intent already expressed by clicking Send Guidance & Resume Repairs.
+- Accept guidance for every task state: rejected because completed, cancelled, cloud, and unrelated active states have different ownership contracts.
+- Allow ordinary `enqueue` to duplicate every active task: rejected because only an explicit recovery continuation should request another run after current ownership is released.
+
+### Impact
+
+- Guidance submitted during the review-to-recovery race resumes the same preserved task and is stored once.
+- A recovery requested during worker cleanup is queued for execution after the old run exits.
+- The dashboard self-reconciles stale state instead of leaving the user with the former red `TASK_STATE_CHANGED` banner and a manual refresh loop.

@@ -19,6 +19,18 @@ import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashbo
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
 
+class ApiRequestError extends Error {
+  readonly code: string | null;
+  readonly status: number;
+
+  constructor(message: string, code: string | null, status: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+    this.code = code;
+    this.status = status;
+  }
+}
+
 function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
   if (m.displayName) {
     const quant = m.quantization ? ` · ${m.quantization}` : '';
@@ -121,7 +133,7 @@ function App() {
     if (!response.ok) {
       const detail = body?.resolution || body?.nextAction;
       const code = body?.code ? ` [${body.code}]` : '';
-      throw new Error(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`);
+      throw new ApiRequestError(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`, body?.code || null, response.status);
     }
     return body as T;
   }, [authenticatedFetch]);
@@ -503,15 +515,42 @@ function App() {
     finally { setBusy(false); }
   }
   async function steerDisputed(task: Task) {
-    if (!steerInput.trim()) return;
+    const guidance = steerInput.trim();
+    if (!guidance) return;
     try {
-      setBusy(true); setError('');
-      const updated = await api<Task>(`/api/tasks/${task.id}/steer-disputed`, { method: 'POST', body: JSON.stringify({ guidance: steerInput.trim() }) });
+      setBusy(true); setError(''); setScopeWarning('');
+      const updated = await api<Task>(`/api/tasks/${task.id}/steer-disputed`, { method: 'POST', body: JSON.stringify({ guidance }) });
       setSteerInput(''); setSteerOpen(false);
       setActiveTask(updated);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
       setActivity([]); watchTask(task.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) {
+      let latest: Task | null = null;
+      try {
+        latest = await api<Task>(`/api/tasks/${task.id}`);
+        setActiveTask((current) => current?.id === task.id ? latest : current);
+        setTasks((current) => current.map((item) => item.id === task.id ? latest! : item));
+      } catch { /* Keep the original guidance error. */ }
+      if (reason instanceof ApiRequestError && reason.code === 'TASK_STATE_CHANGED' && latest?.state === 'recovery_required') {
+        try {
+          const resumed = await api<Task>(`/api/tasks/${task.id}/steer-disputed`, { method: 'POST', body: JSON.stringify({ guidance }) });
+          setSteerInput(''); setSteerOpen(false);
+          setActiveTask(resumed);
+          setTasks((current) => current.map((item) => item.id === task.id ? resumed : item));
+          setActivity([]); watchTask(task.id);
+          setScopeWarning('The task preserved its files while guidance was being sent. Orchestra reconciled the change and resumed the same task with your guidance.');
+          return;
+        } catch (retryReason) {
+          setError(retryReason instanceof Error ? retryReason.message : String(retryReason));
+          return;
+        }
+      }
+      if (reason instanceof ApiRequestError && reason.code === 'TASK_STATE_CHANGED' && latest) {
+        setScopeWarning(`The task changed to ${humanState(latest.state)} before that action completed. The dashboard has reconciled its state and now shows the valid controls.`);
+        return;
+      }
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
     finally { setBusy(false); }
   }
   async function explainMonitor() {
