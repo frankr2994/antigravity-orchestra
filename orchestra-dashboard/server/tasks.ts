@@ -23,6 +23,7 @@ export class TaskManager {
   private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
   private readonly baselineResolutions = new Set<string>();
+  private readonly disputedApprovals = new Set<string>();
   private readonly controlRequests = new Map<string, 'pause' | 'stop'>();
   private antigravityModels: string[] = [];
 
@@ -226,19 +227,79 @@ export class TaskManager {
 
   async approveDisputed(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    if (task.state !== 'review_disputed') throw new Error(`Only a task in review_disputed state can be approved, but task is ${task.state}.`);
-    const project = requireProject(this.store, task.projectId);
-    const classification = parseTaskClassification(task.classification);
-    const models = task.models ? JSON.parse(task.models) : selectModels(classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title });
-    await this.finalizeGit(taskId, project, task.prompt, classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title }, models);
-    this.complete(taskId, 'Task changes approved and committed by user after review dispute.', 'antigravity');
-    return requireTask(this.store, taskId);
+    if (task.state === 'completed' || task.state === 'completed_unpushed') return task;
+    if (task.state !== 'review_disputed') {
+      throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
+        { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
+    }
+    if (task.target === 'cloud') {
+      throw new ApplicationError('JULES_REVIEW_ACTION_REQUIRED', 'A Jules PR handoff cannot be approved as an uncommitted local diff.', 409,
+        { nextAction: 'Use the Jules task panel to retry or resolve the PR review handoff.', retryable: false });
+    }
+    if (this.disputedApprovals.has(taskId)) {
+      throw new ApplicationError('DISPUTED_APPROVAL_IN_PROGRESS', 'This approval is already finalizing the reviewed files.', 409,
+        { nextAction: 'Wait for the current finalization to finish; the task will refresh automatically.', retryable: true });
+    }
+    this.disputedApprovals.add(taskId);
+    try {
+      const project = requireProject(this.store, task.projectId);
+      const classification = parseTaskClassification(task.classification);
+      const models = task.models ? JSON.parse(task.models) : selectModels(classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title });
+      const finalized = await this.finalizeGit(taskId, project, task.prompt, classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title }, models);
+      if (finalized.status === 'skipped') {
+        const message = finalized.reason === 'not_git'
+          ? 'Orchestra cannot finalize this approval because the project is no longer a Git repository.'
+          : 'There is no uncommitted project diff to approve. The files may already have been committed or changed outside Orchestra.';
+        this.store.updateTask(taskId, { state: 'review_disputed', error: message });
+        this.emit(taskId, 'system', 'warning', {
+          message,
+          code: finalized.reason === 'not_git' ? 'DISPUTED_PROJECT_NOT_GIT' : 'DISPUTED_DIFF_MISSING',
+          nextAction: finalized.reason === 'not_git'
+            ? 'Restore the Git repository, then retry approval.'
+            : 'Refresh the task and inspect Git status. If the files were committed manually, use that commit instead of retrying a nonexistent diff.',
+        });
+        throw new ApplicationError(
+          finalized.reason === 'not_git' ? 'DISPUTED_PROJECT_NOT_GIT' : 'DISPUTED_DIFF_MISSING',
+          message,
+          409,
+          { nextAction: finalized.reason === 'not_git'
+            ? 'Restore the Git repository, then retry approval.'
+            : 'Refresh the task and inspect Git status; Orchestra did not create an empty commit.', retryable: false },
+        );
+      }
+      this.complete(taskId, `Task changes approved and finalized in commit ${finalized.commitSha.slice(0, 8)} after review dispute.`, 'antigravity');
+      return requireTask(this.store, taskId);
+    } catch (error) {
+      if (error instanceof ApplicationError) throw error;
+      const message = 'Orchestra could not finish the approved Git commit. The project changes are preserved.';
+      const latest = requireTask(this.store, taskId);
+      if (['review_disputed', 'summarizing', 'committing', 'pushing'].includes(latest.state)) {
+        this.store.updateTask(taskId, { state: 'review_disputed', error: message });
+        this.emit(taskId, 'system', 'warning', {
+          message,
+          code: 'DISPUTED_APPROVAL_FAILED',
+          detail: error instanceof Error ? error.message : String(error),
+          nextAction: 'Check the task activity for the failed Git phase, correct the repository issue, then retry approval.',
+        });
+      }
+      throw new ApplicationError('DISPUTED_APPROVAL_FAILED', message, 409, {
+        cause: error,
+        nextAction: 'Check the task activity for the failed Git phase, correct the repository issue, then retry approval.',
+        retryable: true,
+      });
+    } finally {
+      this.disputedApprovals.delete(taskId);
+    }
   }
 
   async steerDisputed(taskId: string, guidance: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    if (task.state !== 'review_disputed') throw new Error(`Only a task in review_disputed state can be steered, but task is ${task.state}.`);
-    if (!guidance.trim()) throw new Error('Steering guidance cannot be empty.');
+    if (task.state !== 'review_disputed') throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
+      { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
+    if (task.target === 'cloud') throw new ApplicationError('JULES_REVIEW_ACTION_REQUIRED', 'A Jules PR handoff must be steered through its Jules session.', 409,
+      { nextAction: 'Use the Jules task panel to send feedback or retry the PR review handoff.', retryable: false });
+    if (!guidance.trim()) throw new ApplicationError('DISPUTED_GUIDANCE_REQUIRED', 'Steering guidance cannot be empty.', 400,
+      { nextAction: 'Describe the repair you want Antigravity to make, then retry.', retryable: false });
     this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content: `Steering guidance:\n${guidance.trim()}` });
     this.store.updateTask(taskId, { state: 'recovering', error: null });
     this.emit(taskId, 'system', 'task.steer', { guidance: guidance.trim(), message: 'Resuming task with user-supplied steering guidance.' });
@@ -864,7 +925,7 @@ export class TaskManager {
   }
 
   private async finalizeGit(taskId: string, project: Project, request: string, _classification: TaskClassification, _models: ModelSelection) {
-    await this.gitFinalization.finalize(
+    return this.gitFinalization.finalize(
       taskId, project, request,
       (state) => this.transition(taskId, state),
       (agent, type, payload) => this.emit(taskId, agent, type, payload),

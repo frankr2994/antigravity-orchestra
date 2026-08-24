@@ -485,9 +485,21 @@ function App() {
       const updated = await api<Task>(`/api/tasks/${task.id}/approve-disputed`, { method: 'POST', body: '{}' });
       setActiveTask(updated);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
-      if (session) setMessages(await api<Message[]>(`/api/sessions/${session.id}/messages`));
-      if (project) await reload(project.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+      const refreshes = await Promise.allSettled([
+        session ? api<Message[]>(`/api/sessions/${session.id}/messages`).then(setMessages) : Promise.resolve(),
+        project ? reload(project.id) : Promise.resolve(),
+      ]);
+      if (refreshes.some((result) => result.status === 'rejected')) {
+        setScopeWarning('The approval completed, but part of the dashboard did not refresh. The task state shown here is authoritative; reload the page if another panel looks stale.');
+      }
+    } catch (reason) {
+      try {
+        const latest = await api<Task>(`/api/tasks/${task.id}`);
+        setActiveTask((current) => current?.id === task.id ? latest : current);
+        setTasks((current) => current.map((item) => item.id === task.id ? latest : item));
+      } catch { /* Keep the original approval error. */ }
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
     finally { setBusy(false); }
   }
   async function steerDisputed(task: Task) {
@@ -525,6 +537,13 @@ function App() {
   const currentModels = useMemo(() => {
     try { return activeTask?.models ? JSON.parse(activeTask.models) : null; } catch { return null; }
   }, [activeTask]);
+  const activeDisputeEvent = activity.findLast((event) => event.type === 'task.review-disputed');
+  const activeDisputeReason = typeof activeDisputeEvent?.payload.reason === 'string'
+    ? activeDisputeEvent.payload.reason
+    : 'Independent review still has blocking findings after the bounded repair attempts.';
+  const activeDisputeIsLocal = activeTask?.target !== 'cloud';
+  const activeDisputeDiffKnown = monitor !== null;
+  const activeDisputeFileCount = monitor?.changedFiles.length ?? 0;
 
   return (
     <div className="app-shell">
@@ -547,7 +566,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
+        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} actionBusy={busy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
@@ -663,10 +682,17 @@ function App() {
             <div className="baseline-card disputed-card">
               <CircleAlert />
               <strong>Review Consensus Not Reached</strong>
-              <p>Automatic repair reached its limit without full consensus. You can approve and commit the preserved diff directly, or steer the next repair attempt.</p>
+              <p>{activeDisputeReason}</p>
+              <small>{activeDisputeIsLocal
+                ? !activeDisputeDiffKnown
+                  ? 'Checking the preserved Git diff before enabling finalization…'
+                  : activeDisputeFileCount > 0
+                    ? `${activeDisputeFileCount} uncommitted project file${activeDisputeFileCount === 1 ? '' : 's'} remain preserved.`
+                    : 'No uncommitted project diff is currently visible, so Orchestra will not offer an empty or misleading commit action.'
+                : 'This dispute belongs to a Jules PR handoff. Resolve it from the Jules task panel.'}</small>
               <div className="dispute-actions">
-                <button className="primary" onClick={() => approveDisputed(activeTask)} disabled={busy}>Approve & Commit Diff</button>
-                <button className="secondary" onClick={() => setSteerOpen(!steerOpen)} disabled={busy}>{steerOpen ? 'Close guidance' : 'Provide guidance & retry'}</button>
+                {activeDisputeIsLocal && activeDisputeDiffKnown && activeDisputeFileCount > 0 && <button className="primary" onClick={() => approveDisputed(activeTask)} disabled={busy}>{busy ? 'Finalizing…' : `Approve & Finalize ${activeDisputeFileCount} File${activeDisputeFileCount === 1 ? '' : 's'}`}</button>}
+                {activeDisputeIsLocal && <button className="secondary" onClick={() => setSteerOpen(!steerOpen)} disabled={busy}>{steerOpen ? 'Close guidance' : 'Provide repair guidance'}</button>}
               </div>               {steerOpen && (
                 <div className="steer-box">
                   {(() => {
@@ -875,10 +901,10 @@ function formatResetTimer(isoDate: string | null | undefined): string | null {
   return `resets in ${days}d ${remHours}h`;
 }
 
-function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
+function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, actionBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; actionBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
-    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onPause={onPause} onResume={onResume} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
+    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} actionBusy={actionBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onPause={onPause} onResume={onResume} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
     {activeTask?.target === 'cloud' && <JulesTaskPanel task={activeTask} api={api} />}
     <div className="metrics-grid">
       <Metric icon={<Cpu />} label="CPU" value={`${stats?.cpu.load ?? 0}%`} detail={stats?.cpu.speed || 'Unavailable'} percent={stats?.cpu.load ?? 0} color="blue" />
@@ -959,10 +985,17 @@ function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, m
   </section>;
 }
 
-function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
+function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, actionBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; actionBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
   const [showLogs, setShowLogs] = useState(false);
   const recent = events.filter((event) => ['task.state', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'task.review-disputed', 'task.steer', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated'].includes(event.type)).slice(-25).reverse();
   const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed' || event.type === 'task.provider-recovery' || event.type === 'task.model-takeover');
+  const disputeEvent = events.findLast((event) => event.type === 'task.review-disputed');
+  const disputeReason = typeof disputeEvent?.payload.reason === 'string'
+    ? disputeEvent.payload.reason
+    : monitor?.stopReason || 'Independent review still has blocking findings after the bounded repair attempts.';
+  const localDispute = task.target !== 'cloud';
+  const diffKnown = monitor !== null;
+  const changedFileCount = monitor?.changedFiles.length ?? 0;
   const running = !terminalStates.has(task.state);
   const stoppable = running && !(task.target === 'cloud' && monitor?.providerState === 'COMPLETED');
   return <article className={`live-monitor health-${monitor?.health || 'waiting'}`}>
@@ -983,10 +1016,17 @@ function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, q
         <CircleAlert size={16} />
         <div style={{ width: '100%' }}>
           <strong>Review Consensus Dispute</strong>
-          <p>Repair limit reached (2 cycles). You can approve and finalize the preserved diff, or steer Antigravity with custom instructions.</p>
+          <p>{disputeReason}</p>
+          <small>{localDispute
+            ? !diffKnown
+              ? 'Checking the preserved Git diff before enabling finalization…'
+              : changedFileCount > 0
+              ? `${changedFileCount} uncommitted project file${changedFileCount === 1 ? '' : 's'} remain preserved. Approval will summarize them with your local model when available, commit them, and push the current branch.`
+              : 'No uncommitted project diff is currently visible, so Orchestra will not offer an empty or misleading commit action.'
+            : 'This dispute belongs to a Jules PR handoff. Resolve it from the Jules task panel instead of treating it as a local diff.'}</small>
           <div className="dispute-actions" style={{ marginTop: '8px' }}>
-            <button className="primary compact" onClick={() => onApproveDisputed(task)}>Approve & Commit Diff</button>
-            <button className="secondary compact" onClick={() => onSteerDisputed(task)}>Provide Guidance</button>
+            {localDispute && diffKnown && changedFileCount > 0 && <button className="primary compact" disabled={actionBusy} onClick={() => onApproveDisputed(task)}>{actionBusy ? 'Finalizing…' : `Approve & Finalize ${changedFileCount} File${changedFileCount === 1 ? '' : 's'}`}</button>}
+            {localDispute && <button className="secondary compact" disabled={actionBusy} onClick={() => onSteerDisputed(task)}>Provide Repair Guidance</button>}
           </div>
         </div>
       </div>

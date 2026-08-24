@@ -145,3 +145,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Jules credentials and enablement are now controlled entirely from the Settings UI; no shell environment setup is required.
 - The persisted toggle takes effect without restarting the server. Off blocks operational routes and pauses background polling while leaving credential management available and remote sessions untouched.
 - The test runner serializes file-level integration suites to prevent nondeterministic Windows contention between temporary Git remotes, worktrees, and nested npm processes.
+
+## [2026-08-24 07:14:24] Handoff Update
+- Make git commit generation resilient to local model failure by adding deterministic fallback summaries and bounded input for large diffs
+- Decouple LM Studio availability from critical path; a failed summarization emits a non-blocking warning instead of failing the whole approval flow
+- Introduce typed `GitFinalizationResult` so upstream callers can distinguish between no changes, commit success, and operational failures rather than guessing from absent side effects
+- Make disputed approvals idempotent: repeated clicks on an already-completed task reconcile to completed without creating duplicate commits or erroring
+- Surface real failure reasons (no Git repo, failed push) as actionable 409 responses instead of generic 500s
+- Add comprehensive contract tests for the new deterministic paths and all upstream failure modes

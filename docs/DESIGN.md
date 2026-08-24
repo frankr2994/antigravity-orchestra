@@ -633,3 +633,39 @@ Orchestra used one generic task-stop action for local processes and cloud sessio
 - Activity polling and dashboard refreshes use fewer provider requests.
 - PR review and repair can survive transient failures and restarts without silently losing terminal work.
 - Successful Jules integration leaves both the remote target and its safe local branch ref at the reviewed commit, or reports an actionable local-sync warning without misrepresenting the remote result.
+
+## 2026-08-24: Disputed approval is explicit, idempotent, and local-model friendly
+
+### Background
+
+A Wiring task reached the bounded local review-repair limit and exposed an `Approve & Commit Diff` action. The server's Git finalizer returned without an outcome when the repository or diff was unavailable. The caller then attempted to complete a task that was still in `review_disputed`, producing an illegal state transition that the HTTP boundary reduced to `INTERNAL_ERROR`. A successful approval followed by a failed secondary dashboard refresh could also leave the browser showing the old action even though the stored task was already complete.
+
+### Decision
+
+- Git finalization returns an explicit `committed`, `no_changes`, or `not_git` outcome. No caller may interpret an absent Git side effect as success.
+- Approval is idempotent after `completed` or `completed_unpushed`, and duplicate in-flight clicks are rejected with a stable retryable code.
+- Expected repository, state, and finalization failures return typed application errors with a concrete next action. A failed finalization restores `review_disputed` and preserves the project changes.
+- The dashboard reconciles the authoritative task after an approval error and treats message/list refresh failures separately from the approval mutation.
+- The dispute card uses the persisted review reason and current Git status. It offers local finalization only when an uncommitted local diff is visible; Jules handoff disputes remain owned by the Jules panel.
+- Orchestra continues to use the configured local LM Studio model for commit notes and semantic slicing. Local-model work is not reduced to conserve metered quota. If the local model is unavailable or malformed, deterministic bounded notes allow the already-approved Git operation to proceed.
+
+### Reasons
+
+- A primary action must distinguish stale state, missing evidence, provider-owned work, operational Git failure, and success instead of collapsing them into a generic server error.
+- Repeat requests are normal after a timeout or partial UI refresh and must reconcile rather than repeat a non-idempotent commit.
+- Local inference is not a metered provider expense, but an optional model response must not be a single point of failure for an explicit user approval.
+- Hiding an action whose precondition is false is safer and clearer than offering a button that can only fail.
+
+### Alternatives
+
+- Allow `review_disputed` to transition directly to `completed`: rejected because it would make a missing commit indistinguishable from successful finalization.
+- Return success when the diff is empty: rejected because Orchestra cannot prove whether the changes were committed, discarded, or moved outside the workflow.
+- Disable local summarization to reduce work: rejected because the local model is available without provider quota and produces useful commit/handoff context.
+- Reuse the local approval route for Jules disputes: rejected because a Jules PR is committed remote evidence with a different review and integration lifecycle.
+
+### Impact
+
+- Approval route failures are actionable 4xx responses rather than random 500 banners.
+- A stale repeat click returns the authoritative completed task without creating another commit.
+- The UI reports the actual repair reason and file count and prevents duplicate clicks while finalization is active.
+- LM Studio remains active in finalization, with deterministic fallback for availability and output failures.
