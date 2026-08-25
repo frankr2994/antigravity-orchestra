@@ -4,6 +4,7 @@ import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
 import type { TaskEventType } from './domain/index.js';
 import { ProjectTaskScheduler } from './application/tasks/project-task-scheduler.js';
+import { ProjectTaskOwnershipService } from './application/tasks/project-task-ownership-service.js';
 import { TaskEventPublisher } from './application/tasks/task-event-publisher.js';
 import { GitFinalizationService } from './application/git/git-finalization-service.js';
 export { appendHandoff } from './application/git/handoff.js';
@@ -19,6 +20,7 @@ import { ApplicationError } from './application/errors.js';
 export class TaskManager {
   private readonly events: TaskEventPublisher;
   private readonly scheduler: ProjectTaskScheduler;
+  private readonly ownership: ProjectTaskOwnershipService;
   private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
   private readonly manualCommits = new Set<string>();
@@ -28,6 +30,8 @@ export class TaskManager {
   constructor(private readonly store: Store, maxGlobal = 2) {
     this.events = new TaskEventPublisher(store);
     this.scheduler = new ProjectTaskScheduler(store, (taskId, signal) => this.execute(taskId, signal), maxGlobal);
+    this.ownership = new ProjectTaskOwnershipService(store, this.scheduler,
+      (taskId, type, payload) => this.emit(taskId, 'system', type, payload));
     this.gitFinalization = new GitFinalizationService(store);
     void this.refreshModels();
   }
@@ -251,7 +255,15 @@ export class TaskManager {
   }
 
   activeTaskId(projectId: string) {
-    return this.scheduler.activeTaskId(projectId);
+    return this.ownership.current(projectId)?.id ?? null;
+  }
+
+  activeTask(projectId: string): TaskRecord | null {
+    return this.ownership.current(projectId);
+  }
+
+  reconcileProjectOwner(projectId: string): Promise<TaskRecord | null> {
+    return this.ownership.reconcile(projectId);
   }
 
   async getMonitor(taskId: string): Promise<RunMonitor> {

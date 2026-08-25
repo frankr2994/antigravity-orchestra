@@ -740,3 +740,39 @@ The bounded repair/dispute workflow accumulated several state-dependent actions:
 - Repair counters are informational only; cycle 20 follows the same repair path as cycle 1.
 - Jules PRs continue through feedback, exact-head review, verification, safe integration, and local synchronization without an arbitrary repair ceiling.
 - This decision supersedes the bounded-attempt, dispute-guidance, and local-model finalization portions of the preceding 2026-08-24 decisions.
+
+## 2026-08-25: Project ownership is separate from conversation presentation
+
+### Background
+
+A non-running task left in `recovery_required` continued to reserve its project after its working tree had become clean. The dashboard stored that project-wide owner in the same `activeTask` value used to render the selected conversation. Creating a conversation therefore appeared to reopen unrelated work, and submitting a prompt returned `PROJECT_TASK_ACTIVE` without exposing the owning conversation or a usable exit.
+
+### Decision
+
+- Give durable project ownership a dedicated application service between the scheduler, task persistence, and Git inspection.
+- Keep project ownership separate from the task displayed for the selected conversation. Conversation restoration filters by session identity and never substitutes another conversation's task.
+- Reconcile non-running local owners in `baseline_required`, `recovery_required`, or `review_disputed` before project activation and task submission. Release ownership only when Git inspection succeeds and reports no non-Orchestra project changes.
+- Never auto-release a running, queued, paused, cloud, dirty, non-Git, or Git-unreadable owner.
+- When another conversation legitimately owns the project, keep the new conversation selected and show an explicit `Open active task` action with its title and state.
+- Rename a blank conversation only after project ownership permits task creation.
+
+### Reasons
+
+- Process scheduling, durable project exclusion, and conversation presentation have different responsibilities and failure modes.
+- A clean worktree plus no live process proves that an attention state no longer protects implementation work; a failed or dirty Git check does not.
+- Keeping the newly created conversation visible makes the `+` action truthful while preserving the one-mutating-task-per-project safety boundary.
+- Moving reconciliation to the server makes API clients and UI race conditions follow the same rule.
+
+### Alternatives
+
+- Treat every recovery state as permanent ownership: rejected because an abandoned clean record can deadlock the project indefinitely.
+- Cancel every old attention state when a new prompt arrives: rejected because it could detach real uncommitted work or a live provider task.
+- Let every conversation submit concurrently: rejected because two mutating tasks could claim the same working tree and commit each other's files.
+- Fix only the `+` button locally: rejected because direct API submission would retain the deadlock and duplicate-task race.
+
+### Impact
+
+- Clean abandoned recovery records cancel themselves at a safe reconciliation boundary and no longer block new work.
+- Dirty or live work remains owned and is reachable through a visible conversation action rather than an opaque error banner.
+- A rejected prompt leaves the blank conversation title and prompt intact and creates no duplicate task.
+- Ownership behavior is isolated and covered by service, router/persistence, Git, and frontend contract tests.

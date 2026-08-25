@@ -170,3 +170,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Decouple repair cycle counts from flow control so Jules can iterate indefinitely until review passes or the session fails
 - Add local fallback that re-imports the exact PR head before queuing a real local repair when cloud sessions become unavailable
 - Retain hard Git/PR identity checks as non-negotiable integrity boundaries rather than arbitrary loop limits
+
+
+## [2026-08-25 07:04:41] Handoff Update
+- Decouples project ownership from conversation display so stale or dead tasks no longer block new work while preserving safety boundaries
+- Adds `ProjectTaskOwnershipService` to reconcile abandoned recovery states and release ownership only when Git is clean and no process runs
+- Replaces the global `restoreProjectTask` call with a session-filtered version, preventing conversations from displaying unrelated active tasks
+- Exposes an "Open active task" action instead of silently failing or auto-merging when a project has a different owner
+- Adds comprehensive tests for ownership reconciliation, concurrent submission races, and UI consistency

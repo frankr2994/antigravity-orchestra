@@ -27,8 +27,16 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
 
   router.get('/projects/:id/active-task', (req, res) => {
     const project = requireProject(req.params.id);
-    const id = tasks.activeTaskId(project.id);
-    res.json(id ? requireTask(id) : null);
+    res.json(tasks.activeTask(project.id));
+  });
+
+  router.post('/projects/:id/task-ownership/reconcile', async (req, res, next) => {
+    try {
+      const project = requireProject(req.params.id);
+      res.json(await tasks.reconcileProjectOwner(project.id));
+    } catch (error) {
+      next(error);
+    }
   });
 
   router.get('/tasks/:id', (req, res) => {

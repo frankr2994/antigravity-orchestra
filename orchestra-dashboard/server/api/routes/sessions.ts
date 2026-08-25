@@ -77,14 +77,11 @@ export function createSessionsRouter(store: Store, tasks: TaskManager): Router {
       if (!prompt || prompt.length > 100_000) {
         throw new Error('A prompt between 1 and 100,000 characters is required.');
       }
-      if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
-        const dynamicTitle = generateDynamicSessionTitle(prompt);
-        if (dynamicTitle && dynamicTitle !== 'New conversation') {
-          store.updateSessionTitle(session.id, dynamicTitle);
-        }
-      }
       const sessionTasks = store.listTasks(session.projectId).filter((candidate) => candidate.sessionId === session.id);
-      const recoveryTask = findContinuationRecoveryTask(prompt, sessionTasks);
+      const existingTask = await tasks.reconcileProjectOwner(session.projectId);
+      const recoveryTask = existingTask?.sessionId === session.id
+        ? findContinuationRecoveryTask(prompt, sessionTasks.filter((candidate) => candidate.id === existingTask.id))
+        : null;
       if (recoveryTask) {
         store.addMessage({ sessionId: session.id, taskId: recoveryTask.id, role: 'user', agent: 'system', content: prompt });
         store.addEvent(recoveryTask.id, 'system', 'task.continuation', {
@@ -95,10 +92,15 @@ export function createSessionsRouter(store: Store, tasks: TaskManager): Router {
         res.status(202).json(recovered);
         return;
       }
-      const existingTaskId = tasks.activeTaskId(session.projectId);
-      if (existingTaskId) {
-        throw new ApplicationError('PROJECT_TASK_ACTIVE', `This project already has an active or queued task (${existingTaskId}).`, 409,
-          { nextAction: 'Open that task to follow, pause, resume, or stop it instead of creating a duplicate.', retryable: false });
+      if (existingTask) {
+        throw new ApplicationError('PROJECT_TASK_ACTIVE', `“${existingTask.title}” is ${existingTask.state.replaceAll('_', ' ')} in another task (${existingTask.id}).`, 409,
+          { nextAction: 'Open its conversation using the active-task notice, then resume, commit, or stop it.', retryable: false });
+      }
+      if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
+        const dynamicTitle = generateDynamicSessionTitle(prompt);
+        if (dynamicTitle && dynamicTitle !== 'New conversation') {
+          store.updateSessionTitle(session.id, dynamicTitle);
+        }
       }
       const mode = req.body?.mode === 'direct' ? 'direct' : 'orchestra';
       const directAgent = req.body?.directAgent === 'codex' ? 'codex' : req.body?.directAgent === 'antigravity' ? 'antigravity' : 'gemma';

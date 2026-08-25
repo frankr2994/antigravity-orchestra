@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ProjectTaskScheduler } from '../dist-server/application/tasks/project-task-scheduler.js';
+import { ProjectTaskOwnershipService } from '../dist-server/application/tasks/project-task-ownership-service.js';
 import { TaskEventPublisher } from '../dist-server/application/tasks/task-event-publisher.js';
 import { parseActivityPage, parseDispatchRequest } from '../dist-server/application/jules/requests.js';
 
@@ -73,6 +74,20 @@ test('Modular scheduler — recovery requested during worker cleanup runs after 
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(started, [task.id, task.id]);
+});
+
+test('Modular ownership — never probes or releases a task while its process is running', async () => {
+  const task = { id: 'live-recovery', projectId: 'project', target: 'local', state: 'recovery_required' };
+  let statusReads = 0;
+  const service = new ProjectTaskOwnershipService(
+    { getTask: () => task },
+    { activeTaskId: () => task.id, isRunning: () => true },
+    () => assert.fail('a live owner must not emit a release event'),
+    async () => { statusReads += 1; return { isGit: true, files: [] }; },
+  );
+
+  assert.equal(await service.reconcile(task.projectId), task);
+  assert.equal(statusReads, 0);
 });
 
 test('Modular event publisher — persists before broadcasting canonical events', () => {

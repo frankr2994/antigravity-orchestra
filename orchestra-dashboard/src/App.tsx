@@ -19,6 +19,7 @@ import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashbo
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
 const manualCommitStates = new Set(['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'failed']);
+const releasedOwnershipStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled']);
 
 function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
   if (m.displayName) {
@@ -43,6 +44,7 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
+  const [projectOwnerTask, setProjectOwnerTask] = useState<Task | null>(null);
   const [activity, setActivity] = useState<TaskEvent[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health>({});
@@ -227,9 +229,10 @@ function App() {
       setBusy(true); setError('');
       const data = await api<{ project: Project; sessions: Session[]; activeSession: Session; scope?: { warning?: string } }>(`/api/projects/${nextProject.id}/activate`, { method: 'POST', body: '{}' }, overrideToken);
       setProject(data.project); setSessions(data.sessions); setSession(data.activeSession); setScopeWarning(data.scope?.warning || '');
+      const projectActiveTask = await api<Task | null>(`/api/projects/${nextProject.id}/task-ownership/reconcile`, { method: 'POST', body: '{}' }, overrideToken);
       const projectTasks = await api<Task[]>(`/api/tasks?projectId=${nextProject.id}`, {}, overrideToken);
-      const projectActiveTask = await api<Task | null>(`/api/projects/${nextProject.id}/active-task`, {}, overrideToken);
       setTasks(projectTasks);
+      setProjectOwnerTask(projectActiveTask);
       const visibleSession = projectActiveTask ? data.sessions.find((item) => item.id === projectActiveTask.sessionId) || data.activeSession : data.activeSession;
       setSession(visibleSession);
       setMessages(await api<Message[]>(`/api/sessions/${visibleSession.id}/messages`, {}, overrideToken));
@@ -258,14 +261,14 @@ function App() {
     if (!project) return;
     try {
       const created = await api<Session>(`/api/projects/${project.id}/sessions`, { method: 'POST', body: JSON.stringify({ title: 'New conversation' }) });
-      setSessions((current) => [created, ...current]); setSession(created); setMessages([]); setActivity([]); await restoreProjectTask(project.id);
+      setSessions((current) => [created, ...current]); setSession(created); setMessages([]); setActivity([]); await restoreProjectTask(project.id, created.id, true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
 
   async function selectSession(next: Session) {
     setEditingSessionTitle(false);
     await api(`/api/sessions/${next.id}/activate`, { method: 'POST', body: '{}' });
-    setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); await restoreProjectTask(next.projectId);
+    setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); await restoreProjectTask(next.projectId, next.id);
   }
 
   async function renameSession(sessionId: string, newTitle: string) {
@@ -311,20 +314,47 @@ function App() {
     }
   }
 
-  async function restoreProjectTask(projectId: string) {
-    const running = await api<Task | null>(`/api/projects/${projectId}/active-task`);
+  async function restoreProjectTask(projectId: string, selectedSessionId: string, reconcile = false) {
+    const ownerPath = `/api/projects/${projectId}/${reconcile ? 'task-ownership/reconcile' : 'active-task'}`;
+    const running = await api<Task | null>(ownerPath, reconcile ? { method: 'POST', body: '{}' } : {});
     const projectTasks = await api<Task[]>(`/api/tasks?projectId=${projectId}`);
-    const sessionTasks = projectTasks.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    const sessionTasks = projectTasks.filter((task) => task.sessionId === selectedSessionId).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     const newestTask = sessionTasks[0] || null;
-    const latest = running || (newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null);
+    const latest = running?.sessionId === selectedSessionId
+      ? running
+      : !running && newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null;
+    setTasks(projectTasks);
+    setProjectOwnerTask(running);
     setActiveTask(latest);
     if (latest) watchTask(latest.id);
+    else { streamRef.current?.close(); setActivity([]); setMonitor(null); }
+  }
+
+  async function openProjectOwner() {
+    if (!projectOwnerTask) return;
+    const ownerSession = sessions.find((item) => item.id === projectOwnerTask.sessionId);
+    if (!ownerSession) {
+      setError('The active task conversation is no longer available. Reload the project to reconcile its state.');
+      return;
+    }
+    await selectSession(ownerSession);
   }
 
   async function send() {
-    if (!session || scopeWarning || !input.trim() || activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required')) return;
-    const prompt = input.trim(); setInput(''); setError('');
+    if (!session || scopeWarning || !input.trim()) return;
+    const prompt = input.trim(); setError('');
     try {
+      if (project) {
+        const owner = await api<Task | null>(`/api/projects/${project.id}/task-ownership/reconcile`, { method: 'POST', body: '{}' });
+        setProjectOwnerTask(owner);
+        if (owner) {
+          if (owner.sessionId === session.id) {
+            setActiveTask(owner);
+            watchTask(owner.id);
+          }
+          return;
+        }
+      }
       const directModel =
         executionMode === 'direct'
           ? directAgent === 'antigravity'
@@ -361,8 +391,9 @@ function App() {
           method: 'POST', body: JSON.stringify({ prompt, mode: executionMode, directAgent, directModel, directEffort }),
         });
       }
+      setInput('');
       setMessages((current) => [...current, { id: crypto.randomUUID(), taskId: created.id, role: 'user', agent: 'system', content: prompt, createdAt: new Date().toISOString() }]);
-      setTasks((current) => [created, ...current]); setActiveTask(created); setActivity([]); watchTask(created.id);
+      setTasks((current) => [created, ...current]); setActiveTask(created); setProjectOwnerTask(created); setActivity([]); watchTask(created.id);
       if (session.title === 'New conversation' || session.title.startsWith('New conversation')) {
         void api<Session[]>(`/api/projects/${session.projectId}/sessions`).then((updatedSessions) => {
           setSessions(updatedSessions);
@@ -370,7 +401,18 @@ function App() {
           if (current) setSession(current);
         }).catch(() => undefined);
       }
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (project && message.includes('[PROJECT_TASK_ACTIVE]')) {
+        try {
+          const owner = await api<Task | null>(`/api/projects/${project.id}/active-task`);
+          setProjectOwnerTask(owner);
+          if (owner?.sessionId === session.id) { setActiveTask(owner); watchTask(owner.id); }
+          if (owner) return;
+        } catch { /* Show the original error when the owner cannot be loaded. */ }
+      }
+      setError(message);
+    }
   }
 
   function watchTask(taskId: string) {
@@ -383,6 +425,9 @@ function App() {
       if (event.type === 'task.state') {
         const state = String(event.payload.state);
         setActiveTask((current) => current ? { ...current, state, result: typeof event.payload.result === 'string' ? event.payload.result : current.result } : current);
+        setProjectOwnerTask((current) => current?.id === taskId
+          ? releasedOwnershipStates.has(state) ? null : { ...current, state }
+          : current);
         if (terminalStates.has(state)) {
           stream.close();
           void api<Task>(`/api/tasks/${taskId}`).then((latest) => {
@@ -410,6 +455,7 @@ function App() {
         updated = await api<Task>(`/api/tasks/${task.id}/cancel`, { method: 'POST', body: '{}' });
       }
       setActiveTask((current) => current?.id === task.id ? updated : current);
+      setProjectOwnerTask((current) => current?.id === task.id ? releasedOwnershipStates.has(updated.state) ? null : updated : current);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
@@ -420,6 +466,7 @@ function App() {
       setBusy(true); setError('');
       const updated = await api<Task>(`/api/tasks/${task.id}/pause`, { method: 'POST', body: '{}' });
       setActiveTask((current) => current?.id === task.id ? updated : current);
+      setProjectOwnerTask((current) => current?.id === task.id ? updated : current);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
@@ -431,6 +478,7 @@ function App() {
       setBusy(true); setError('');
       const updated = await api<Task>(`/api/tasks/${task.id}/resume`, { method: 'POST', body: '{}' });
       setActiveTask((current) => current?.id === task.id ? updated : current);
+      setProjectOwnerTask((current) => current?.id === task.id ? updated : current);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
       setActivity([]); watchTask(task.id);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -441,6 +489,7 @@ function App() {
     recoveryRequestsRef.current.add(task.id);
     const recovering = { ...task, state: 'recovering', error: null };
     setActiveTask((current) => current?.id === task.id ? recovering : current);
+    setProjectOwnerTask((current) => current?.id === task.id ? recovering : current);
     setTasks((current) => current.map((item) => item.id === task.id ? recovering : item));
     setActivity([]); watchTask(task.id); setView('dashboard');
     try {
@@ -450,6 +499,7 @@ function App() {
       try {
         const latest = await api<Task>(`/api/tasks/${task.id}`);
         setActiveTask((current) => current?.id === task.id ? latest : current);
+        setProjectOwnerTask((current) => current?.id === task.id ? releasedOwnershipStates.has(latest.state) ? null : latest : current);
         setTasks((current) => current.map((item) => item.id === task.id ? latest : item));
       } catch { /* Keep the original request error. */ }
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -462,7 +512,7 @@ function App() {
       const retrying = { ...task, state: 'queued', error: null };
       const retrySession = sessions.find((item) => item.id === task.sessionId);
       if (retrySession) { setSession(retrySession); setMessages(await api<Message[]>(`/api/sessions/${retrySession.id}/messages`)); }
-      setActiveTask(retrying); setActivity([]); watchTask(task.id); setView('dashboard');
+      setActiveTask(retrying); setProjectOwnerTask(retrying); setActivity([]); watchTask(task.id); setView('dashboard');
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
   async function retryPush(task: Task) { await api(`/api/tasks/${task.id}/retry-push`, { method: 'POST', body: '{}' }); if (project) await reload(project.id); }
@@ -471,6 +521,7 @@ function App() {
       setBusy(true); setError('');
       const updated = await api<Task>(`/api/tasks/${task.id}/commit-changes`, { method: 'POST', body: '{}' });
       setActiveTask(updated);
+      setProjectOwnerTask(releasedOwnershipStates.has(updated.state) ? null : updated);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
       const refreshes = await Promise.allSettled([
         session ? api<Message[]>(`/api/sessions/${session.id}/messages`).then(setMessages) : Promise.resolve(),
@@ -483,6 +534,7 @@ function App() {
       try {
         const latest = await api<Task>(`/api/tasks/${task.id}`);
         setActiveTask((current) => current?.id === task.id ? latest : current);
+        setProjectOwnerTask((current) => current?.id === task.id ? releasedOwnershipStates.has(latest.state) ? null : latest : current);
         setTasks((current) => current.map((item) => item.id === task.id ? latest : item));
       } catch { /* Keep the original commit error. */ }
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -507,13 +559,14 @@ function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setMonitorBusy(false); }
   }
-  async function forgetProject(id: string) { await api(`/api/projects/${id}`, { method: 'DELETE' }); if (project?.id === id) { setProject(null); setSession(null); setMessages([]); } await reload(); }
+  async function forgetProject(id: string) { await api(`/api/projects/${id}`, { method: 'DELETE' }); if (project?.id === id) { setProject(null); setSession(null); setMessages([]); setActiveTask(null); setProjectOwnerTask(null); } await reload(); }
 
   const currentModels = useMemo(() => {
     try { return activeTask?.models ? JSON.parse(activeTask.models) : null; } catch { return null; }
   }, [activeTask]);
   const uncommittedFileCount = monitor?.changedFiles.length ?? 0;
   const showManualCommit = Boolean(activeTask && activeTask.target !== 'cloud' && manualCommitStates.has(activeTask.state) && uncommittedFileCount > 0);
+  const projectOwnerElsewhere = Boolean(projectOwnerTask && session && projectOwnerTask.sessionId !== session.id);
 
   return (
     <div className="app-shell">
@@ -623,7 +676,8 @@ function App() {
         )}
         <div className="messages" ref={messagesRef}>
           {!project && <Empty icon={<FolderOpen />} title="Choose a project" text="Every conversation and agent process is pinned to a selected directory." />}
-          {project && messages.length === 0 && <Empty icon={<Bot />} title={`Ready in ${project.name}`} text="Describe what you want done. Model selection and agent delegation are automatic." />}
+          {project && messages.length === 0 && !projectOwnerElsewhere && <Empty icon={<Bot />} title={`Ready in ${project.name}`} text="Describe what you want done. Model selection and agent delegation are automatic." />}
+          {projectOwnerElsewhere && projectOwnerTask && <div className="baseline-card"><CircleAlert /><strong>Another conversation is using this project</strong><p>“{projectOwnerTask.title}” is {humanState(projectOwnerTask.state)}. Open that conversation to resume, commit, or stop it.</p><button className="primary" onClick={() => void openProjectOwner()}>Open active task</button></div>}
           {messages.map((message) => (
             <article key={message.id} className={`message ${message.role}`}>
               <div className="message-header">
@@ -658,6 +712,7 @@ function App() {
             {!(activeTask.target === 'cloud' && monitor?.providerState === 'COMPLETED') && <button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> {activeTask.target === 'cloud' ? 'Stop Jules' : 'Stop task'}</button>}
           </div>}
           {activeTask?.state === 'recovery_required' && <div className="monitor-actions"><button className="secondary compact" onClick={() => void resumeTask()} disabled={busy}><Play size={12} fill="currentColor" /> Resume task</button><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
+          {activeTask && ['baseline_required', 'review_disputed'].includes(activeTask.state) && <div className="monitor-actions"><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
           <div className="mode-selector">
             <button
               type="button"
@@ -764,7 +819,9 @@ function App() {
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send(); } }}
               placeholder={
-                scopeWarning
+                projectOwnerElsewhere
+                  ? 'Open the active task before starting work in this project…'
+                  : scopeWarning
                   ? 'Select a specific repository before starting a task…'
                   : executionMode === 'direct'
                   ? directAgent === 'gemma'
@@ -779,7 +836,7 @@ function App() {
               disabled={!session || Boolean(scopeWarning)}
               rows={3}
             />
-            <button className="send-button" onClick={send} disabled={!session || Boolean(scopeWarning) || !input.trim() || Boolean(activeTask && (!terminalStates.has(activeTask.state) || activeTask.state === 'recovery_required' || activeTask.state === 'review_disputed'))}><Send size={17} /></button>
+            <button className="send-button" onClick={send} disabled={!session || Boolean(scopeWarning) || !input.trim() || Boolean(projectOwnerTask)}><Send size={17} /></button>
           </div>
           <small>
             {executionMode === 'direct' ? (
