@@ -162,3 +162,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Introduce `ApiRequestError` with error codes so the frontend can distinguish between transient state races and real failures
 - Add client-side retry for guidance submission during rapid state transitions, showing an informative warning instead of failing silently
 - Extend test suite with roundtrip tests for repair guidance following a task into recovery and concurrent enqueueing under worker cleanup
+
+
+## [2026-08-24 21:47:03] Handoff Update
+- Replace state-dependent dispute/baseline workflows with a single deterministic "Commit & Push Changes" action for stalled tasks
+- Remove model-generated commit summaries and guidance routes; replace with explicit user intent
+- Decouple repair cycle counts from flow control so Jules can iterate indefinitely until review passes or the session fails
+- Add local fallback that re-imports the exact PR head before queuing a real local repair when cloud sessions become unavailable
+- Retain hard Git/PR identity checks as non-negotiable integrity boundaries rather than arbitrary loop limits

@@ -15,58 +15,26 @@ import { JulesApiClient } from '../dist-server/providers/jules/client.js';
 // Phase 13 Dual-Engine Local/Cloud Repair Loop Test Suite
 // ============================================================================
 
-test('Phase 13 Repair Loop — evaluateRepairStrategy selects appropriate strategy based on cycle and state', () => {
+test('Phase 13 Repair Loop — active Jules sessions keep receiving feedback without a repair ceiling', () => {
   const dummyFindings = [{ severity: 'blocking', explanation: 'Null pointer bug' }];
 
-  // Cycle 1: active cloud -> cloud_feedback
-  const dec1 = evaluateRepairStrategy({
-    cycle: 1,
-    maxCycles: 3,
-    maxCloudAttempts: 2,
-    isCloudSessionActive: true,
-    findings: dummyFindings,
-  });
-  assert.equal(dec1.strategy, 'cloud_feedback');
+  for (const cycle of [1, 3, 20]) {
+    const decision = evaluateRepairStrategy({
+      cycle,
+      isCloudSessionActive: true,
+      findings: dummyFindings,
+    });
+    assert.equal(decision.strategy, 'cloud_feedback');
+    assert.equal(decision.cycle, cycle);
+  }
 
-  // Cycle 2: active cloud -> cloud_feedback
-  const dec2 = evaluateRepairStrategy({
-    cycle: 2,
-    maxCycles: 3,
-    maxCloudAttempts: 2,
-    isCloudSessionActive: true,
-    findings: dummyFindings,
-  });
-  assert.equal(dec2.strategy, 'cloud_feedback');
-
-  // Cycle 3: cloud exhausted -> local_takeover
-  const dec3 = evaluateRepairStrategy({
-    cycle: 3,
-    maxCycles: 3,
-    maxCloudAttempts: 2,
-    isCloudSessionActive: true,
-    findings: dummyFindings,
-  });
-  assert.equal(dec3.strategy, 'local_takeover');
-
-  // Cycle 1 but cloud inactive -> local_takeover
-  const decInactive = evaluateRepairStrategy({
-    cycle: 1,
-    maxCycles: 3,
-    maxCloudAttempts: 2,
+  const inactive = evaluateRepairStrategy({
+    cycle: 21,
     isCloudSessionActive: false,
     findings: dummyFindings,
   });
-  assert.equal(decInactive.strategy, 'local_takeover');
-
-  // Cycle 4 (> maxCycles) -> escalate_dispute
-  const decDispute = evaluateRepairStrategy({
-    cycle: 4,
-    maxCycles: 3,
-    maxCloudAttempts: 2,
-    isCloudSessionActive: true,
-    findings: dummyFindings,
-  });
-  assert.equal(decDispute.strategy, 'escalate_dispute');
+  assert.equal(inactive.strategy, 'local_takeover');
+  assert.equal(inactive.cycle, 21);
 });
 
 test('Phase 13 Repair Loop — formatRepairFeedbackPrompt includes findings and verification errors', () => {
@@ -86,7 +54,7 @@ test('Phase 13 Repair Loop — formatRepairFeedbackPrompt includes findings and 
   assert.ok(!prompt.includes('AIzaSySecretToken'));
 });
 
-test('Phase 13 Repair Loop — executeDualEngineRepair orchestrates cloud repair and local takeover', async () => {
+test('Phase 13 Repair Loop — executeDualEngineRepair keeps Jules working at high cycles and takes over only when unavailable', async () => {
   const dbPath = join(tmpdir(), `orchestra-rc-db-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
   const fixtureDir = join(tmpdir(), `orchestra-rc-fix-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(fixtureDir, { recursive: true });
@@ -109,11 +77,11 @@ test('Phase 13 Repair Loop — executeDualEngineRepair orchestrates cloud repair
       state: 'IN_PROGRESS',
     });
 
-    let feedbackSent = false;
+    let feedbackCount = 0;
     const mockFetch = async (url) => {
       const urlStr = String(url);
       if (urlStr.includes('sendMessage') || urlStr.includes('sendFeedback')) {
-        feedbackSent = true;
+        feedbackCount += 1;
         return { ok: true, status: 200, json: async () => ({}) };
       }
       return { ok: true, status: 200, json: async () => ({}) };
@@ -136,58 +104,54 @@ test('Phase 13 Repair Loop — executeDualEngineRepair orchestrates cloud repair
 
     assert.equal(cloudRepairRes.strategy, 'cloud_feedback');
     assert.equal(cloudRepairRes.ok, true);
-    assert.equal(feedbackSent, true);
+    assert.equal(feedbackCount, 1);
 
     const attemptsAfter1 = store.manager.attempts.listByTaskId(task.id);
     assert.equal(attemptsAfter1.length, 1);
     assert.equal(attemptsAfter1[0].target, 'cloud');
     assert.equal(attemptsAfter1[0].worker, 'jules');
 
-    // 2. Cycle 3: Local Takeover
+    // 2. Cycle 20: Jules still receives feedback. The cycle number is telemetry,
+    // not a stop condition.
+    const highCycleRes = await executeDualEngineRepair({
+      taskId: task.id,
+      projectRoot: fixtureDir,
+      remoteSessionId: cloudSession.remoteSessionId,
+      baseSha: 'base-sha-123',
+      headSha: 'head-sha-456',
+      findings: [{ severity: 'blocking', explanation: 'Persistent issue still needs repair' }],
+      cycle: 20,
+      store,
+      julesClient,
+    });
+
+    assert.equal(highCycleRes.strategy, 'cloud_feedback');
+    assert.equal(highCycleRes.ok, true);
+    assert.equal(highCycleRes.cycle, 20);
+    assert.equal(feedbackCount, 2);
+    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 2);
+
+    // 3. Jules becomes unavailable: request a local takeover. The review service must first
+    // import the exact PR head before it queues a real local attempt.
+    store.manager.cloudSessions.update(cloudSession.id, { state: 'FAILED' });
     const takeoverRes = await executeDualEngineRepair({
       taskId: task.id,
       projectRoot: fixtureDir,
       remoteSessionId: cloudSession.remoteSessionId,
       baseSha: 'base-sha-123',
       headSha: 'head-sha-456',
-      findings: [{ severity: 'blocking', explanation: 'Complex fix requiring local environment' }],
-      cycle: 3,
+      findings: [{ severity: 'blocking', explanation: 'Continue locally' }],
+      cycle: 21,
       store,
       julesClient,
     });
 
     assert.equal(takeoverRes.strategy, 'local_takeover');
     assert.equal(takeoverRes.ok, true);
-
-    // Local takeover is only requested here. The review service must first
-    // import the exact PR head before it queues a real local attempt.
-    const attemptsAfter2 = store.manager.attempts.listByTaskId(task.id);
-    assert.equal(attemptsAfter2.length, 1);
-    assert.equal(attemptsAfter2[0].target, 'cloud');
-    assert.equal(attemptsAfter2[0].worker, 'jules');
-
-    const updatedTask = store.getTask(task.id);
-    assert.equal(updatedTask?.target, 'cloud');
+    assert.equal(takeoverRes.cycle, 21);
+    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 2);
     assert.equal(store.listEvents(task.id).at(-1)?.type, 'task.takeover_local');
-
-    // 3. Cycle 4: Dispute Escalation
-    const disputeRes = await executeDualEngineRepair({
-      taskId: task.id,
-      projectRoot: fixtureDir,
-      remoteSessionId: cloudSession.remoteSessionId,
-      baseSha: 'base-sha-123',
-      headSha: 'head-sha-456',
-      findings: [{ severity: 'blocking', explanation: 'Persistent deadlock' }],
-      cycle: 4,
-      store,
-      julesClient,
-    });
-
-    assert.equal(disputeRes.strategy, 'escalate_dispute');
-    assert.equal(disputeRes.ok, false);
-
-    const disputedTask = store.getTask(task.id);
-    assert.equal(disputedTask?.state, 'review_disputed');
+    assert.notEqual(store.getTask(task.id)?.state, 'review_disputed');
 
     store.close();
   } finally {

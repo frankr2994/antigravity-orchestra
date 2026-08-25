@@ -139,17 +139,6 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .activity-card, .baseline-card { border: 1px solid rgba(56,189,248,.2); border-radius: 12px; padding: 13px; background: rgba(56,189,248,.045); }.activity-head { display: flex; align-items: center; gap: 8px; }.activity-card > small { display: block; margin: 6px 0 10px 23px; color: var(--muted); font: 9px 'JetBrains Mono', monospace; }.activity-events { display: grid; gap: 8px; }.activity-events > div { display: grid; grid-template-columns: 7px auto 1fr; align-items: start; gap: 6px; font-size: 10px; }.activity-events p { margin: 0; color: var(--muted); overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }.agent-dot { width: 6px; height: 6px; margin-top: 3px; border-radius: 50%; background: var(--blue); }.agent-dot.codex { background: var(--green); }.agent-dot.gemma { background: var(--amber); }
 .spin { animation: spin 1.2s linear infinite; color: var(--blue); }@keyframes spin { to { transform: rotate(360deg); } }
 .baseline-card { display: grid; gap: 9px; border-color: rgba(251,191,36,.24); background: rgba(251,191,36,.045); }.baseline-card > svg { color: var(--amber); }.baseline-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.disputed-card { border-color: rgba(251,191,36,.4); background: linear-gradient(145deg, rgba(45,30,8,.35), rgba(18,24,35,.6)); }
-.dispute-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
-.steer-box { display: grid; gap: 8px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgba(148,163,184,.1); }
-.steer-findings { margin-bottom: 4px; font-size: 11px; background: rgba(0,0,0,.45); border: 1px solid rgba(251,191,36,.25); border-radius: 8px; padding: 8px 10px; max-height: 220px; overflow-y: auto; }
-.steer-findings summary { font-weight: 600; cursor: pointer; color: var(--amber); margin-bottom: 6px; user-select: none; }
-.steer-findings pre { font-family: 'JetBrains Mono', monospace; font-size: 10px; line-height: 1.45; color: #cbd5e1; white-space: pre-wrap; word-break: break-word; margin: 0; }
-.steer-suggestion-box { margin-bottom: 6px; background: rgba(56,189,248,.08); border: 1px solid rgba(56,189,248,.25); border-radius: 8px; padding: 8px 10px; font-size: 11px; }
-.steer-suggestion-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 4px; }
-.steer-suggestion-title { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; color: var(--cyan); }
-.steer-suggestion-box p { margin: 0; color: #e2e8f0; font-size: 11px; line-height: 1.4; }
-.steer-box textarea { width: 100%; min-height: 60px; padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: rgba(0,0,0,.4); color: var(--text); font-size: 11px; resize: vertical; }
 .state-review_disputed { color: var(--amber); background: rgba(251,191,36,.12); border: 1px solid rgba(251,191,36,.25); }
 
 .quota-tiers-table { display: grid; gap: 12px; margin-top: 10px; }

@@ -29,6 +29,9 @@ export class ProjectTaskScheduler {
     this.abort(taskId, reason);
     await this.runs.get(taskId)?.catch(() => undefined);
   }
+  async waitForExit(taskId: string): Promise<void> {
+    await this.runs.get(taskId)?.catch(() => undefined);
+  }
   isRunning(taskId: string) { return this.controllers.has(taskId); }
   activeTaskId(projectId: string): string | null {
     for (const [taskId] of this.controllers) if (this.store.getTask(taskId)?.projectId === projectId) return taskId;

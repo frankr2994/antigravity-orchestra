@@ -92,7 +92,7 @@ export interface TaskRepairProgressEvent extends BaseTaskEvent {
 
 export interface TaskImplementationRetryEvent extends BaseTaskEvent {
   type: 'task.implementation-retry';
-  payload: { attempt: number; maxAttempts: number; message: string; [key: string]: unknown };
+  payload: { attempt: number; message: string; [key: string]: unknown };
 }
 
 export interface TaskRoutedEvent extends BaseTaskEvent {

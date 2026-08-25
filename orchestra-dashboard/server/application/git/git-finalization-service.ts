@@ -11,6 +11,8 @@ export type GitFinalizationResult =
   | { status: 'skipped'; reason: 'not_git' | 'no_changes'; head: string | null; branch: string | null }
   | { status: 'committed'; commitSha: string; pushStatus: 'pushed' | 'unpushed'; branch: string | null };
 
+export type GitFinalizationOptions = { simple?: boolean };
+
 type GitFinalizationDependencies = {
   summarize: typeof summarizeChanges;
   slice: typeof sliceSemanticCommits;
@@ -31,6 +33,14 @@ const defaultDependencies: GitFinalizationDependencies = {
   handoff: appendHandoff,
 };
 
+async function preserveCommitOnPushFailure(push: typeof pushCurrent, root: string): Promise<{ pushed: boolean; error: string | null }> {
+  try {
+    return await push(root);
+  } catch (error) {
+    return { pushed: false, error: `The commit was created, but Git could not start the push: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
 export function deterministicChangeSummary(paths: string[]) {
   const shown = paths.slice(0, 8);
   const remaining = paths.length - shown.length;
@@ -43,6 +53,13 @@ export function deterministicChangeSummary(paths: string[]) {
   };
 }
 
+export function simpleChangeSummary(paths: string[]) {
+  return {
+    title: 'chore: commit uncommitted changes',
+    summary: `Commit ${paths.length} uncommitted project file${paths.length === 1 ? '' : 's'} at the user's request.`,
+  };
+}
+
 export class GitFinalizationService {
   private readonly dependencies: GitFinalizationDependencies;
 
@@ -50,11 +67,26 @@ export class GitFinalizationService {
     this.dependencies = { ...defaultDependencies, ...dependencies };
   }
 
-  async finalize(taskId: string, project: Project, request: string, transition: (state: 'summarizing' | 'committing' | 'pushing') => void, emit: Emit): Promise<GitFinalizationResult> {
+  async finalize(taskId: string, project: Project, request: string, transition: (state: 'summarizing' | 'committing' | 'pushing') => void, emit: Emit, options: GitFinalizationOptions = {}): Promise<GitFinalizationResult> {
     const current = await this.dependencies.status(project.root);
     const projectFiles = current.files.filter((file) => !isOrchestraInternalPath(file.path));
     if (!current.isGit) return { status: 'skipped', reason: 'not_git', head: current.head, branch: current.branch };
     if (!projectFiles.length) return { status: 'skipped', reason: 'no_changes', head: current.head, branch: current.branch };
+    if (options.simple) {
+      const paths = projectFiles.map((file) => file.path);
+      const summary = simpleChangeSummary(paths);
+      transition('committing');
+      const commitSha = await this.dependencies.commit(project.root, paths, summary.title, summary.summary);
+      emit('git', 'git.commit', { kind: 'manual', sha: commitSha, title: summary.title, files: paths });
+      this.store.updateTask(taskId, { commitSha });
+      transition('pushing');
+      const pushed = await preserveCommitOnPushFailure(this.dependencies.push, project.root);
+      const pushStatus = pushed.pushed ? 'pushed' : 'unpushed';
+      this.store.updateTask(taskId, { pushStatus });
+      this.store.createGitOperation(project.id, taskId, 'manual', commitSha, current.branch, pushStatus, pushed.error);
+      emit('git', 'git.push', pushed);
+      return { status: 'committed', commitSha, pushStatus, branch: current.branch };
+    }
     transition('summarizing');
     const diff = await this.dependencies.diff(project.root);
     let summary: { title: string; summary: string };
@@ -89,7 +121,7 @@ export class GitFinalizationService {
     }
     this.store.updateTask(taskId, { commitSha: latestSha });
     transition('pushing');
-    const pushed = await this.dependencies.push(project.root);
+    const pushed = await preserveCommitOnPushFailure(this.dependencies.push, project.root);
     const pushStatus = pushed.pushed ? 'pushed' : 'unpushed';
     this.store.updateTask(taskId, { pushStatus });
     this.store.createGitOperation(project.id, taskId, 'task', latestSha, updated.branch, pushStatus, pushed.error);

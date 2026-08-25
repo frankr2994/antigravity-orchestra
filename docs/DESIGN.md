@@ -701,3 +701,42 @@ Repair guidance was accepted only while a task remained in `review_disputed`. If
 - Guidance submitted during the review-to-recovery race resumes the same preserved task and is stored once.
 - A recovery requested during worker cleanup is queued for execution after the old run exits.
 - The dashboard self-reconciles stale state instead of leaving the user with the former red `TASK_STATE_CHANGED` banner and a manual refresh loop.
+
+## 2026-08-24: Explicit manual commit replaces dispute and baseline commit workflows
+
+### Background
+
+The bounded repair/dispute workflow accumulated several state-dependent actions: model-generated guidance, disputed approval, recovery reconciliation, and a separate model-driven baseline commit. Those paths made a simple preserved Git diff depend on task-state timing and optional model calls. Repair ceilings also stopped useful local or Jules work even when the user preferred to let it continue and use Stop when necessary.
+
+### Decision
+
+- Expose one local action when a stopped or recoverable task has project changes: `Commit & Push Changes`.
+- Commit every visible non-Orchestra project path once with deterministic commit text, then push the current upstream. This explicit action does not invoke Gemma, generate a diff summary, slice semantic commits, or update `HANDOFF.md`.
+- Return stable application errors for a missing repository, an empty diff, an in-progress task, duplicate clicks, and operational Git failures. Restore the prior task state when Git fails before completion, and make completed repeats idempotent.
+- Restore paused, baseline-required, recovery-required, disputed, and failed local tasks in the dashboard after refresh so their preserved changes and available action remain visible. Keep Resume and Stop explicit for recoverable work.
+- Remove the guidance/suggestion routes, disputed-approval route, baseline-resolution route, their UI, and automatic model-driven baseline commits.
+- Remove local implementation and review repair-count ceilings. Continue fresh repair turns until review and verification pass or the user pauses/stops the task.
+- Keep Jules as the repair owner while its session can accept feedback, regardless of cycle number. Re-send persisted findings when Jules returns the same blocked PR head. Take over locally only when the Jules session is unavailable or rejects feedback, after synchronizing the exact reviewed head.
+- Retain hard Git and PR identity stops such as target-branch movement or repository mismatch; these are integrity boundaries, not repair-cycle limits.
+
+### Reasons
+
+- Committing preserved files is a Git operation with deterministic preconditions and does not require model judgment.
+- One visible action and stable error vocabulary are easier to understand and retry than state-racing dispute and guidance workflows.
+- The user explicitly accepts the possibility of many repair cycles and owns the decision to stop a runaway task.
+- Jules provides high-value cloud implementation capacity, so an arbitrary cycle number should not force a more expensive local path or abandon a repairable PR.
+
+### Alternatives
+
+- Keep model-generated commit summaries because local inference is unmetered: rejected because availability, parsing, and extra state transitions still make the explicit commit action less reliable.
+- Stop after a fixed number of no-progress repairs: rejected because the limit created more recovery work than it prevented and contradicted user-controlled Stop/Pause.
+- Ignore an unchanged blocked Jules head: rejected because the persisted findings can be sent again without spending another independent-review call.
+- Remove Git/PR identity stops together with cycle limits: rejected because those stops prevent integrating unreviewed or unrelated code and cannot be replaced by user cancellation.
+
+### Impact
+
+- A preserved local diff is represented by a file count and one deterministic commit/push button.
+- Manual commit does not consume local-model or provider inference and cannot fail because an LM response is unavailable or malformed.
+- Repair counters are informational only; cycle 20 follows the same repair path as cycle 1.
+- Jules PRs continue through feedback, exact-head review, verification, safe integration, and local synchronization without an arbitrary repair ceiling.
+- This decision supersedes the bounded-attempt, dispute-guidance, and local-model finalization portions of the preceding 2026-08-24 decisions.

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import type { Store } from '../../db.js';
 import type { TaskManager } from '../../tasks.js';
-import { answerRunQuestion, explainRunHealth, suggestSteeringGuidance } from '../../agents.js';
+import { answerRunQuestion, explainRunHealth } from '../../agents.js';
 import { pushCurrent } from '../../git.js';
 import { writeEvent } from '../sse/stream.js';
 import { ApplicationError } from '../../application/errors.js';
@@ -160,32 +160,10 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
     }
   });
 
-  router.post('/tasks/:id/approve-disputed', async (req, res, next) => {
+  router.post('/tasks/:id/commit-changes', async (req, res, next) => {
     try {
-      const task = await tasks.approveDisputed(requireTask(req.params.id).id);
+      const task = await tasks.commitUncommittedChanges(requireTask(req.params.id).id);
       res.status(202).json(task);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/tasks/:id/steer-disputed', async (req, res, next) => {
-    try {
-      const guidance = String(req.body?.guidance || '').trim();
-      const task = await tasks.steerDisputed(requireTask(req.params.id).id, guidance);
-      res.status(202).json(task);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/projects/:id/baseline', async (req, res, next) => {
-    try {
-      const project = requireProject(req.params.id);
-      const task = requireTask(String(req.body?.taskId || ''));
-      if (task.projectId !== project.id) throw new ApplicationError('TASK_PROJECT_MISMATCH', 'The baseline task does not belong to the selected project.', 409);
-      await tasks.resolveBaseline(task.id);
-      res.status(202).json({ ok: true });
     } catch (error) {
       next(error);
     }
@@ -201,27 +179,6 @@ export function createTasksRouter(store: Store, tasks: TaskManager): Router {
         state: result.pushed ? 'completed' : 'completed_unpushed',
       });
       res.json(result);
-    } catch (error) {
-      next(error);
-    }
-  });
-
-  router.post('/tasks/:id/suggest-steering', async (req, res, next) => {
-    try {
-      const task = requireTask(req.params.id);
-      const project = requireProject(task.projectId);
-      const events = store.listEvents(task.id);
-      const lastReviewEvent = events.findLast(
-        (e) => e.type === 'agent.completed' && ((e.payload as Record<string, unknown> | null)?.role === 'review')
-      );
-      const payload = lastReviewEvent?.payload as Record<string, unknown> | undefined;
-      const reviewBlockers = typeof payload?.summary === 'string' ? payload.summary : 'Review was rejected without specific blockers.';
-      const suggestion = await suggestSteeringGuidance({
-        root: project.root,
-        request: task.prompt,
-        reviewBlockers,
-      });
-      res.json({ suggestion });
     } catch (error) {
       next(error);
     }

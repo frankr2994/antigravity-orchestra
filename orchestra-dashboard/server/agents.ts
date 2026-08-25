@@ -710,36 +710,6 @@ export function selectReviewProfile(input: {
   return { model: 'gpt-5.6-terra', effort: 'medium' as const, reason: 'diff-scoped implementation review' };
 }
 
-export async function suggestSteeringGuidance(input: {
-  root: string;
-  request: string;
-  reviewBlockers: string;
-  signal?: AbortSignal;
-}): Promise<string> {
-  const prompt = `You are a Principal Software Architect guiding an AI coding agent. The user's task was reviewed and blocked with the following feedback.
-
-User Request:
-${input.request}
-
-Review Blocker(s) from Auditor:
-${input.reviewBlockers.slice(0, 4000)}
-
-Provide a concise, direct, 2-3 sentence steering instruction for Antigravity explaining EXACTLY what code modifications or test additions to make so the implementation cleanly satisfies the auditor. Do not write filler. Give concrete instructions.`;
-
-  const result = await runAntigravity({
-    root: input.root,
-    prompt,
-    model: 'gemini-3.7-flash-high',
-    effort: 'high',
-    mutating: false,
-    conversationId: null,
-    signal: input.signal || new AbortController().signal,
-    onOutput: () => {},
-  });
-
-  return result.text.trim();
-}
-
 export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; recovery?: boolean; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<AgentRunResult> {
   const prompt = buildAntigravityPrompt(input);
   const args = buildAntigravityArgs({ ...input, prompt });

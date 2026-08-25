@@ -6,11 +6,10 @@ import type { TaskEventType } from './domain/index.js';
 import { ProjectTaskScheduler } from './application/tasks/project-task-scheduler.js';
 import { TaskEventPublisher } from './application/tasks/task-event-publisher.js';
 import { GitFinalizationService } from './application/git/git-finalization-service.js';
-import { appendHandoff } from './application/git/handoff.js';
 export { appendHandoff } from './application/git/handoff.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeChanges, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
-import { commitPaths, connectGitHubRemote, extractGitHubRemoteUrl, getChangedFilesFromBase, getDiff, getDiffFromBase, getGitStatus, getRecentCommits, pushCurrent, safeCommitTitle } from './git.js';
+import { connectGitHubRemote, extractGitHubRemoteUrl, getChangedFilesFromBase, getDiff, getDiffFromBase, getGitStatus, getRecentCommits } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
 import { verificationFailure as describeVerificationFailure, verifyProject } from './verification.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
@@ -22,8 +21,7 @@ export class TaskManager {
   private readonly scheduler: ProjectTaskScheduler;
   private readonly gitFinalization: GitFinalizationService;
   private readonly contextWarnings = new Set<string>();
-  private readonly baselineResolutions = new Set<string>();
-  private readonly disputedApprovals = new Set<string>();
+  private readonly manualCommits = new Set<string>();
   private readonly controlRequests = new Map<string, 'pause' | 'stop'>();
   private antigravityModels: string[] = [];
 
@@ -139,7 +137,7 @@ export class TaskManager {
         data: { ...checkpoint.data, status: 'queued', localAttemptId: attempt.id } });
     }
     this.store.updateTask(taskId, { state: 'recovering' });
-    this.emit(taskId, 'system', 'task.resumed', { message: 'The reviewed Jules PR head is local. Starting the bounded Antigravity repair now.', source: 'jules_local_takeover' });
+    this.emit(taskId, 'system', 'task.resumed', { message: 'The reviewed Jules PR head is local. Starting Antigravity repair; it will continue until review passes or you stop the task.', source: 'jules_local_takeover' });
     this.emit(taskId, 'system', 'task.state', { state: 'recovering' });
     this.enqueue(taskId);
     return requireTask(this.store, taskId);
@@ -150,7 +148,7 @@ export class TaskManager {
     return this.resumePreservedTask(task);
   }
 
-  private async resumePreservedTask(task: TaskRecord, guidance?: string): Promise<TaskRecord> {
+  private async resumePreservedTask(task: TaskRecord): Promise<TaskRecord> {
     const disposition = recoveryDisposition(task.state, this.scheduler.isRunning(task.id));
     if (disposition === 'already_active') return task;
     if (disposition === 'reject') throw new ApplicationError('TASK_NOT_RECOVERABLE', 'Only a failed or recovery-required task with preserved changes can be resumed.', 409,
@@ -161,35 +159,13 @@ export class TaskManager {
     const recoverableFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
     if (!classification?.mutating || !status.isGit || !recoverableFiles.length) throw new ApplicationError('TASK_HAS_NO_RECOVERABLE_CHANGES', 'This task has no recoverable uncommitted implementation changes.', 409,
       { nextAction: 'Use Retry to start again from the current clean project state.', retryable: true });
-    const normalizedGuidance = guidance?.trim();
-    if (normalizedGuidance) this.recordRecoveryGuidance(task, normalizedGuidance);
     this.transition(task.id, 'recovering');
-    if (normalizedGuidance) {
-      this.emit(task.id, 'system', 'task.steer', {
-        guidance: normalizedGuidance,
-        message: 'Resuming preserved task changes with the user-supplied repair guidance.',
-        resumedFrom: task.state,
-      });
-    }
     this.emit(task.id, 'system', 'task.recovery', {
-      message: normalizedGuidance
-        ? 'Resuming the preserved task and applying the supplied repair guidance.'
-        : 'Resuming the failed task with its preserved uncommitted changes.',
+      message: 'Resuming the failed task with its preserved uncommitted changes.',
     });
     if (this.scheduler.isRunning(task.id)) this.scheduler.enqueueAfterCurrent(task.id);
     else this.enqueue(task.id);
     return requireTask(this.store, task.id);
-  }
-
-  private recordRecoveryGuidance(task: TaskRecord, guidance: string) {
-    const content = `Steering guidance:\n${guidance}`;
-    if (this.latestTaskGuidanceMatches(task, content)) return;
-    this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content });
-  }
-
-  private latestTaskGuidanceMatches(task: TaskRecord, content: string) {
-    const lastTaskMessage = this.store.listMessages(task.sessionId).filter((message) => message.taskId === task.id).at(-1);
-    return lastTaskMessage?.role === 'user' && lastTaskMessage.content === content;
   }
 
   async retry(taskId: string) {
@@ -210,134 +186,68 @@ export class TaskManager {
     this.enqueue(taskId);
   }
 
-  async resolveBaseline(taskId: string) {
-    const task = requireTask(this.store, taskId);
-    if (task.state !== 'baseline_required') throw new Error(`This task is ${task.state}, so its baseline cannot be resolved again.`);
-    if (this.scheduler.isRunning(taskId)) throw new Error('This task is already running. Open its original conversation to follow progress.');
-    if (this.baselineResolutions.has(taskId)) throw new ApplicationError('BASELINE_ALREADY_RUNNING', 'Gemma is already reviewing and committing this baseline.', 409);
-    this.baselineResolutions.add(taskId);
-    const project = requireProject(this.store, task.projectId);
-    try {
-      const status = await getGitStatus(project.root);
-      if (!status.isGit) throw new ApplicationError('BASELINE_NOT_GIT', 'This project is not a Git repository.', 409);
-      const baselineFiles = status.files.filter((file) => !isOrchestraInternalPath(file.path));
-      if (baselineFiles.length) {
-        this.emit(task.id, 'gemma', 'agent.started', { phase: 'baseline-review', files: baselineFiles.length });
-        let summary;
-        try {
-          const diff = await getDiff(project.root);
-          summary = await summarizeChanges(diff, 'Review and preserve changes that existed before the dashboard task.');
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error);
-          this.emit(task.id, 'gemma', 'warning', { message: `Baseline review could not complete. The working tree was left unchanged. ${detail}` });
-          throw new ApplicationError('BASELINE_REVIEW_UNAVAILABLE', 'Gemma could not finish reviewing the existing changes. Nothing was committed; check the task activity and retry.', 503, { cause: error });
-        }
-        appendHandoff(project.root, summary.summary, 'Baseline changes');
-        const updated = await getGitStatus(project.root);
-        const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
-        if (!paths.length) throw new ApplicationError('BASELINE_EMPTY', 'No project files remained after excluding Orchestra internal state from the baseline.', 409);
-        const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore: preserve existing changes'), summary.summary);
-        const pushed = await pushCurrent(project.root);
-        this.store.createGitOperation(project.id, task.id, 'baseline', sha, updated.branch, pushed.pushed ? 'pushed' : 'unpushed', pushed.error);
-        this.emit(task.id, 'git', 'git.commit', { kind: 'baseline', sha, title: summary.title, files: paths });
-        this.emit(task.id, 'git', 'git.push', pushed);
-        this.emit(task.id, 'gemma', 'agent.completed', { phase: 'baseline-review', sha, summary: summary.summary });
-      }
-      const latestProject = requireProject(this.store, project.id);
-      const onboarding = await onboardProject(this.store, { ...latestProject, onboardingStatus: 'pending' });
-      this.emit(task.id, 'system', 'project.onboarding', onboarding);
-      this.store.updateTask(task.id, { state: 'queued', error: null });
-      this.emit(task.id, 'system', 'task.state', { state: 'queued' });
-      this.enqueue(task.id);
-    } finally {
-      this.baselineResolutions.delete(taskId);
-    }
-  }
-
-  async approveDisputed(taskId: string): Promise<TaskRecord> {
+  async commitUncommittedChanges(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
     if (task.state === 'completed' || task.state === 'completed_unpushed') return task;
-    if (task.state !== 'review_disputed') {
-      throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
-        { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
-    }
+    const allowedStates: TaskState[] = ['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'failed'];
+    if (!allowedStates.includes(task.state)) throw new ApplicationError('TASK_STILL_RUNNING', `This task is ${task.state.replaceAll('_', ' ')}. Stop or pause it before committing its working changes.`, 409,
+      { nextAction: 'Stop or pause the task, then use Commit & Push Changes.', retryable: true });
     if (task.target === 'cloud') {
-      throw new ApplicationError('JULES_REVIEW_ACTION_REQUIRED', 'A Jules PR handoff cannot be approved as an uncommitted local diff.', 409,
-        { nextAction: 'Use the Jules task panel to retry or resolve the PR review handoff.', retryable: false });
+      throw new ApplicationError('LOCAL_CHANGES_REQUIRED', 'Cloud tasks do not own an uncommitted local working tree.', 409,
+        { nextAction: 'Use the Jules task panel for the remote pull request.', retryable: false });
     }
-    if (this.disputedApprovals.has(taskId)) {
-      throw new ApplicationError('DISPUTED_APPROVAL_IN_PROGRESS', 'This approval is already finalizing the reviewed files.', 409,
-        { nextAction: 'Wait for the current finalization to finish; the task will refresh automatically.', retryable: true });
+    if (this.manualCommits.has(taskId)) {
+      throw new ApplicationError('COMMIT_IN_PROGRESS', 'These changes are already being committed.', 409,
+        { nextAction: 'Wait for the current commit to finish.', retryable: true });
     }
-    this.disputedApprovals.add(taskId);
+    this.manualCommits.add(taskId);
     try {
+      await this.scheduler.waitForExit(taskId);
       const project = requireProject(this.store, task.projectId);
-      const classification = parseTaskClassification(task.classification);
-      const models = task.models ? JSON.parse(task.models) : selectModels(classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title });
-      const finalized = await this.finalizeGit(taskId, project, task.prompt, classification || { type: 'implementation', mutating: true, complexity: 'normal', riskFlags: [], codexRole: 'none', title: task.title }, models);
+      const finalized = await this.gitFinalization.finalize(
+        taskId,
+        project,
+        task.prompt,
+        (state) => this.transition(taskId, state),
+        (agent, type, payload) => this.emit(taskId, agent, type, payload),
+        { simple: true },
+      );
       if (finalized.status === 'skipped') {
         const message = finalized.reason === 'not_git'
-          ? 'Orchestra cannot finalize this approval because the project is no longer a Git repository.'
-          : 'There is no uncommitted project diff to approve. The files may already have been committed or changed outside Orchestra.';
-        this.store.updateTask(taskId, { state: 'review_disputed', error: message });
-        this.emit(taskId, 'system', 'warning', {
-          message,
-          code: finalized.reason === 'not_git' ? 'DISPUTED_PROJECT_NOT_GIT' : 'DISPUTED_DIFF_MISSING',
-          nextAction: finalized.reason === 'not_git'
-            ? 'Restore the Git repository, then retry approval.'
-            : 'Refresh the task and inspect Git status. If the files were committed manually, use that commit instead of retrying a nonexistent diff.',
-        });
+          ? 'This project is not a Git repository.'
+          : 'There are no uncommitted project changes to commit.';
         throw new ApplicationError(
-          finalized.reason === 'not_git' ? 'DISPUTED_PROJECT_NOT_GIT' : 'DISPUTED_DIFF_MISSING',
+          finalized.reason === 'not_git' ? 'PROJECT_NOT_GIT' : 'NO_UNCOMMITTED_CHANGES',
           message,
           409,
           { nextAction: finalized.reason === 'not_git'
-            ? 'Restore the Git repository, then retry approval.'
-            : 'Refresh the task and inspect Git status; Orchestra did not create an empty commit.', retryable: false },
+            ? 'Initialize or restore Git before committing.'
+            : 'Refresh the task; no empty commit was created.', retryable: false },
         );
       }
-      this.complete(taskId, `Task changes approved and finalized in commit ${finalized.commitSha.slice(0, 8)} after review dispute.`, 'antigravity');
+      this.complete(taskId, `Committed ${finalized.commitSha.slice(0, 8)}${finalized.pushStatus === 'pushed' ? ' and pushed it to the current upstream branch.' : '. The commit is local because the push did not succeed.'}`, 'system');
       return requireTask(this.store, taskId);
     } catch (error) {
       if (error instanceof ApplicationError) throw error;
-      const message = 'Orchestra could not finish the approved Git commit. The project changes are preserved.';
+      const message = 'Git could not commit the uncommitted changes. The files were left in place.';
       const latest = requireTask(this.store, taskId);
-      if (['review_disputed', 'summarizing', 'committing', 'pushing'].includes(latest.state)) {
-        this.store.updateTask(taskId, { state: 'review_disputed', error: message });
+      if (['summarizing', 'committing', 'pushing'].includes(latest.state)) {
+        this.store.updateTask(taskId, { state: task.state, error: message });
         this.emit(taskId, 'system', 'warning', {
           message,
-          code: 'DISPUTED_APPROVAL_FAILED',
+          code: 'COMMIT_CHANGES_FAILED',
           detail: error instanceof Error ? error.message : String(error),
-          nextAction: 'Check the task activity for the failed Git phase, correct the repository issue, then retry approval.',
+          nextAction: 'Correct the reported Git problem, then click Commit & Push Changes again.',
         });
       }
-      throw new ApplicationError('DISPUTED_APPROVAL_FAILED', message, 409, {
+      throw new ApplicationError('COMMIT_CHANGES_FAILED', message, 409, {
         cause: error,
-        nextAction: 'Check the task activity for the failed Git phase, correct the repository issue, then retry approval.',
+        nextAction: 'Correct the reported Git problem, then click Commit & Push Changes again.',
         retryable: true,
       });
     } finally {
-      this.disputedApprovals.delete(taskId);
+      this.manualCommits.delete(taskId);
     }
-  }
-
-  async steerDisputed(taskId: string, guidance: string): Promise<TaskRecord> {
-    const task = requireTask(this.store, taskId);
-    if (task.target === 'cloud') throw new ApplicationError('JULES_REVIEW_ACTION_REQUIRED', 'A Jules PR handoff must be steered through its Jules session.', 409,
-      { nextAction: 'Use the Jules task panel to send feedback or retry the PR review handoff.', retryable: false });
-    if (!guidance.trim()) throw new ApplicationError('DISPUTED_GUIDANCE_REQUIRED', 'Steering guidance cannot be empty.', 400,
-      { nextAction: 'Describe the repair you want Antigravity to make, then retry.', retryable: false });
-    if (task.state === 'recovery_required') return this.resumePreservedTask(task, guidance);
-    if (['recovering', 'running', 'reviewing', 'verifying'].includes(task.state)
-      && this.latestTaskGuidanceMatches(task, `Steering guidance:\n${guidance.trim()}`)) return task;
-    if (task.state !== 'review_disputed') throw new ApplicationError('TASK_STATE_CHANGED', `This task is now ${task.state.replaceAll('_', ' ')} and no longer has a pending review dispute.`, 409,
-      { nextAction: 'Refresh the task to see its current state and available actions.', retryable: false });
-    this.store.addMessage({ sessionId: task.sessionId, taskId: task.id, role: 'user', agent: 'system', content: `Steering guidance:\n${guidance.trim()}` });
-    this.store.updateTask(taskId, { state: 'recovering', error: null });
-    this.emit(taskId, 'system', 'task.steer', { guidance: guidance.trim(), message: 'Resuming task with user-supplied steering guidance.' });
-    this.emit(taskId, 'system', 'task.state', { state: 'recovering', message: 'Repair guidance accepted; the same task is resuming.' });
-    this.enqueue(taskId);
-    return requireTask(this.store, taskId);
   }
 
   activeTaskId(projectId: string) {
@@ -557,23 +467,12 @@ export class TaskManager {
       let status = await getGitStatus(project.root);
       const projectChanges = status.files.filter((file) => !isOrchestraInternalPath(file.path));
       if (classification.mutating && status.isGit && projectChanges.length && !recovery) {
-        try {
-          const diff = await getDiff(project.root, 35_000);
-          const summary = await summarizeChanges(diff, 'Review and preserve existing working tree modifications before task execution.');
-          appendHandoff(project.root, summary.summary, 'Auto-committed baseline');
-          const updated = await getGitStatus(project.root);
-          const paths = updated.files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path));
-          if (paths.length) {
-            const sha = await commitPaths(project.root, paths, safeCommitTitle(summary.title, 'chore(baseline): preserve existing working tree changes'), summary.summary);
-            this.emit(taskId, 'git', 'git.commit', { kind: 'baseline', sha, title: summary.title, files: paths });
-            this.emit(taskId, 'gemma', 'agent.completed', { phase: 'auto-baseline', sha, summary: summary.summary });
-            status = await getGitStatus(project.root);
-          }
-        } catch {
-          this.transition(taskId, 'baseline_required');
-          this.emit(taskId, 'git', 'git.baseline-required', { files: projectChanges, message: 'Existing external changes must be reviewed and committed separately before this task can modify the project.' });
-          return;
-        }
+        this.transition(taskId, 'baseline_required');
+        this.emit(taskId, 'git', 'git.baseline-required', {
+          files: projectChanges,
+          message: `${projectChanges.length} project file${projectChanges.length === 1 ? ' has' : 's have'} uncommitted changes. Use Commit & Push Changes to commit them.`,
+        });
+        return;
       }
       if (classification.mutating && status.isGit && projectChanges.length && recovery) {
         this.emit(taskId, 'system', 'task.recovery', { message: 'Continuing from changes owned by this failed task; they will not be committed as a separate baseline.' });
@@ -728,8 +627,7 @@ export class TaskManager {
       if (classification.mutating) {
         let progress = implementationChangeState(status.head, await getGitStatus(project.root));
         if (progress === 'committed') throw new Error('Antigravity committed project changes directly. Orchestra stopped because it can no longer review and finalize the complete uncommitted change set safely.');
-        const maxImplementationRetries = 1;
-        for (let retryAttempt = 1; progress === 'none' && retryAttempt <= maxImplementationRetries; retryAttempt += 1) {
+        for (let retryAttempt = 1; progress === 'none' && !signal.aborted; retryAttempt += 1) {
           let codexGuidance = '';
           this.transition(taskId, 'reviewing');
           this.emit(taskId, 'system', 'task.model-takeover', { message: `The implementation turn produced no reviewable diff. Codex is taking over failure diagnosis before fresh Antigravity attempt ${retryAttempt + 1}.`, from: 'antigravity', to: 'codex-diagnosis', attempt: retryAttempt });
@@ -746,7 +644,7 @@ export class TaskManager {
             this.emit(taskId, 'codex', 'warning', { message: `Codex failover diagnosis was unavailable; Gemma's guidance and deterministic retry policy will continue. ${error instanceof Error ? error.message : String(error)}` });
           }
           this.transition(taskId, 'running');
-          this.emit(taskId, 'system', 'task.implementation-retry', { attempt: retryAttempt, maxAttempts: maxImplementationRetries, message: `Orchestra is starting fresh foreground implementation attempt ${retryAttempt + 1} with Gemma/Codex recovery guidance.` });
+          this.emit(taskId, 'system', 'task.implementation-retry', { attempt: retryAttempt, message: `Orchestra is starting fresh foreground implementation attempt ${retryAttempt + 1} with Gemma/Codex recovery guidance. It will continue until work is produced or you stop the task.` });
           agentResult = await runAntigravityWithFailover({
             root: project.root,
             prompt: `The prior implementation turn produced no project file changes. Implement the original request now using the recovery guidance below. Work directly in this foreground turn: do not invoke or wait for subagents, delegate the task, use scheduled waits, return another plan, request approval, or stop at analysis. Create or modify the necessary project files, run synchronous verification, and leave the complete changes uncommitted for Orchestra review.\n\nOriginal request:\n${task.prompt}\n\nGemma failure guidance:\n${agentResult.continuationGuidance || 'Inspect the project and finish the request directly.'}\n\nCodex failure diagnosis:\n${codexGuidance || 'No Codex diagnosis was available; follow the deterministic foreground requirements.'}`,
@@ -762,12 +660,12 @@ export class TaskManager {
           hadIncompleteAgentRun ||= agentResult.incomplete;
           if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
           if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
-          if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's foreground retry ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra will continue with any preserved diff or the next bounded failover attempt.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: retryAttempt });
+          if (agentResult.incomplete) this.emit(taskId, 'system', 'task.provider-recovery', { message: `Antigravity's foreground retry ended with status ${agentResult.terminalStatus || 'ERROR'}. Orchestra will continue with any preserved diff or another attempt until you stop the task.`, provider: 'antigravity', status: agentResult.terminalStatus, attempt: retryAttempt });
           else this.emit(taskId, 'antigravity', 'agent.completed', { retry: retryAttempt, summary: agentResult.text.slice(-5000) });
           progress = implementationChangeState(status.head, await getGitStatus(project.root));
           if (progress === 'committed') throw new Error('Antigravity committed project changes directly during the automatic retry. Orchestra stopped because it cannot safely review and finalize that hidden change set.');
         }
-        if (progress === 'none') throw new Error(`Implementation produced no project file changes after ${maxImplementationRetries + 1} foreground attempts. Orchestra exhausted bounded automatic alternatives without a reviewable diff.`);
+        if (signal.aborted) return;
       }
 
       if (!classification.mutating && evidence) agentResult.text = await this.postflight(taskId, project.root, task.prompt, agentResult.text, evidence);
@@ -785,10 +683,9 @@ export class TaskManager {
           let previousFindings = '';
           let previousReview = '';
           let previousRepairChanged = true;
-          let noProgressEscalations = 0;
           let verificationPassed = false;
-          const maxRepairAttempts = 2;
-          for (let cycle = 0; cycle <= maxRepairAttempts; cycle += 1) {
+          for (let cycle = 0; !verificationPassed; cycle += 1) {
+            if (signal.aborted) return;
             const reviewStatus = await getGitStatus(project.root);
             const changedFiles = (reviewBaseSha
               ? await getChangedFilesFromBase(project.root, reviewBaseSha)
@@ -849,30 +746,7 @@ export class TaskManager {
             const findings = reviewFingerprint(review);
             const repeatedWithoutProgress = Boolean(previousFindings && findings === previousFindings && !previousRepairChanged);
             if (repeatedWithoutProgress) {
-              noProgressEscalations += 1;
-              if (noProgressEscalations > 1) {
-                this.transition(taskId, 'review_disputed');
-                this.emit(taskId, 'system', 'task.review-disputed', {
-                  reason: 'Repeated repairs produced no progress on the same review blockers.',
-                  findings,
-                  reviewSummary: review.slice(-3000),
-                  changedFiles,
-                  message: 'Codex confirmed the same blockers after multiple repairs with no diff progress. You can approve the preserved diff or steer the repair.',
-                });
-                return;
-              }
-              this.emit(taskId, 'system', 'task.model-takeover', { message: 'Codex confirmed the same blockers after a no-progress repair. Orchestra is giving the escalated review to a fresh Antigravity conversation for one alternate foreground repair before requiring attention.', from: 'codex-review', to: 'antigravity-fresh-repair', cycle: cycle + 1 });
-            } else noProgressEscalations = 0;
-            if (cycle === maxRepairAttempts) {
-              this.transition(taskId, 'review_disputed');
-              this.emit(taskId, 'system', 'task.review-disputed', {
-                reason: `Automatic repair reached its limit of ${maxRepairAttempts} cycles.`,
-                findings,
-                reviewSummary: review.slice(-3000),
-                changedFiles,
-                message: `Automatic repair paused after ${maxRepairAttempts} cycles without full consensus. You can approve and commit the preserved diff directly, or provide specific repair guidance.`,
-              });
-              return;
+              this.emit(taskId, 'system', 'task.model-takeover', { message: 'Codex confirmed the same blockers after a no-progress repair. Orchestra is starting another fresh Antigravity repair conversation and will keep trying until review passes or you stop the task.', from: 'codex-review', to: 'antigravity-fresh-repair', cycle: cycle + 1 });
             }
             const beforeRepair = diffFingerprint(reviewBaseSha ? await getDiffFromBase(project.root, reviewBaseSha) : await getDiff(project.root));
             this.transition(taskId, 'running');
@@ -885,9 +759,8 @@ export class TaskManager {
             previousRepairChanged = beforeRepair !== afterRepair;
             previousFindings = findings;
             previousReview = review;
-            this.emit(taskId, 'system', 'task.repair-progress', { attempt: cycle + 1, maxAttempts: maxRepairAttempts, changed: previousRepairChanged });
+            this.emit(taskId, 'system', 'task.repair-progress', { attempt: cycle + 1, changed: previousRepairChanged, message: `Automatic repair ${cycle + 1} finished; returning the changes to review.` });
           }
-          if (!verificationPassed) throw new Error('Automatic review and repair ended without a passing deterministic verification result.');
 
           await this.finalizeGit(taskId, project, task.prompt, classification, models);
           if (hadIncompleteAgentRun) {
@@ -944,7 +817,7 @@ export class TaskManager {
     return response;
   }
 
-  private complete(taskId: string, result: string, agent: 'gemma' | 'antigravity' | 'codex') {
+  private complete(taskId: string, result: string, agent: AgentName) {
     const task = requireTask(this.store, taskId);
     const state: TaskState = task.pushStatus === 'unpushed' ? 'completed_unpushed' : 'completed';
     this.store.updateTask(taskId, { state, result });
@@ -1125,7 +998,7 @@ function taskNextAction(state: TaskState, providerState: string | null): string 
   if (providerState === 'COMPLETED' && ['running', 'reviewing', 'verifying', 'committing', 'pushing'].includes(state)) return 'Keep this task open; Orchestra is reviewing or retrying the exact PR handoff automatically.';
   if (state === 'paused') return 'Select Resume to continue this task with its preserved state.';
   if (state === 'recovery_required') return 'Select Resume to continue the preserved implementation through review and verification.';
-  if (state === 'review_disputed') return 'Approve the reviewed diff or provide focused repair guidance.';
+  if (state === 'review_disputed') return 'Resolve the reported Git or pull-request safety issue. If local changes are preserved, use Commit & Push Changes.';
   if (state === 'completed_unpushed') return 'Retry the push after checking the upstream branch and credentials.';
   if (state === 'failed') return 'Open the error details, then retry from a clean state or resume preserved changes.';
   return null;

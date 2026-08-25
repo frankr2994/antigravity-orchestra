@@ -331,7 +331,7 @@ function describeCloudWorkflow(taskState: string, providerState: string, hasPr: 
     nextAction: 'No action is needed unless Orchestra reports a review finding.',
   };
   if (taskState === 'verifying') return { stage: 'verification', detail: 'Running deterministic checks against the isolated PR worktree.', nextAction: 'Wait for verification to finish.' };
-  if (taskState === 'review_disputed') return { stage: 'needs_attention', detail: 'Automatic review or repair reached a safe stopping boundary.', nextAction: 'Review the findings and provide focused guidance.' };
+  if (taskState === 'review_disputed') return { stage: 'needs_attention', detail: 'The pull-request handoff stopped at a repository or identity safety check.', nextAction: 'Review the reported Git or pull-request detail, correct it, then retry the handoff.' };
   if (taskState === 'completed' || taskState === 'completed_unpushed') return { stage: 'integrated', detail: 'The reviewed Jules result reached its target branch.', nextAction: null };
   if (providerState === 'AWAITING_PLAN_APPROVAL') return { stage: 'plan_approval', detail: 'Jules generated a plan and is waiting.', nextAction: 'Review and approve the Jules plan.' };
   if (providerState === 'AWAITING_USER_FEEDBACK') return { stage: 'feedback', detail: 'Jules needs a decision or clarification.', nextAction: 'Send focused guidance to Jules.' };

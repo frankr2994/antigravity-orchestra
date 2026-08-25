@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, Bookmark, Bot, Check, CircleAlert, Cpu, FileCode, FolderGit2, FolderOpen,
   Gauge, GitBranch, GitCommit, GitFork, History, Hexagon, MemoryStick, MessageSquare,
-  Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck, Sparkles,
-  Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
+  Pause, Pencil, Play, Plus, RefreshCw, RotateCcw, Send, Server, Settings, ShieldCheck,
+  Sparkles, Square, Terminal, Trash2, UploadCloud, Wrench, X, Zap,
 } from 'lucide-react';
 import type {
   AvailableModels, CheckpointRecord, Health, InstalledLmStudioModel, JulesActivitySummary, JulesReadiness, McpServerRecord, McpStatus,
@@ -16,20 +16,9 @@ import { JulesTaskPanel } from './features/jules/JulesTaskPanel';
 import { JulesSettingsCard } from './features/jules/JulesSettingsCard';
 import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashboard';
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.review-disputed', 'task.steer', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
-
-class ApiRequestError extends Error {
-  readonly code: string | null;
-  readonly status: number;
-
-  constructor(message: string, code: string | null, status: number) {
-    super(message);
-    this.name = 'ApiRequestError';
-    this.code = code;
-    this.status = status;
-  }
-}
+const manualCommitStates = new Set(['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'failed']);
 
 function formatGenericModelName(m: { id: string; displayName?: string; quantization?: string; state?: string }): string {
   if (m.displayName) {
@@ -88,10 +77,6 @@ function App() {
   const [soloCodexEffort, setSoloCodexEffort] = useState<string>('high');
   const [soloGemmaModel, setSoloGemmaModel] = useState<string>('');
   const [installedLmStudioModels, setInstalledLmStudioModels] = useState<InstalledLmStudioModel[]>([]);
-  const [steerInput, setSteerInput] = useState('');
-  const [steerOpen, setSteerOpen] = useState(false);
-  const [steerSuggestion, setSteerSuggestion] = useState<string | null>(null);
-  const [steerSuggesting, setSteerSuggesting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [scopeWarning, setScopeWarning] = useState('');
@@ -133,7 +118,7 @@ function App() {
     if (!response.ok) {
       const detail = body?.resolution || body?.nextAction;
       const code = body?.code ? ` [${body.code}]` : '';
-      throw new ApiRequestError(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`, body?.code || null, response.status);
+      throw new Error(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`);
     }
     return body as T;
   }, [authenticatedFetch]);
@@ -251,7 +236,7 @@ function App() {
       setActivity([]);
       const sessionTasks = projectTasks.filter((task) => task.sessionId === visibleSession.id).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
       const newestTask = sessionTasks[0] || null;
-      const restored = projectActiveTask || (newestTask && !terminalStates.has(newestTask.state) ? newestTask : null);
+      const restored = projectActiveTask || (newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null);
       setActiveTask(restored);
       if (restored) watchTask(restored.id);
       setView('dashboard');
@@ -331,7 +316,7 @@ function App() {
     const projectTasks = await api<Task[]>(`/api/tasks?projectId=${projectId}`);
     const sessionTasks = projectTasks.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
     const newestTask = sessionTasks[0] || null;
-    const latest = running || (newestTask && !terminalStates.has(newestTask.state) ? newestTask : null);
+    const latest = running || (newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null);
     setActiveTask(latest);
     if (latest) watchTask(latest.id);
   }
@@ -412,16 +397,6 @@ function App() {
     stream.onerror = () => { if (stream.readyState === EventSource.CLOSED) setError('Task event stream disconnected. Reload to restore it.'); };
   }
 
-  async function resolveBaseline() {
-    if (!project || !activeTask) return;
-    try {
-      setBusy(true); setError('');
-      await api(`/api/projects/${project.id}/baseline`, { method: 'POST', body: JSON.stringify({ taskId: activeTask.id }) });
-      setActiveTask({ ...activeTask, state: 'queued' }); watchTask(activeTask.id);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setBusy(false); }
-  }
-
   async function cancelTask(task = activeTask) {
     if (!task) return;
     if (task.target === 'cloud' && !window.confirm('Stop and delete this Jules cloud session? This cannot be resumed.')) return;
@@ -491,10 +466,10 @@ function App() {
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
   async function retryPush(task: Task) { await api(`/api/tasks/${task.id}/retry-push`, { method: 'POST', body: '{}' }); if (project) await reload(project.id); }
-  async function approveDisputed(task: Task) {
+  async function commitUncommittedChanges(task: Task) {
     try {
       setBusy(true); setError('');
-      const updated = await api<Task>(`/api/tasks/${task.id}/approve-disputed`, { method: 'POST', body: '{}' });
+      const updated = await api<Task>(`/api/tasks/${task.id}/commit-changes`, { method: 'POST', body: '{}' });
       setActiveTask(updated);
       setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
       const refreshes = await Promise.allSettled([
@@ -502,53 +477,14 @@ function App() {
         project ? reload(project.id) : Promise.resolve(),
       ]);
       if (refreshes.some((result) => result.status === 'rejected')) {
-        setScopeWarning('The approval completed, but part of the dashboard did not refresh. The task state shown here is authoritative; reload the page if another panel looks stale.');
+        setScopeWarning('The commit finished, but part of the dashboard did not refresh. Reload the page if another panel looks stale.');
       }
     } catch (reason) {
       try {
         const latest = await api<Task>(`/api/tasks/${task.id}`);
         setActiveTask((current) => current?.id === task.id ? latest : current);
         setTasks((current) => current.map((item) => item.id === task.id ? latest : item));
-      } catch { /* Keep the original approval error. */ }
-      setError(reason instanceof Error ? reason.message : String(reason));
-    }
-    finally { setBusy(false); }
-  }
-  async function steerDisputed(task: Task) {
-    const guidance = steerInput.trim();
-    if (!guidance) return;
-    try {
-      setBusy(true); setError(''); setScopeWarning('');
-      const updated = await api<Task>(`/api/tasks/${task.id}/steer-disputed`, { method: 'POST', body: JSON.stringify({ guidance }) });
-      setSteerInput(''); setSteerOpen(false);
-      setActiveTask(updated);
-      setTasks((current) => current.map((item) => item.id === task.id ? updated : item));
-      setActivity([]); watchTask(task.id);
-    } catch (reason) {
-      let latest: Task | null = null;
-      try {
-        latest = await api<Task>(`/api/tasks/${task.id}`);
-        setActiveTask((current) => current?.id === task.id ? latest : current);
-        setTasks((current) => current.map((item) => item.id === task.id ? latest! : item));
-      } catch { /* Keep the original guidance error. */ }
-      if (reason instanceof ApiRequestError && reason.code === 'TASK_STATE_CHANGED' && latest?.state === 'recovery_required') {
-        try {
-          const resumed = await api<Task>(`/api/tasks/${task.id}/steer-disputed`, { method: 'POST', body: JSON.stringify({ guidance }) });
-          setSteerInput(''); setSteerOpen(false);
-          setActiveTask(resumed);
-          setTasks((current) => current.map((item) => item.id === task.id ? resumed : item));
-          setActivity([]); watchTask(task.id);
-          setScopeWarning('The task preserved its files while guidance was being sent. Orchestra reconciled the change and resumed the same task with your guidance.');
-          return;
-        } catch (retryReason) {
-          setError(retryReason instanceof Error ? retryReason.message : String(retryReason));
-          return;
-        }
-      }
-      if (reason instanceof ApiRequestError && reason.code === 'TASK_STATE_CHANGED' && latest) {
-        setScopeWarning(`The task changed to ${humanState(latest.state)} before that action completed. The dashboard has reconciled its state and now shows the valid controls.`);
-        return;
-      }
+      } catch { /* Keep the original commit error. */ }
       setError(reason instanceof Error ? reason.message : String(reason));
     }
     finally { setBusy(false); }
@@ -576,13 +512,8 @@ function App() {
   const currentModels = useMemo(() => {
     try { return activeTask?.models ? JSON.parse(activeTask.models) : null; } catch { return null; }
   }, [activeTask]);
-  const activeDisputeEvent = activity.findLast((event) => event.type === 'task.review-disputed');
-  const activeDisputeReason = typeof activeDisputeEvent?.payload.reason === 'string'
-    ? activeDisputeEvent.payload.reason
-    : 'Independent review still has blocking findings after the bounded repair attempts.';
-  const activeDisputeIsLocal = activeTask?.target !== 'cloud';
-  const activeDisputeDiffKnown = monitor !== null;
-  const activeDisputeFileCount = monitor?.changedFiles.length ?? 0;
+  const uncommittedFileCount = monitor?.changedFiles.length ?? 0;
+  const showManualCommit = Boolean(activeTask && activeTask.target !== 'cloud' && manualCommitStates.has(activeTask.state) && uncommittedFileCount > 0);
 
   return (
     <div className="app-shell">
@@ -605,7 +536,7 @@ function App() {
       <main className="content">
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
-        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} actionBusy={busy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onApproveDisputed={approveDisputed} onSteerDisputed={steerDisputed} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
+        {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
         {view === 'projects' && <Projects projects={projects} activeId={project?.id} busy={busy} onBrowse={browseProject} onActivate={activateProject} onForget={forgetProject} />}
         {(view === 'checkpoints' || view === 'tasks') && <CheckpointsView project={project} tasks={tasks} api={api} onLoadPrompt={(txt) => setInput(txt)} onRetryPush={retryPush} onRetryTask={retryTask} />}
         {view === 'mcp' && <McpServersView servers={mcpServers} busy={mcpBusy} onToggle={toggleServer} onRefresh={() => fetchMcpServers(true)} />}
@@ -715,69 +646,7 @@ function App() {
             </article>
           ))}
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
-          {activeTask?.state === 'baseline_required' && <div className="baseline-card"><CircleAlert /><strong>External changes detected</strong><p>Uncommitted modifications were detected from outside Orchestra. Gemma can review, summarize in HANDOFF.md, and commit them automatically before this task starts.</p><button className="primary" onClick={resolveBaseline} disabled={busy}>{busy ? 'Gemma is reviewing baseline…' : 'Auto-commit baseline with Gemma'}</button></div>}
-          {activeTask?.state === 'recovery_required' && <div className="baseline-card"><CircleAlert /><strong>Partial task changes preserved</strong><p>Resume this same task so Antigravity can finish and Codex can review the complete change set. These files will not be committed as a separate baseline.</p><button className="primary" onClick={() => recoverTask(activeTask)}>Resume and review</button></div>}
-          {activeTask?.state === 'review_disputed' && (
-            <div className="baseline-card disputed-card">
-              <CircleAlert />
-              <strong>Review Consensus Not Reached</strong>
-              <p>{activeDisputeReason}</p>
-              <small>{activeDisputeIsLocal
-                ? !activeDisputeDiffKnown
-                  ? 'Checking the preserved Git diff before enabling finalization…'
-                  : activeDisputeFileCount > 0
-                    ? `${activeDisputeFileCount} uncommitted project file${activeDisputeFileCount === 1 ? '' : 's'} remain preserved.`
-                    : 'No uncommitted project diff is currently visible, so Orchestra will not offer an empty or misleading commit action.'
-                : 'This dispute belongs to a Jules PR handoff. Resolve it from the Jules task panel.'}</small>
-              <div className="dispute-actions">
-                {activeDisputeIsLocal && activeDisputeDiffKnown && activeDisputeFileCount > 0 && <button className="primary" onClick={() => approveDisputed(activeTask)} disabled={busy}>{busy ? 'Finalizing…' : `Approve & Finalize ${activeDisputeFileCount} File${activeDisputeFileCount === 1 ? '' : 's'}`}</button>}
-                {activeDisputeIsLocal && <button className="secondary" onClick={() => setSteerOpen(!steerOpen)} disabled={busy}>{steerOpen ? 'Close guidance' : 'Provide repair guidance'}</button>}
-              </div>               {steerOpen && (
-                <div className="steer-box">
-                  {(() => {
-                    const lastReviewEvent = activity.findLast((e) => e.type === 'agent.completed' && (e.payload as Record<string, unknown>).role === 'review');
-                    const lastReviewSummary = typeof lastReviewEvent?.payload?.summary === 'string' ? lastReviewEvent.payload.summary : null;
-                    return lastReviewSummary ? (
-                      <details className="steer-findings" open>
-                        <summary>Latest Codex Review Blocker(s)</summary>
-                        <pre>{lastReviewSummary}</pre>
-                      </details>
-                    ) : null;
-                  })()}
-                  {steerSuggestion ? (
-                    <div className="steer-suggestion-box">
-                      <div className="steer-suggestion-header">
-                        <span className="steer-suggestion-title"><Sparkles size={13} /> AI Suggested Next Step:</span>
-                        <button type="button" className="action-link" onClick={() => setSteerInput(steerSuggestion)}>Use This Suggestion</button>
-                      </div>
-                      <p>{steerSuggestion}</p>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      className="secondary compact"
-                      onClick={async () => {
-                        setSteerSuggesting(true);
-                        try {
-                          const res = await api<{ suggestion: string }>(`/api/tasks/${activeTask.id}/suggest-steering`, { method: 'POST' });
-                          if (res?.suggestion) setSteerSuggestion(res.suggestion);
-                        } catch (err) {
-                          console.error(err);
-                        } finally {
-                          setSteerSuggesting(false);
-                        }
-                      }}
-                      disabled={steerSuggesting}
-                    >
-                      <Sparkles size={13} /> {steerSuggesting ? 'Analyzing blockers & drafting tip…' : 'Generate AI Steering Tip'}
-                    </button>
-                  )}
-                  <textarea value={steerInput} onChange={(e) => setSteerInput(e.target.value)} placeholder="Specify exact changes or approaches Antigravity should take..." rows={3} autoFocus />
-                  <button className="primary compact" onClick={() => steerDisputed(activeTask)} disabled={busy || !steerInput.trim()}><Send size={14} /> Send Guidance & Resume Repairs</button>
-                </div>
-              )}
-            </div>
-          )}
+          {showManualCommit && activeTask && <div className="baseline-card"><CircleAlert /><strong>Uncommitted changes</strong><p>{uncommittedFileCount} project file{uncommittedFileCount === 1 ? ' has' : 's have'} uncommitted changes.</p><button className="primary" onClick={() => commitUncommittedChanges(activeTask)} disabled={busy || monitor?.processAlive === true}>{busy ? 'Committing…' : 'Commit & Push Changes'}</button></div>}
         </div>
         <div className="composer">
           {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <div className="monitor-actions">
@@ -788,6 +657,7 @@ function App() {
                 : null}
             {!(activeTask.target === 'cloud' && monitor?.providerState === 'COMPLETED') && <button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> {activeTask.target === 'cloud' ? 'Stop Jules' : 'Stop task'}</button>}
           </div>}
+          {activeTask?.state === 'recovery_required' && <div className="monitor-actions"><button className="secondary compact" onClick={() => void resumeTask()} disabled={busy}><Play size={12} fill="currentColor" /> Resume task</button><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
           <div className="mode-selector">
             <button
               type="button"
@@ -940,10 +810,10 @@ function formatResetTimer(isoDate: string | null | undefined): string | null {
   return `resets in ${days}d ${remHours}h`;
 }
 
-function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, actionBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; actionBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
+function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
-    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} actionBusy={actionBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onPause={onPause} onResume={onResume} onStop={onStop} onApproveDisputed={onApproveDisputed} onSteerDisputed={onSteerDisputed} />}
+    {activeTask && <LiveRunMonitor task={activeTask} monitor={monitor} events={events} explanation={explanation} explanationBusy={explanationBusy} question={question} onQuestion={onQuestion} onAsk={onAsk} onExplain={onExplain} onPause={onPause} onResume={onResume} onStop={onStop} />}
     {activeTask?.target === 'cloud' && <JulesTaskPanel task={activeTask} api={api} />}
     <div className="metrics-grid">
       <Metric icon={<Cpu />} label="CPU" value={`${stats?.cpu.load ?? 0}%`} detail={stats?.cpu.speed || 'Unavailable'} percent={stats?.cpu.load ?? 0} color="blue" />
@@ -1024,17 +894,10 @@ function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, m
   </section>;
 }
 
-function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, actionBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onApproveDisputed, onSteerDisputed }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; actionBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onApproveDisputed: (task: Task) => void; onSteerDisputed: (task: Task) => void }) {
+function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop }: { task: Task; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void }) {
   const [showLogs, setShowLogs] = useState(false);
-  const recent = events.filter((event) => ['task.state', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'task.review-disputed', 'task.steer', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated'].includes(event.type)).slice(-25).reverse();
+  const recent = events.filter((event) => ['task.state', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated'].includes(event.type)).slice(-25).reverse();
   const latestKnownWork = recent.find((event) => event.type === 'agent.output' || event.type === 'agent.completed' || event.type === 'task.provider-recovery' || event.type === 'task.model-takeover');
-  const disputeEvent = events.findLast((event) => event.type === 'task.review-disputed');
-  const disputeReason = typeof disputeEvent?.payload.reason === 'string'
-    ? disputeEvent.payload.reason
-    : monitor?.stopReason || 'Independent review still has blocking findings after the bounded repair attempts.';
-  const localDispute = task.target !== 'cloud';
-  const diffKnown = monitor !== null;
-  const changedFileCount = monitor?.changedFiles.length ?? 0;
   const running = !terminalStates.has(task.state);
   const stoppable = running && !(task.target === 'cloud' && monitor?.providerState === 'COMPLETED');
   return <article className={`live-monitor health-${monitor?.health || 'waiting'}`}>
@@ -1050,26 +913,6 @@ function LiveRunMonitor({ task, monitor, events, explanation, explanationBusy, a
     </div>
     <p className="monitor-summary">{monitor?.summary || 'Loading deterministic run health…'}</p>
     {monitor?.progressDetail && <div className="latest-work"><strong>Current operation{monitor.providerState ? ` · Jules ${humanState(monitor.providerState)}` : ''}</strong><p>{monitor.progressDetail}</p>{monitor.nextAction && <small><strong>Next:</strong> {monitor.nextAction}</small>}</div>}
-    {task.state === 'review_disputed' && (
-      <div className="monitor-stop">
-        <CircleAlert size={16} />
-        <div style={{ width: '100%' }}>
-          <strong>Review Consensus Dispute</strong>
-          <p>{disputeReason}</p>
-          <small>{localDispute
-            ? !diffKnown
-              ? 'Checking the preserved Git diff before enabling finalization…'
-              : changedFileCount > 0
-              ? `${changedFileCount} uncommitted project file${changedFileCount === 1 ? '' : 's'} remain preserved. Approval will summarize them with your local model when available, commit them, and push the current branch.`
-              : 'No uncommitted project diff is currently visible, so Orchestra will not offer an empty or misleading commit action.'
-            : 'This dispute belongs to a Jules PR handoff. Resolve it from the Jules task panel instead of treating it as a local diff.'}</small>
-          <div className="dispute-actions" style={{ marginTop: '8px' }}>
-            {localDispute && diffKnown && changedFileCount > 0 && <button className="primary compact" disabled={actionBusy} onClick={() => onApproveDisputed(task)}>{actionBusy ? 'Finalizing…' : `Approve & Finalize ${changedFileCount} File${changedFileCount === 1 ? '' : 's'}`}</button>}
-            {localDispute && <button className="secondary compact" disabled={actionBusy} onClick={() => onSteerDisputed(task)}>Provide Repair Guidance</button>}
-          </div>
-        </div>
-      </div>
-    )}
     {latestKnownWork && <div className="latest-work"><strong>Latest known work</strong><span>{latestKnownWork.agent} · {new Date(latestKnownWork.createdAt).toLocaleTimeString()}</span><p>{eventText(latestKnownWork)}</p></div>}
     {monitor?.stopReason && <div className="monitor-stop"><CircleAlert size={16} /><div><strong>Why execution paused</strong><p>{monitor.stopReason}</p></div></div>}
     {showLogs && (
@@ -1952,13 +1795,13 @@ function SettingsView({
 }
 
 function TaskActivity({ task, events, models }: { task: Task; events: TaskEvent[]; models: Record<string, string> | null }) {
-  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.paused', 'task.resumed', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'task.review-disputed', 'task.steer', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'warning'].includes(event.type)).slice(-8);
+  const recent = events.filter((event) => ['agent.started', 'agent.output', 'agent.completed', 'task.paused', 'task.resumed', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'warning'].includes(event.type)).slice(-8);
   const rawPrimary = models?.primary === 'gemma' ? models.gemma : models?.antigravity;
   const primaryModel = rawPrimary ? (rawPrimary.includes('/') ? rawPrimary.split('/').pop() : rawPrimary) : '';
   return <div className="activity-card"><div className="activity-head"><RefreshCw className="spin" size={15} /><strong>{humanState(task.state)}</strong></div>{models && <small title={rawPrimary}>{primaryModel}{models.codex ? ` · ${models.codex}` : ''}</small>}<div className="activity-events">{recent.map((event) => <div key={event.id}><span className={`agent-dot ${event.agent}`} /> <strong>{event.agent}</strong><p>{eventText(event)}</p></div>)}</div></div>;
 }
 
-function eventText(event: TaskEvent) { const payload = event.payload; const next = typeof payload.nextAction === 'string' ? ` Next: ${payload.nextAction}` : typeof payload.resolution === 'string' ? ` Next: ${payload.resolution}` : ''; if (typeof payload.message === 'string') return `${payload.message}${next}`; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'cloud.activity' && payload.activity && typeof payload.activity === 'object') { const activity = payload.activity as Record<string, unknown>; return String(activity.description || activity.message || activity.type || 'Jules activity received.'); } if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.review-disputed') return `Review consensus dispute: ${String(payload.reason || 'repair attempt limit reached without consensus')}.`; if (event.type === 'task.steer') return `User provided steering guidance: ${String(payload.guidance || '').slice(0, 80)}...`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} of ${String(payload.maxAttempts || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return humanState(event.type); }
+function eventText(event: TaskEvent) { const payload = event.payload; const next = typeof payload.nextAction === 'string' ? ` Next: ${payload.nextAction}` : typeof payload.resolution === 'string' ? ` Next: ${payload.resolution}` : ''; if (typeof payload.message === 'string') return `${payload.message}${next}`; if (typeof payload.text === 'string') return payload.text.slice(-900); if (typeof payload.summary === 'string') return payload.summary.slice(-900); if (event.type === 'cloud.activity' && payload.activity && typeof payload.activity === 'object') { const activity = payload.activity as Record<string, unknown>; return String(activity.description || activity.message || activity.type || 'Jules activity received.'); } if (event.type === 'task.state') return `Entered ${humanState(String(payload.state || 'unknown'))}.`; if (event.type === 'task.repair-progress') return `Automatic repair ${String(payload.attempt || '?')} completed; project diff ${payload.changed ? 'changed' : 'did not change'}.`; if (event.type === 'provider.telemetry') { const usage = payload.usage && typeof payload.usage === 'object' ? payload.usage as Record<string, unknown> : {}; const total = Number(usage.total_tokens || usage.totalTokens || 0); const input = Number(usage.input_tokens || usage.inputTokens || 0); const output = Number(usage.output_tokens || usage.outputTokens || 0); const context = payload.context && typeof payload.context === 'object' ? payload.context as Record<string, unknown> : {}; const pressure = Number(context.usedPercent); return total ? `Turn usage: ${total.toLocaleString()} cumulative tokens (${input.toLocaleString()} input, ${output.toLocaleString()} output)${Number.isFinite(pressure) ? ` · latest context ${pressure.toFixed(1)}%` : ''}.` : payload.reroute ? 'Provider rerouted the selected model.' : 'Provider telemetry updated.'; } if (event.type === 'agent.started') return `Started ${String(payload.phase || payload.role || '')}${payload.cycle ? ` cycle ${String(payload.cycle)}` : ''}`.trim(); if (event.type === 'agent.completed') return `Completed ${String(payload.phase || payload.role || '')}`.trim(); if (event.type === 'git.remote') return `Connected origin to ${String(payload.remote || 'the requested remote')}.`; if (event.type === 'git.commit') return `Created commit ${String(payload.sha || '').slice(0, 8)}`; if (event.type === 'git.push') return payload.pushed ? 'Pushed to upstream' : String(payload.error || 'Push pending'); if (event.type === 'verification.result') { const results = Array.isArray(payload.results) ? payload.results as Array<Record<string, unknown>> : []; return results.length ? `Verification completed: ${results.map((item) => `${String(item.command || 'check')} ${Number(item.code) === 0 ? 'passed' : 'failed'}`).join('; ')}.` : 'Verification completed.'; } return humanState(event.type); }
 function formatProviderContext(item?: ProviderUsage) { const percent = item?.context?.usedPercent; if (percent !== null && percent !== undefined) return `${percent.toFixed(1)}%`; const tokens = item?.context?.inputTokens ?? item?.context?.totalTokens; return tokens ? `${tokens.toLocaleString()} tokens` : 'Not measured'; }
 
 export default App;

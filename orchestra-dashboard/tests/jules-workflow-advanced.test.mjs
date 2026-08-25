@@ -77,6 +77,46 @@ test('Exact Jules PR review verifies, independently reviews, and fast-forwards t
   }
 });
 
+test('An unchanged blocked Jules PR reuses its findings and starts another repair cycle instead of stopping', async () => {
+  const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const dbPath = join(tmpdir(), `orchestra-review-retry-${key}.db`); const repo = join(tmpdir(), `orchestra-review-retry-${key}`); const bare = `${repo}.git`;
+  mkdirSync(repo, { recursive: true }); mkdirSync(bare, { recursive: true });
+  const store = new Store(dbPath);
+  try {
+    await git(['init', '--bare'], bare); await git(['init'], repo); await git(['config', 'user.name', 'Orchestra Test'], repo); await git(['config', 'user.email', 'test@orchestra.local'], repo);
+    writeFileSync(join(repo, 'base.txt'), 'base'); await git(['add', '.'], repo); await git(['commit', '-m', 'base'], repo); await git(['branch', '-M', 'main'], repo);
+    const baseSha = (await git(['rev-parse', 'HEAD'], repo)).stdout.trim(); await git(['remote', 'add', 'origin', bare], repo); await git(['push', '-u', 'origin', 'main'], repo);
+    writeFileSync(join(repo, 'feature.txt'), 'still blocked'); await git(['add', '.'], repo); await git(['commit', '-m', 'blocked feature'], repo);
+    const headSha = (await git(['rev-parse', 'HEAD'], repo)).stdout.trim(); await git(['push', 'origin', `${headSha}:refs/pull/3/head`], repo); await git(['reset', '--hard', baseSha], repo);
+
+    const project = store.upsertProject({ name: 'review retry', root: repo, gitRoot: repo }); const conversation = store.createSession(project.id, 'review retry');
+    const task = store.createTask(project.id, conversation.id, 'Repair until review passes', null, null, 'cloud'); store.updateTask(task.id, { state: 'running' }); store.updateTask(task.id, { state: 'reviewing' });
+    const attempt = store.manager.attempts.create({ taskId: task.id, target: 'cloud', worker: 'jules', baseSha, providerSessionId: 'remote-3', branchName: 'orchestra/jules/test/cccccccccccc' });
+    store.manager.cloudSessions.create({ taskId: task.id, attemptId: attempt.id, sourceName: 'sources/opaque', sessionResourceName: 'sessions/remote-3', remoteSessionId: 'remote-3', dispatchBranch: 'orchestra/jules/test/cccccccccccc', targetBranch: 'main', baseSha, state: 'COMPLETED' });
+    const cloud = store.manager.cloudSessions.getByTaskId(task.id); store.manager.cloudSessions.update(cloud.id, { prUrl: 'https://github.com/example/repository/pull/3' });
+    store.manager.julesSourceMappings.upsert({ projectId: project.id, sourceName: 'sources/opaque', githubOwner: 'example', githubRepo: 'repository', startingBranch: 'main', targetBranch: 'main' });
+    store.manager.evidence.record({ taskId: task.id, attemptId: attempt.id, kind: 'review', subjectSha: headSha, outcome: 'block',
+      payload: { findings: [{ severity: 'blocking', file: 'feature.txt', line: 1, explanation: 'Replace the placeholder implementation.' }] } });
+    let repairInput;
+    const service = new JulesReviewService(store, {
+      codexRunner: async () => { throw new Error('The unchanged head must not spend another review call.'); },
+      repairHandler: async (input) => { repairInput = input; return { strategy: 'cloud_feedback', ok: true, cycle: 20 }; },
+    });
+
+    const result = await service.reviewAndIntegrate(task.id);
+    assert.equal(result.stage, 'repair');
+    assert.equal(result.reusedReview, true);
+    assert.equal(result.repair.cycle, 20);
+    assert.equal(repairInput.findings[0].explanation, 'Replace the placeholder implementation.');
+    assert.equal(store.getTask(task.id).state, 'reviewing');
+    assert.notEqual(store.getTask(task.id).state, 'review_disputed');
+    assert.ok(store.listEvents(task.id).some((event) => event.type === 'cloud.reviewing' && event.payload.stage === 'repair_retry'));
+  } finally {
+    store.close(); try { rmSync(dbPath, { force: true }); } catch {}
+    try { rmSync(repo, { recursive: true, force: true }); } catch {} try { rmSync(bare, { recursive: true, force: true }); } catch {}
+  }
+});
+
 test('Blocked Jules review imports the exact PR head before requesting a real local repair', async () => {
   const key = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const dbPath = join(tmpdir(), `orchestra-takeover-${key}.db`); const repo = join(tmpdir(), `orchestra-takeover-${key}`); const bare = `${repo}.git`;

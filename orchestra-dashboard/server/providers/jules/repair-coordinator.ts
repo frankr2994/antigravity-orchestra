@@ -9,12 +9,11 @@ import { redactSecrets } from './errors.js';
 // Google Jules & Orchestra Dual-Engine Local/Cloud Repair Loop
 // ============================================================================
 
-export type RepairStrategy = 'cloud_feedback' | 'local_takeover' | 'escalate_dispute';
+export type RepairStrategy = 'cloud_feedback' | 'local_takeover';
 
 export interface RepairDecision {
   strategy: RepairStrategy;
   cycle: number;
-  maxCycles: number;
   reason: string;
   findings: ReviewFinding[];
 }
@@ -28,8 +27,6 @@ export interface DualEngineRepairOptions {
   findings: ReviewFinding[];
   verificationResults?: VerificationResult[];
   cycle?: number;
-  maxCycles?: number;
-  maxCloudAttempts?: number;
   store: Store;
   julesClient?: JulesApiClient;
   onEvent?: (event: { name: string; payload: unknown }) => void;
@@ -45,32 +42,17 @@ export interface DualEngineRepairResult {
 
 export function evaluateRepairStrategy(options: {
   cycle: number;
-  maxCycles?: number;
-  maxCloudAttempts?: number;
   isCloudSessionActive: boolean;
   findings: ReviewFinding[];
   verificationResults?: VerificationResult[];
 }): RepairDecision {
-  const maxCycles = options.maxCycles ?? 3;
-  const maxCloudAttempts = options.maxCloudAttempts ?? 2;
   const cycle = options.cycle;
 
-  if (cycle > maxCycles) {
-    return {
-      strategy: 'escalate_dispute',
-      cycle,
-      maxCycles,
-      reason: `Maximum repair iterations (${maxCycles}) exceeded. Escalating to dispute for manual review.`,
-      findings: options.findings,
-    };
-  }
-
-  if (cycle <= maxCloudAttempts && options.isCloudSessionActive) {
+  if (options.isCloudSessionActive) {
     return {
       strategy: 'cloud_feedback',
       cycle,
-      maxCycles,
-      reason: `Sending structured review feedback to Jules cloud worker (cycle ${cycle}/${maxCloudAttempts}).`,
+      reason: `Sending structured review feedback to Jules cloud worker for repair cycle ${cycle}.`,
       findings: options.findings,
     };
   }
@@ -78,8 +60,7 @@ export function evaluateRepairStrategy(options: {
   return {
     strategy: 'local_takeover',
     cycle,
-    maxCycles,
-    reason: `Cloud feedback budget exhausted or session inactive. Taking over locally with Antigravity for cycle ${cycle}.`,
+    reason: `The Jules session is inactive. Taking over locally with Antigravity for repair cycle ${cycle}.`,
     findings: options.findings,
   };
 }
@@ -132,9 +113,6 @@ export async function executeDualEngineRepair(
     onEvent,
   } = options;
 
-  const maxCycles = options.maxCycles ?? 3;
-  const maxCloudAttempts = options.maxCloudAttempts ?? 2;
-
   // 1. Determine current cycle from existing attempts
   const attempts = store.manager.attempts.listByTaskId(taskId);
   const cloudSession = store.manager.cloudSessions.getByRemoteSessionId(remoteSessionId);
@@ -151,36 +129,12 @@ export async function executeDualEngineRepair(
   // 3. Evaluate dynamic repair strategy
   const decision = evaluateRepairStrategy({
     cycle,
-    maxCycles,
-    maxCloudAttempts,
     isCloudSessionActive,
     findings,
     verificationResults,
   });
 
-  // 4. Case: Escalate to Dispute
-  if (decision.strategy === 'escalate_dispute') {
-    store.updateTask(taskId, { state: 'review_disputed' });
-    store.addEvent(taskId, 'orchestra', 'task.disputed', {
-      cycle,
-      maxCycles,
-      reason: decision.reason,
-      findingsCount: findings.length,
-    });
-    store.manager.julesCapacity.release(taskId);
-    onEvent?.({
-      name: 'task.disputed',
-      payload: { taskId, cycle, reason: decision.reason },
-    });
-    return {
-      strategy: 'escalate_dispute',
-      ok: false,
-      cycle,
-      error: decision.reason,
-    };
-  }
-
-  // 5. Case: Cloud Feedback
+  // 4. Case: Cloud Feedback
   if (decision.strategy === 'cloud_feedback') {
     let client = julesClient;
     if (!client) {
@@ -196,12 +150,17 @@ export async function executeDualEngineRepair(
     try {
       await client.sendMessage(remoteSessionId, feedbackMessage);
     } catch {
-      // Fallback to local takeover if cloud feedback fails
-      return executeDualEngineRepair({
-        ...options,
+      const payload = {
         cycle,
-        maxCloudAttempts: 0, // Force local takeover
-      });
+        reason: 'Jules could not accept repair feedback. Continuing locally with Antigravity.',
+        headSha,
+        baseSha,
+        findingsCount: findings.length,
+        prepared: false,
+      };
+      store.addEvent(taskId, 'orchestra', 'task.takeover_local', payload);
+      onEvent?.({ name: 'task.takeover_local', payload: { taskId, ...payload } });
+      return { strategy: 'local_takeover', ok: true, cycle };
     }
 
     // Record new execution attempt
@@ -245,7 +204,7 @@ export async function executeDualEngineRepair(
     };
   }
 
-  // 6. Case: request a real local takeover. The review service must first
+  // 5. Case: request a real local takeover. The review service must first
   // synchronize the exact reviewed head locally, then queue an executor.
   store.addEvent(taskId, 'orchestra', 'task.takeover_local', {
     cycle,

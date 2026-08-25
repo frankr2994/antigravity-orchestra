@@ -35,6 +35,37 @@ function parsePullRequestUrl(value: string): { owner: string; repo: string; numb
   return { owner: parts[0], repo: parts[1], number };
 }
 
+function findingsFromEvidence(payload: Record<string, unknown>): ReviewFinding[] {
+  if (!Array.isArray(payload.findings)) return [];
+  return payload.findings.flatMap((value) => {
+    if (!value || typeof value !== 'object') return [];
+    const finding = value as Record<string, unknown>;
+    if (typeof finding.explanation !== 'string') return [];
+    const severity = ['blocking', 'warning', 'info'].includes(String(finding.severity))
+      ? String(finding.severity) as ReviewFinding['severity']
+      : 'blocking';
+    return [{
+      severity,
+      explanation: finding.explanation,
+      ...(typeof finding.file === 'string' ? { file: finding.file } : {}),
+      ...(Number.isSafeInteger(finding.line) ? { line: Number(finding.line) } : {}),
+      ...(typeof finding.evidence === 'string' ? { evidence: finding.evidence } : {}),
+      ...(typeof finding.recommendation === 'string' ? { recommendation: finding.recommendation } : {}),
+    }];
+  });
+}
+
+function verificationFromEvidence(payload: Record<string, unknown>): WorktreeReviewResult['verificationResults'] | undefined {
+  if (!Array.isArray(payload.results)) return undefined;
+  const results = payload.results.flatMap((value) => {
+    if (!value || typeof value !== 'object') return [];
+    const result = value as Record<string, unknown>;
+    if (typeof result.command !== 'string' || !Number.isFinite(Number(result.code))) return [];
+    return [{ command: result.command, code: Number(result.code), output: typeof result.output === 'string' ? result.output : '' }];
+  });
+  return results.length ? results : undefined;
+}
+
 /** Safely advances the local target branch to the exact reviewed PR head. */
 export async function synchronizeLocalTargetBranch(input: {
   projectRoot: string;
@@ -140,14 +171,21 @@ export class JulesReviewService {
 
       const evidence = this.store.manager.evidence.list(taskId).filter((item) => item.subjectSha?.toLowerCase() === headSha);
       const priorReview = evidence.filter((item) => item.kind === 'review').at(-1);
-      const priorVerificationFailure = evidence.some((item) => item.kind === 'verification' && item.outcome === 'failed');
+      const priorVerification = evidence.filter((item) => item.kind === 'verification' && item.outcome === 'failed').at(-1);
+      const priorVerificationFailure = Boolean(priorVerification);
       const reuseApprovedReview = priorReview?.outcome === 'pass';
       if ((priorReview && !reuseApprovedReview) || (priorVerificationFailure && !reuseApprovedReview)) {
-        const message = 'Jules completed without changing the pull request head that was already blocked by local review.';
-        this.store.updateTask(taskId, { state: 'review_disputed', error: message });
-        this.store.manager.julesCapacity.release(taskId);
-        this.store.addEvent(taskId, 'jules', 'warning', { message, code: 'PR_HEAD_UNCHANGED', nextAction: 'Open the PR findings and send Jules focused guidance that changes the PR head.' });
-        return { ok: false, stage: 'review_disputed', headSha, reusedReview: true };
+        const findings = priorReview ? findingsFromEvidence(priorReview.payload) : [];
+        if (!findings.length) findings.push({ severity: 'blocking',
+          explanation: 'The unchanged Jules pull request still has the previously recorded review or verification failure.' });
+        const verificationResults = priorVerification ? verificationFromEvidence(priorVerification.payload) : undefined;
+        const message = 'Jules completed without changing the blocked pull request head. Orchestra is sending the recorded findings again and will keep repairing until review passes or you stop the task.';
+        this.store.updateTask(taskId, { state: 'reviewing', error: message });
+        this.store.addEvent(taskId, 'orchestra', 'cloud.reviewing', { message, stage: 'repair_retry', headSha, reusedReview: true });
+        const repair = await this.requestRepair({ taskId, projectRoot: status.root, remoteSessionId: cloud.remoteSessionId,
+          baseSha: cloud.baseSha, headSha, findings, verificationResults });
+        if (repair.strategy === 'local_takeover') return this.prepareLocalTakeover({ taskId, projectRoot: status.root, headSha, findings, repair });
+        return { ok: false, stage: 'repair', headSha, repair, reusedReview: true };
       }
 
       let review: WorktreeReviewResult | undefined;
@@ -269,7 +307,7 @@ export class JulesReviewService {
     }
 
     const findings = input.findings.map((finding) => `${finding.file ? `${finding.file}${finding.line ? `:${finding.line}` : ''}: ` : ''}${finding.explanation}`).join('\n');
-    const message = `Jules reached its bounded cloud-repair limit. Orchestra imported PR head ${input.headSha.slice(0, 8)} on ${cloud.targetBranch} and will continue locally with these independent review findings:\n${findings}`;
+    const message = `Jules could not continue the repair remotely. Orchestra imported PR head ${input.headSha.slice(0, 8)} on ${cloud.targetBranch} and will continue locally with these independent review findings:\n${findings}`;
     const latest = this.store.manager.checkpoints.latest(input.taskId, 'local_takeover');
     if (latest?.subjectSha?.toLowerCase() !== input.headSha.toLowerCase() || latest.data.status !== 'prepared') {
       this.store.manager.checkpoints.append({ taskId: input.taskId, attemptId: cloud.attemptId, stage: 'local_takeover', subjectSha: input.headSha,
