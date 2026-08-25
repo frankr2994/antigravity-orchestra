@@ -178,3 +178,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Replaces the global `restoreProjectTask` call with a session-filtered version, preventing conversations from displaying unrelated active tasks
 - Exposes an "Open active task" action instead of silently failing or auto-merging when a project has a different owner
 - Adds comprehensive tests for ownership reconciliation, concurrent submission races, and UI consistency
+
+
+## [2026-08-25 18:36:55] Handoff Update
+- Enforce Gemma Solo as an untrusted protocol source by buffering output and rejecting any tool/function calls before display or execution
+- Replace model-generated Git status with deterministic system evidence for direct questions
+- Add a contract layer to validate that only plain Markdown is emitted in non-agentic modes
+- Implement a single fallback retry for recoverable template mismatches without leaking internal protocol text
+- Extend the test suite with full roundtrip verification of buffered responses and real repository data

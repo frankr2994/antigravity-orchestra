@@ -16,6 +16,7 @@ import { verificationFailure as describeVerificationFailure, verifyProject } fro
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from './observability.js';
 import { getMcpStatus, type McpStatus } from './mcp.js';
 import { ApplicationError } from './application/errors.js';
+import { formatDirectGitStatusAnswer, isDirectGitStatusQuestion } from './application/gemma/direct-chat-contract.js';
 
 export class TaskManager {
   private readonly events: TaskEventPublisher;
@@ -348,6 +349,26 @@ export class TaskManager {
       const classification = classified.classification;
       if (classified.warning) this.emit(taskId, 'gemma', 'warning', { message: `Gemma classification unavailable; deterministic routing was used. ${classified.warning}` });
       else if (classification.executionMode !== 'direct') this.emit(taskId, 'gemma', 'agent.completed', { phase: 'classification', classification, recovered: recovery });
+
+      if (classification.executionMode === 'direct' && (classification.directAgent || 'gemma') === 'gemma' && isDirectGitStatusQuestion(task.prompt)) {
+        const selectedModel = (classification as any).directModel || config.lmStudioModel;
+        const directModels: ModelSelection = {
+          primary: 'gemma',
+          gemma: selectedModel,
+          antigravity: 'gemini-3.7-flash-high',
+          antigravityEffort: 'high',
+          codex: null,
+          codexEffort: null,
+        };
+        this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(directModels) });
+        this.transition(taskId, 'running');
+        this.emit(taskId, 'system', 'agent.started', { phase: 'direct-git-status', message: 'Reading the selected project Git status directly.' });
+        const status = await getGitStatus(project.root);
+        const answer = formatDirectGitStatusAnswer(project.root, status);
+        this.emit(taskId, 'system', 'agent.completed', { phase: 'direct-git-status', isGit: status.isGit, changedFiles: status.files.length });
+        this.complete(taskId, answer, 'system');
+        return;
+      }
 
       const activeGemmaModel = await getActiveLmStudioModel();
 

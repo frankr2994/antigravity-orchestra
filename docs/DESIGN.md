@@ -776,3 +776,39 @@ A non-running task left in `recovery_required` continued to reserve its project 
 - Dirty or live work remains owned and is reachable through a visible conversation action rather than an opaque error banner.
 - A rejected prompt leaves the blank conversation title and prompt intact and creates no duplicate task.
 - Ownership behavior is isolated and covered by service, router/persistence, Git, and frontend contract tests.
+
+## 2026-08-25: Gemma Solo output is untrusted protocol data until validated
+
+### Background
+
+An agentic local Gemma model answered a Git-status question with raw model control syntax requesting a `Bash` call. Gemma Solo's primary LM Studio request declared no tools, but its streaming decoder accepted any nonempty content, exposed chunks before knowing their final shape, and persisted the accumulated string as a successful assistant message. The model-generated command was not executed, but the UI displayed an unusable protocol fragment as if it were an answer.
+
+### Decision
+
+- Treat streamed and non-streamed LM Studio output as untrusted provider data until the complete answer passes a dedicated direct-chat response contract.
+- Buffer Solo output before publishing it. Reject structured function/tool requests and recognizable raw tool-invocation envelopes while preserving ordinary Markdown.
+- Do not expose reasoning/thought fields as user-facing answer content.
+- Declare no executable tools in Gemma Solo. Keep the separately bounded, read-only Rider tool loop in repository-analysis workflows that explicitly opt into it.
+- Permit one ordinary no-tool completion attempt after malformed transport or rejected protocol output. If that response also requests a tool, fail with a stable explanation that no command ran; never persist either rejected response.
+- Answer direct Git-status questions from `getGitStatus` with system provenance instead of asking a model to restate deterministic repository state.
+
+### Reasons
+
+- A local model's control tokens are not an executable authorization or a user-facing answer.
+- Streaming a partial response before validation makes later rejection unable to retract leaked protocol text.
+- Repository status is an exact local fact and does not benefit from probabilistic reformulation or an agent tool request.
+- Separating Solo chat from the opt-in Rider tool loop makes tool availability explicit and testable.
+
+### Alternatives
+
+- Strip special tokens and keep the remaining text: rejected because a truncated tool payload is not proof of a valid answer.
+- Execute `Bash` requests from the model: rejected because Solo did not declare that tool and arbitrary model-generated shell commands cross the execution authorization boundary.
+- Rely only on a stronger system prompt: rejected because model output remains untrusted even when instructions are explicit.
+- Stream text immediately and validate only before persistence: rejected because the live activity UI would still display the invalid content.
+
+### Impact
+
+- The exact uncommitted-changes question returns paths and states from the selected repository's real Git status.
+- Raw or structured tool calls never appear as successful Solo messages and never run commands.
+- Agentic models remain usable for ordinary local conversation; one protocol-correction attempt handles recoverable template mismatches.
+- Streamed fixtures, repeated-tool failures, ordinary Markdown, and real temporary-Git behavior are regression tested.
