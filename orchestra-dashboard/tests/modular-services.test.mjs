@@ -3,6 +3,7 @@ import test from 'node:test';
 import { ProjectTaskScheduler } from '../dist-server/application/tasks/project-task-scheduler.js';
 import { ProjectTaskOwnershipService } from '../dist-server/application/tasks/project-task-ownership-service.js';
 import { TaskEventPublisher } from '../dist-server/application/tasks/task-event-publisher.js';
+import { TaskControlService } from '../dist-server/application/tasks/task-control-service.js';
 import { parseActivityPage, parseDispatchRequest } from '../dist-server/application/jules/requests.js';
 
 test('Modular scheduler — enforces global and per-project concurrency independently', async () => {
@@ -74,6 +75,49 @@ test('Modular scheduler — recovery requested during worker cleanup runs after 
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(started, [task.id, task.id]);
+});
+
+test('Modular task controls — pause and resume preserve task identity and scheduler ownership', async () => {
+  const task = { id: 'controlled-task', projectId: 'project', target: 'local', state: 'queued' };
+  const events = [];
+  const enqueued = [];
+  const store = {
+    getTask: () => task,
+    updateTask: (_id, patch) => Object.assign(task, patch),
+    manager: { attempts: { listByTaskId: () => [], update: () => {} } },
+  };
+  const scheduler = {
+    remove: () => {},
+    isRunning: () => false,
+    abortAndWait: async () => {},
+    enqueue: (id) => enqueued.push(id),
+  };
+  const controls = new TaskControlService(store, scheduler, new Map(), (taskId, agent, type, payload) => events.push({ taskId, agent, type, payload }));
+
+  assert.equal((await controls.pause(task.id)).state, 'paused');
+  assert.equal(events.at(-1).type, 'task.state');
+  assert.equal((await controls.resume(task.id)).state, 'recovering');
+  assert.deepEqual(enqueued, [task.id]);
+  assert.equal(events.at(-1).payload.state, 'recovering');
+});
+
+test('Modular task controls — stop preserves changed files as recoverable work', async () => {
+  const task = { id: 'stopped-task', projectId: 'project', target: 'local', state: 'running' };
+  const events = [];
+  const store = {
+    getTask: () => task,
+    getProject: () => ({ id: 'project', root: 'F:/project' }),
+    updateTask: (_id, patch) => Object.assign(task, patch),
+    manager: { attempts: { listByTaskId: () => [], update: () => {} } },
+  };
+  const scheduler = { remove: () => {}, isRunning: () => false, abortAndWait: async () => {}, enqueue: () => {} };
+  const readGitStatus = async () => ({ isGit: true, files: [{ path: 'src/changed.ts', status: 'M' }] });
+  const controls = new TaskControlService(store, scheduler, new Map(), (_taskId, _agent, type, payload) => events.push({ type, payload }), readGitStatus);
+
+  const stopped = await controls.stop(task.id);
+  assert.equal(stopped.state, 'recovery_required');
+  assert.match(stopped.error, /1 changed project file was preserved/);
+  assert.equal(events.some((event) => event.type === 'task.recovery-required'), true);
 });
 
 test('Modular ownership — never probes or releases a task while its process is running', async () => {

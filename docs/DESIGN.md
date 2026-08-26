@@ -854,3 +854,40 @@ Automatic routing mixed provider quota observations with execution decisions, wh
 - Review prompts have a 48,000-character ceiling, SHA-256 identity, and visible estimated input size in provider-run metadata.
 - Provider accounting failures never block task execution, but terminal task transitions reconcile abandoned running records when an agent fails or the process restarts.
 - The new database migration is additive and existing quota-policy values remain readable, though inactive for routing.
+
+## 2026-08-26: Compatibility facades with feature-owned runtime modules
+
+### Background
+
+Three files still concentrated unrelated responsibilities after the provider-neutral routing work: `server/agents.ts` combined provider adapters with routing policy and response contracts, `server/tasks.ts` combined process execution with controls and monitoring, and `src/App.tsx` combined the application controller with every feature view. Their public imports were widely used, so a direct rename or API rewrite would create unnecessary regression risk.
+
+### Decision
+
+- Keep `server/agents.ts` as a compatibility facade while moving its implementation under `server/application/agents/`.
+- Give model/quota selection and task-classification/continuation rules independent application-routing modules. Provider execution may consume those policies, but the policies do not depend on provider processes.
+- Keep the `TaskManager` constructor and public methods stable while delegating pause/resume/stop behavior to `TaskControlService` and monitor construction to `run-monitor-service` through narrow scheduler capabilities.
+- Keep `src/App.tsx` as the application controller and shell. Move dashboard composition to `app/AppViews.tsx`, and give checkpoints, MCP administration, and settings their own feature modules.
+- Preserve all existing HTTP contracts, persisted schemas, task states, model-selection behavior, and UI actions during this extraction.
+- Enforce the new boundaries with source-level architecture ratchets, including small compatibility/composition files and feature ownership checks.
+
+### Reasons
+
+- Compatibility facades let tests, routes, and downstream modules migrate incrementally without a flag-day import rewrite.
+- Pure routing policy is easier to test without starting LM Studio, Codex, Antigravity, or Jules.
+- Task control and monitoring have different failure modes from the implementation/review pipeline and should evolve independently.
+- Feature-owned React views reduce the chance that changing settings or checkpoint presentation affects conversation/task control code.
+- Size and ownership ratchets turn modularity from a one-time cleanup into a maintained constraint.
+
+### Alternatives
+
+- Rewrite all imports and public APIs at once: rejected because it would couple structural cleanup to broad route, test, and consumer changes.
+- Split files only by line count: rejected because arbitrary slices would retain mixed dependencies and lifecycle ownership.
+- Move all React views into one replacement file: rejected because settings, checkpoints, and MCP administration change independently and would recreate the original hotspot.
+- Replace `TaskManager` entirely: deferred because the remaining execution/review pipeline needs characterization seams before its public lifecycle can move safely.
+
+### Impact
+
+- `server/agents.ts` is a three-line public facade; model and classification policies have dedicated owners.
+- `TaskManager` delegates user controls and run telemetry while retaining its existing API.
+- `App.tsx` is below the current 900-line controller ceiling, and its largest administrative views no longer live in the controller or a shared catch-all view file.
+- Further extraction can target provider adapters and the remaining execution pipeline behind the same stable facades without changing callers.

@@ -195,3 +195,11 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Expose Codex's rolling 5h and weekly quota windows independently rather than as a single value
 - Add tests verifying provider run state transitions (cancelled/completed), usage aggregation, and task recovery
 - Update migration schema to include `provider_runs` with prompt fingerprint and latest version bump
+
+
+## [2026-08-26 18:34:00] Handoff Update
+- Decouples task lifecycle and monitoring from execution by introducing TaskControlService and run-monitor-service while keeping the public TaskManager API stable as a compatibility facade.
+- Extracts model selection and task classification into dedicated routing modules; keeps server/agents.ts as a minimal three-line facade for existing callers.
+- Moves large UI components out of App.tsx into feature-owned views (checkpoints, MCP, settings) to reduce the controller size below 900 lines.
+- Adds architecture tests enforcing module boundaries: agent facade line count, TaskManager delegation, and file ownership checks.
+- Introduces model-format utility for consistent display names across provider types.
