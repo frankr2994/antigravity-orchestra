@@ -283,7 +283,7 @@ test('manual commit summary is deterministic and contains no user prompt', () =>
 });
 
 test('pre-existing changes use the explicit commit action without a hidden model-driven baseline path', () => {
-  const taskSource = readFileSync(join(process.cwd(), 'server', 'tasks.ts'), 'utf8');
+  const taskSource = readFileSync(join(process.cwd(), 'server', 'application', 'tasks', 'task-execution-coordinator.ts'), 'utf8');
   const routeSource = readFileSync(join(process.cwd(), 'server', 'api', 'routes', 'tasks.ts'), 'utf8');
   assert.match(taskSource, /Use Commit & Push Changes to commit them/);
   assert.doesNotMatch(taskSource, /resolveBaseline|Auto-committed baseline|Review and preserve existing working tree modifications/);

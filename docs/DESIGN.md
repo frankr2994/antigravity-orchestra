@@ -891,3 +891,39 @@ Three files still concentrated unrelated responsibilities after the provider-neu
 - `TaskManager` delegates user controls and run telemetry while retaining its existing API.
 - `App.tsx` is below the current 900-line controller ceiling, and its largest administrative views no longer live in the controller or a shared catch-all view file.
 - Further extraction can target provider adapters and the remaining execution pipeline behind the same stable facades without changing callers.
+
+## 2026-08-26: Provider, task-runtime, Jules, and dashboard boundaries become explicit
+
+### Background
+
+The first compatibility extraction reduced the public hotspot files, but `application/agents/agent-services.ts` still contained every provider transport and local review workflow. Task execution still owned direct chat, conversation compaction, and postflight checks inline, Jules routing depended on the concrete `TaskManager`, and the React root continued to own provider polling and composer configuration.
+
+### Decision
+
+- Keep `server/agents.ts` and `application/agents/agent-services.ts` as compatibility export surfaces only. Put Codex, Antigravity, and LM Studio transport adapters under provider-owned directories; put Gemma orchestration, review, Git change summaries, prompt context, and shared data parsing under application-owned modules.
+- Keep `server/tasks.ts` as the stable `TaskManager` facade. Give the runtime pipeline the explicit `TaskExecutionCoordinator` name, and extract direct-agent execution plus conversation-memory/postflight behavior into focused services.
+- Make Jules routing depend on the `LocalTaskQueue` port, whose only capability is enqueueing an already-persisted task. It must not import or know the concrete task manager.
+- Keep `src/App.tsx` as a tiny composition root. Put the workspace controller under the dashboard feature, provider/Jules/MCP polling in `useDashboardTelemetry`, and execution-mode/model selection in `useComposerState`.
+- Preserve all route shapes, exported task and agent symbols, task lifecycle behavior, provider prompts, UI actions, and durable schemas. Ratchet the facades, ports, feature ownership, and prohibited dependencies in architecture tests.
+
+### Reasons
+
+- Provider protocols change independently and should not force local review or routing code to change with them.
+- Direct chat and bounded conversation context have distinct dependencies from the implementation/review loop, making them useful characterization seams for later stage extraction.
+- A one-method queue port prevents Jules workflow changes from acquiring pause, recovery, commit, or monitoring responsibilities by accident.
+- Feature hooks give telemetry refresh and composer state one owner each and keep network polling out of the React entry point.
+- Stable facades retain compatibility while callers migrate gradually to narrower application modules.
+
+### Alternatives
+
+- Replace every legacy import immediately: rejected because it increases regression scope without improving runtime ownership.
+- Let Jules retain a concrete `TaskManager` dependency for convenience: rejected because cloud-routing code only needs enqueue and should not gain unrelated lifecycle authority.
+- Split provider code into arbitrary equal-sized files: rejected because file size alone does not define a stable responsibility or dependency direction.
+- Move the React file without extracting hooks: rejected because relocation alone would preserve the state and polling coupling.
+
+### Impact
+
+- Provider transports, local-model workflows, review workflows, context preparation, and Git summarization can be tested and changed independently behind the existing agent imports.
+- `TaskManager` and `App` are now small public composition surfaces, while their runtime owners expose explicit seams for the next review-loop and chat-panel extractions.
+- Jules local routing can be constructed with a test double or alternative queue implementation without importing task execution.
+- Architecture tests fail if compatibility barrels regain process/network implementation, Jules reimports the task manager, or the root React component regains controller responsibilities.

@@ -1,5 +1,4 @@
 import type { Store } from '../../db.js';
-import type { TaskManager } from '../../tasks.js';
 import { classifyTask } from '../../agents.js';
 import { getGitStatus } from '../../git.js';
 import { config } from '../../config.js';
@@ -7,10 +6,11 @@ import { CommandIntentRepository } from '../../infrastructure/database/repositor
 import type { JulesSessionService } from './session-service.js';
 import { ApplicationError } from '../errors.js';
 import { decideFreeFirstRoute } from '../../domain/index.js';
+import type { LocalTaskQueue } from '../tasks/local-task-queue.js';
 
 export interface RoutedExecutionCommand { prompt: string; sessionId: string; idempotencyKey: string; target: 'auto' | 'local' | 'cloud'; }
 export class JulesRoutingService {
-  constructor(private readonly store: Store, private readonly tasks: TaskManager, private readonly cloud: JulesSessionService) {}
+  constructor(private readonly store: Store, private readonly tasks: LocalTaskQueue, private readonly cloud: JulesSessionService) {}
   async execute(projectId: string, command: RoutedExecutionCommand) {
     const project = this.store.getProject(projectId); if (!project) throw new ApplicationError('PROJECT_NOT_FOUND', 'Project not found.', 404);
     const session = this.store.manager.sessions.getById(command.sessionId);

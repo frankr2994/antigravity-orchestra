@@ -203,3 +203,13 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Moves large UI components out of App.tsx into feature-owned views (checkpoints, MCP, settings) to reduce the controller size below 900 lines.
 - Adds architecture tests enforcing module boundaries: agent facade line count, TaskManager delegation, and file ownership checks.
 - Introduces model-format utility for consistent display names across provider types.
+
+
+## [2026-08-26 19:37:46] Handoff Update
+- Documented new architectural boundaries for provider/task-runtime/Jules/dashboard and updated design docs with reasoning and alternatives
+- Added `agent-data-utils` with secret redaction, JSON parsing, and a robust repair function for malformed model responses
+- Refactored `agent-services.ts` into a thin compatibility layer forwarding to new domain modules (gemma, review, git)
+- Extracted task execution logic from the main controller into `TaskExecutionCoordinator`, splitting it by runtime/context concerns
+- Decoupled Jules routing from the concrete `TaskManager` via a minimal `LocalTaskQueue` port for isolated testing and deployment
+- Moved dashboard state and telemetry out of `App.tsx` into feature hooks (`useDashboardTelemetry`, `useComposerState`)
+- Tightened architecture tests to enforce small public facades, no network/process code in the React root, and correct dependency directions

@@ -161,7 +161,7 @@ test('Task ownership — concurrent prompts cannot both claim a project after st
 });
 
 test('Conversation UI — new conversations restore only their own task while exposing the project owner', () => {
-  const source = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const source = readFileSync(new URL('../src/features/dashboard/DashboardWorkspace.tsx', import.meta.url), 'utf8');
   assert.match(source, /restoreProjectTask\(project\.id, created\.id, true\)/);
   assert.match(source, /filter\(\(task\) => task\.sessionId === selectedSessionId\)/);
   assert.match(source, />Open active task</);

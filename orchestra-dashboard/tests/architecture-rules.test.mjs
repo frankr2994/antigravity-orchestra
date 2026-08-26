@@ -216,21 +216,23 @@ test('Modularity ratchet — Jules controllers depend only on application/config
   assert.deepEqual(violations, []);
 });
 
-test('Modularity ratchet — TaskManager delegates scheduling, events, and Git finalization', () => {
+test('Modularity ratchet — TaskManager is a stable facade over application execution', () => {
   const taskManager = readFileSync(join(serverDir, 'tasks.ts'), 'utf8');
-  assert.match(taskManager, /ProjectTaskScheduler/);
-  assert.match(taskManager, /TaskEventPublisher/);
-  assert.match(taskManager, /GitFinalizationService/);
-  assert.match(taskManager, /TaskControlService/);
-  assert.match(taskManager, /buildRunMonitor/);
-  assert.doesNotMatch(taskManager, /new EventEmitter|private readonly queue|private readonly controllers/);
-  assert.doesNotMatch(taskManager, /readCodexUsage|readAntigravityTranscript|function cloudMonitorSummary/);
+  const coordinator = readFileSync(join(serverDir, 'application', 'tasks', 'task-execution-coordinator.ts'), 'utf8');
+  assert.ok(taskManager.split(/\r?\n/).length <= 12, 'server/tasks.ts must remain a thin compatibility facade');
+  assert.match(taskManager, /TaskExecutionCoordinator/);
+  assert.match(coordinator, /ProjectTaskScheduler/);
+  assert.match(coordinator, /TaskEventPublisher/);
+  assert.match(coordinator, /GitFinalizationService/);
+  assert.match(coordinator, /TaskControlService/);
+  assert.match(coordinator, /DirectTaskExecutor/);
+  assert.match(coordinator, /TaskConversationContext/);
 });
 
-test('Modularity ratchet — frontend contracts and UI primitives stay outside App', () => {
+test('Modularity ratchet — frontend root delegates to its feature workspace', () => {
   const app = readFileSync(resolve(serverDir, '..', 'src', 'App.tsx'), 'utf8');
-  assert.match(app, /from ['"]\.\/app\/types['"]/);
-  assert.match(app, /from ['"]\.\/shared\/ui['"]/);
+  assert.ok(app.split(/\r?\n/).length <= 8, 'App must remain a composition root');
+  assert.match(app, /DashboardWorkspace/);
   assert.doesNotMatch(app, /^type (?:Project|Task|TaskEvent|SettingsData)\s*=/m);
   assert.doesNotMatch(app, /^function (?:Metric|PageHeader|Card|NavButton|Empty|StatusDot|StateBadge|Field)\b/m);
 });
@@ -246,21 +248,27 @@ test('Modularity ratchet — routing policy and managed worktrees have provider-
 
 test('Modularity ratchet — App delegates workspace transactions, API transport, and usage presentation', () => {
   const app = readFileSync(resolve(serverDir, '..', 'src', 'App.tsx'), 'utf8');
+  const workspace = readFileSync(resolve(serverDir, '..', 'src', 'features', 'dashboard', 'DashboardWorkspace.tsx'), 'utf8');
   const views = readFileSync(resolve(serverDir, '..', 'src', 'app', 'AppViews.tsx'), 'utf8');
-  assert.match(app, /useWorkspaceState/);
-  assert.match(app, /useApiClient/);
-  assert.match(app, /AppViews/);
+  assert.match(app, /DashboardWorkspace/);
+  assert.match(workspace, /useWorkspaceState/);
+  assert.match(workspace, /useApiClient/);
+  assert.match(workspace, /useDashboardTelemetry/);
+  assert.match(workspace, /useComposerState/);
   assert.match(views, /ProviderUsageCard/);
-  assert.doesNotMatch(app, /useState<Project\[\]>/);
-  assert.doesNotMatch(app, /function api</);
-  assert.doesNotMatch(app, /function resetTimer/);
+  assert.doesNotMatch(workspace, /useState<Project\[\]>/);
+  assert.doesNotMatch(workspace, /function api</);
+  assert.doesNotMatch(workspace, /function resetTimer/);
 });
 
 test('Modularity ratchet — agent facade and routing policies remain separated', () => {
   const facade = readFileSync(join(serverDir, 'agents.ts'), 'utf8');
+  const services = readFileSync(join(serverDir, 'application', 'agents', 'agent-services.ts'), 'utf8');
   const modelPolicy = readFileSync(join(serverDir, 'application', 'routing', 'model-policy.ts'), 'utf8');
   const classificationPolicy = readFileSync(join(serverDir, 'application', 'routing', 'task-classification-policy.ts'), 'utf8');
   assert.ok(facade.split(/\r?\n/).length <= 5, 'server/agents.ts must remain a compatibility facade');
+  assert.ok(services.split(/\r?\n/).length <= 30, 'agent services must remain a compatibility barrel');
+  assert.doesNotMatch(services, /runProcess|codexAppServer|fetch\(/);
   assert.match(facade, /agent-services/);
   assert.match(modelPolicy, /selectModels/);
   assert.match(modelPolicy, /selectReviewProfile/);
@@ -271,8 +279,10 @@ test('Modularity ratchet — agent facade and routing policies remain separated'
 test('Modularity ratchet — frontend feature views stay outside the App controller', () => {
   const sourceRoot = resolve(serverDir, '..', 'src');
   const app = readFileSync(join(sourceRoot, 'App.tsx'), 'utf8');
+  const workspace = readFileSync(join(sourceRoot, 'features', 'dashboard', 'DashboardWorkspace.tsx'), 'utf8');
   const appViews = readFileSync(join(sourceRoot, 'app', 'AppViews.tsx'), 'utf8');
-  assert.ok(app.split(/\r?\n/).length < 900, 'App controller must remain below the current modularity ceiling');
+  assert.ok(app.split(/\r?\n/).length <= 8, 'App must remain a tiny composition root');
+  assert.ok(workspace.split(/\r?\n/).length < 750, 'Dashboard workspace must remain below the extracted controller ceiling');
   assert.ok(appViews.split(/\r?\n/).length < 200, 'AppViews must remain a small composition module');
   for (const feature of [
     ['checkpoints', 'CheckpointsView.tsx'],
@@ -282,4 +292,10 @@ test('Modularity ratchet — frontend feature views stay outside the App control
     assert.ok(statSync(join(sourceRoot, 'features', ...feature)).isFile(), `${feature.join('/')} must remain feature-owned`);
   }
   assert.doesNotMatch(app, /^function (?:CheckpointsView|McpServersView|SettingsView|TaskActivity)\b/m);
+});
+
+test('Modularity ratchet — Jules routing depends on the local queue port, not TaskManager', () => {
+  const routing = readFileSync(join(serverDir, 'application', 'jules', 'routing-service.ts'), 'utf8');
+  assert.match(routing, /LocalTaskQueue/);
+  assert.doesNotMatch(routing, /from\s+['"][^'"]*tasks\.js['"]/);
 });
