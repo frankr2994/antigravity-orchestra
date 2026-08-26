@@ -6,6 +6,7 @@ import { config } from '../../config.js';
 import { CommandIntentRepository } from '../../infrastructure/database/repositories/intents.js';
 import type { JulesSessionService } from './session-service.js';
 import { ApplicationError } from '../errors.js';
+import { decideFreeFirstRoute } from '../../domain/index.js';
 
 export interface RoutedExecutionCommand { prompt: string; sessionId: string; idempotencyKey: string; target: 'auto' | 'local' | 'cloud'; }
 export class JulesRoutingService {
@@ -16,22 +17,29 @@ export class JulesRoutingService {
     if (!session || session.projectId !== projectId) throw new ApplicationError('SESSION_PROJECT_MISMATCH', 'Session does not belong to the selected project.', 409);
     const classified = await classifyTask(command.prompt);
     const reasons: string[] = [];
+    let worker: 'gemma' | 'jules' | 'antigravity' = command.target === 'cloud' ? 'jules' : 'antigravity';
     let target: 'local' | 'cloud' = command.target === 'cloud' ? 'cloud' : 'local';
     if (command.target === 'auto') {
-      const status = await getGitStatus(project.root);
-      const source = this.store.manager.julesSourceMappings.get(projectId);
-      if (!classified.classification.mutating || classified.classification.type === 'question') reasons.push('Read-only and question work stays local for low latency.');
-      else if (!status.isGit || status.dirty || !status.head || !status.upstream) reasons.push('Cloud dispatch requires a clean, pushed Git branch.');
-      else if (!source || source.targetBranch !== status.branch) reasons.push('No current verified Jules source mapping exists for this branch.');
-      else if (this.store.manager.julesCapacity.activeCount() >= config.jules.maxConcurrentSessions) reasons.push('Configured Jules concurrency is currently full.');
-      else if (classified.classification.complexity === 'deep') { target = 'cloud'; reasons.push('A deep, mutating, repository-backed task is suitable for long-running Jules execution.'); }
-      else reasons.push('Standard interactive work stays local unless Cloud is explicitly selected.');
+      let julesReady = false;
+      let julesReason = '';
+      if (classified.classification.mutating && classified.classification.complexity !== 'small') {
+        const status = await getGitStatus(project.root);
+        const source = this.store.manager.julesSourceMappings.get(projectId);
+        if (!status.isGit || status.dirty || !status.head || !status.upstream) julesReason = 'Jules requires a clean, pushed Git branch.';
+        else if (!source || source.targetBranch !== status.branch) julesReason = 'No current verified Jules source mapping exists for this branch.';
+        else if (this.store.manager.julesCapacity.activeCount() >= config.jules.maxConcurrentSessions) julesReason = 'Configured Jules concurrency is currently full.';
+        else julesReady = true;
+      }
+      const decision = decideFreeFirstRoute(classified.classification, command.prompt, { julesReady, julesReason });
+      target = decision.target;
+      worker = decision.worker;
+      reasons.push(decision.reason);
     } else reasons.push(`The user explicitly selected ${command.target} execution.`);
 
     if (target === 'cloud') {
       const response = await this.cloud.dispatch(projectId, { prompt: command.prompt, sessionId: command.sessionId,
         requirePlanApproval: true, autoPr: true, idempotencyKey: `route-cloud:${command.idempotencyKey}` });
-      this.store.addEvent(String(response.taskId), 'orchestra', 'task.routed', { target, reasons, source: classified.source });
+      this.store.addEvent(String(response.taskId), 'orchestra', 'task.routed', { target, worker, reasons, source: classified.source });
       return { ...response, target, reasons, classification: classified.classification };
     }
     const key = `route-local:${command.idempotencyKey}`;
@@ -47,7 +55,7 @@ export class JulesRoutingService {
       const task = this.store.createTask(projectId, command.sessionId, command.prompt, JSON.stringify(classified.classification), null, 'local'); taskId = task.id;
       const { intent } = this.store.manager.commandIntents.createOrGet({ taskId, kind: 'execution.route', idempotencyKey: key, requestHash: hash });
       this.store.addMessage({ sessionId: command.sessionId, taskId, role: 'user', agent: 'system', content: command.prompt });
-      this.store.addEvent(taskId, 'orchestra', 'task.routed', { target, reasons, source: classified.source });
+      this.store.addEvent(taskId, 'orchestra', 'task.routed', { target, worker, reasons, source: classified.source });
       response = { ...task, target, reasons, classification: classified.classification };
       this.store.manager.commandIntents.transition(intent.id, 'pending', 'acknowledged', { response });
     });

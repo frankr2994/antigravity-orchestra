@@ -117,7 +117,7 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
       store,
     });
     assert.equal(qRes.target, 'local');
-    assert.equal(qRes.worker, 'antigravity');
+    assert.equal(qRes.worker, 'gemma');
 
     // 2. Deep complexity refactoring -> cloud
     const deepRes = await routeTask({
@@ -140,7 +140,7 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
     assert.equal(deepRes.worker, 'jules');
     assert.equal(deepRes.preflightOk, true);
 
-    // 3. Local quota pressure -> cloud
+    // 3. Quota telemetry is display-only; a safe small mutation stays with bounded Gemma
     const quotaRes = await routeTask({
       taskId: task.id,
       projectRoot: fixtureDir,
@@ -158,10 +158,10 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
       julesClient,
       store,
     });
-    assert.equal(quotaRes.target, 'cloud');
-    assert.equal(quotaRes.worker, 'jules');
+    assert.equal(quotaRes.target, 'local');
+    assert.equal(quotaRes.worker, 'gemma');
 
-    // 4. Standard mutating task -> local interactive
+    // 4. Standard mutating task -> Jules when repository preflight succeeds
     const normalRes = await routeTask({
       taskId: task.id,
       projectRoot: fixtureDir,
@@ -178,8 +178,8 @@ test('Phase 15 Router — Auto-routing decision matrix handles questions, quota,
       julesClient,
       store,
     });
-    assert.equal(normalRes.target, 'local');
-    assert.equal(normalRes.worker, 'antigravity');
+    assert.equal(normalRes.target, 'cloud');
+    assert.equal(normalRes.worker, 'jules');
 
     // Verify task events logged
     const events = store.listEvents(task.id);

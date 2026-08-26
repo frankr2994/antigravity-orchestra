@@ -255,11 +255,13 @@ export class JulesSessionManager {
         lastActivityAt: newest?.createTime || cloudSession.lastActivityAt,
       });
       if (julesState === 'COMPLETED' && cloudSession.state !== 'COMPLETED') {
+        this.store.finishActiveProviderRun(cloudSession.taskId, 'jules', 'completed');
         this.store.updateTask(cloudSession.taskId, { state: mapping.taskState });
         this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', { remoteSessionId, prUrl });
         this.store.manager.evidence.record({ taskId: cloudSession.taskId, attemptId: cloudSession.attemptId,
           kind: 'provider_output', outcome: 'completed', payload: { remoteSessionId, prUrl: prUrl ?? null, state: julesState } });
       } else if (julesState === 'FAILED' && cloudSession.state !== 'FAILED') {
+        this.store.finishActiveProviderRun(cloudSession.taskId, 'jules', 'failed');
         this.store.updateTask(cloudSession.taskId, { state: 'failed' });
         this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.failed', { remoteSessionId });
         this.store.manager.julesCapacity.release(cloudSession.taskId);
@@ -359,6 +361,7 @@ export class JulesSessionManager {
         this.store.updateTask(task.id, { state: 'cancelled', error: 'The Jules cloud session was deleted at the user\'s request.' });
       }
       this.store.manager.julesCapacity.release(cloudSession.taskId);
+      this.store.finishActiveProviderRun(cloudSession.taskId, 'jules', 'cancelled');
       this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.cancelled', { remoteSessionId });
     });
     return { ok: true };

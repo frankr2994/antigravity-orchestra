@@ -134,6 +134,9 @@ export class JulesReviewService {
     if (!project || !cloud || !mapping || !cloud.prUrl) {
       throw new ApplicationError('PR_NOT_READY', 'The task does not yet have a verified Jules pull request identity.', 409);
     }
+    // A verified PR identity means Jules has finished its implementation run.
+    // Local verification, review, and integration are tracked independently.
+    this.store.finishActiveProviderRun(taskId, 'jules', 'completed');
     if (!FULL_SHA.test(cloud.baseSha)) throw new ApplicationError('INVALID_BASE_SHA', 'The dispatch base identity is invalid.', 409);
     const pullRequest = parsePullRequestUrl(cloud.prUrl);
     if (pullRequest.owner.toLowerCase() !== mapping.githubOwner.toLowerCase() || pullRequest.repo.toLowerCase() !== mapping.githubRepo.toLowerCase()) {

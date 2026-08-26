@@ -15,6 +15,9 @@ import { formatDate, formatDuration, humanState } from './shared/format';
 import { JulesTaskPanel } from './features/jules/JulesTaskPanel';
 import { JulesSettingsCard } from './features/jules/JulesSettingsCard';
 import { JulesLiveActivity, JulesServiceRow } from './features/jules/JulesDashboard';
+import { ProviderUsageCard } from './features/usage/ProviderUsageCard';
+import { useApiClient } from './app/useApiClient';
+import { useWorkspaceState } from './app/workspace-state';
 
 const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
 const terminalStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled', 'baseline_required', 'recovery_required', 'review_disputed']);
@@ -35,17 +38,10 @@ function formatGenericModelName(m: { id: string; displayName?: string; quantizat
 }
 
 function App() {
-  const [token, setToken] = useState('');
+  const { token, setToken, api } = useApiClient();
   const [view, setView] = useState<View>('dashboard');
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [project, setProject] = useState<Project | null>(null);
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [session, setSession] = useState<Session | null>(null);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [activeTask, setActiveTask] = useState<Task | null>(null);
-  const [projectOwnerTask, setProjectOwnerTask] = useState<Task | null>(null);
-  const [activity, setActivity] = useState<TaskEvent[]>([]);
+  const [{ projects, project, sessions, session, messages, tasks, activeTask, projectOwnerTask, activity }, workspace] = useWorkspaceState();
+  const { setProjects, setProject, setSessions, setSession, setMessages, setTasks, setActiveTask, setProjectOwnerTask, setActivity } = workspace;
   const [stats, setStats] = useState<Stats | null>(null);
   const [health, setHealth] = useState<Health>({});
   const [usage, setUsage] = useState<Record<string, ProviderUsage>>({});
@@ -90,40 +86,8 @@ function App() {
   const [sessionTitleDraft, setSessionTitleDraft] = useState('');
   const streamRef = useRef<EventSource | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
-  const tokenRef = useRef('');
   const recoveryRequestsRef = useRef(new Set<string>());
   const monitoredTaskId = activeTask?.id;
-
-  const authenticatedFetch = useCallback(async (path: string, options: RequestInit = {}, overrideToken?: string) => {
-    const request = (activeToken: string) => fetch(path, {
-        ...options,
-        headers: { 'Content-Type': 'application/json', ...(activeToken ? { 'X-Orchestra-Token': activeToken } : {}), ...options.headers },
-      });
-    let response = await request(tokenRef.current || overrideToken || '');
-    if (response.status === 403) {
-      const bootstrapResponse = await fetch('/api/bootstrap', { cache: 'no-store' });
-      if (bootstrapResponse.ok) {
-        const bootstrap = await bootstrapResponse.json();
-        if (typeof bootstrap.token === 'string' && bootstrap.token) {
-          tokenRef.current = bootstrap.token;
-          setToken(bootstrap.token);
-          response = await request(bootstrap.token);
-        }
-      }
-    }
-    return response;
-  }, []);
-
-  const api = useCallback(async <T,>(path: string, options: RequestInit = {}, overrideToken?: string): Promise<T> => {
-    const response = await authenticatedFetch(path, options, overrideToken);
-    const body = response.status === 204 ? null : await response.json().catch(() => null);
-    if (!response.ok) {
-      const detail = body?.resolution || body?.nextAction;
-      const code = body?.code ? ` [${body.code}]` : '';
-      throw new Error(`${body?.error || `Request failed (${response.status})`}${detail ? ` Next step: ${detail}` : ''}${code}`);
-    }
-    return body as T;
-  }, [authenticatedFetch]);
 
   const reload = useCallback(async (projectId?: string) => {
     const [projectList, taskList] = await Promise.all([
@@ -132,7 +96,7 @@ function App() {
     ]);
     setProjects(projectList); setTasks(taskList);
     if (projectId) setProject(projectList.find((item) => item.id === projectId) || null);
-  }, [api]);
+  }, [api, setProject, setProjects, setTasks]);
 
   const fetchMcpServers = useCallback(async (force = false) => {
     try {
@@ -156,7 +120,10 @@ function App() {
   }, [api]);
 
   const refreshJulesDashboard = useCallback(async (force = false) => {
-    const suffix = force ? '?force=true' : '';
+    const query = new URLSearchParams();
+    if (force) query.set('force', 'true');
+    if (monitoredTaskId) query.set('taskId', monitoredTaskId);
+    const suffix = query.size ? `?${query.toString()}` : '';
     const nextUsage = await api<Record<string, ProviderUsage>>(`/api/usage${suffix}`);
     setUsage(nextUsage);
     if (!project?.id) { setJulesReadiness(null); setJulesActivity(null); return; }
@@ -165,7 +132,7 @@ function App() {
       api<JulesActivitySummary>(`/api/projects/${project.id}/jules-activity-summary`),
     ]);
     setJulesReadiness(nextReadiness); setJulesActivity(nextActivity);
-  }, [api, project?.id]);
+  }, [api, monitoredTaskId, project?.id]);
 
   async function toggleServer(id: string, enabled: boolean) {
     setMcpBusy(true);
@@ -189,7 +156,6 @@ function App() {
     void fetch('/api/bootstrap').then(async (response) => {
       if (!response.ok) throw new Error('Backend bootstrap failed.');
       const data = await response.json();
-      tokenRef.current = data.token;
       setToken(data.token); setProjects(data.projects); setTasks(data.tasks); setHealth(data.health); setSettings(data.settings);
       if (data.projects[0]) await activateProject(data.projects[0], data.token);
       void fetchMcpServers();
@@ -261,14 +227,14 @@ function App() {
     if (!project) return;
     try {
       const created = await api<Session>(`/api/projects/${project.id}/sessions`, { method: 'POST', body: JSON.stringify({ title: 'New conversation' }) });
-      setSessions((current) => [created, ...current]); setSession(created); setMessages([]); setActivity([]); await restoreProjectTask(project.id, created.id, true);
+      workspace.newConversation(created); await restoreProjectTask(project.id, created.id, true);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
   }
 
   async function selectSession(next: Session) {
     setEditingSessionTitle(false);
     await api(`/api/sessions/${next.id}/activate`, { method: 'POST', body: '{}' });
-    setSession(next); setMessages(await api<Message[]>(`/api/sessions/${next.id}/messages`)); setActivity([]); await restoreProjectTask(next.projectId, next.id);
+    workspace.openSession(next, await api<Message[]>(`/api/sessions/${next.id}/messages`)); await restoreProjectTask(next.projectId, next.id);
   }
 
   async function renameSession(sessionId: string, newTitle: string) {
@@ -851,22 +817,6 @@ function App() {
   );
 }
 
-function formatResetTimer(isoDate: string | null | undefined): string | null {
-  if (!isoDate) return null;
-  const target = new Date(isoDate).getTime();
-  if (isNaN(target)) return null;
-  const diffMs = target - Date.now();
-  if (diffMs <= 0) return 'resets soon';
-  const mins = Math.floor(diffMs / 60_000);
-  if (mins < 60) return `resets in ${mins}m`;
-  const hours = Math.floor(mins / 60);
-  const remMins = mins % 60;
-  if (hours < 24) return `resets in ${hours}h ${remMins}m`;
-  const days = Math.floor(hours / 24);
-  const remHours = hours % 24;
-  return `resets in ${days}d ${remHours}h`;
-}
-
 function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, mcp, project, tasks, activeTask, monitor, events, explanation, explanationBusy, question, onQuestion, onAsk, onExplain, onPause, onResume, onStop, onConfigureJules, onRefreshJules }: { api: <T>(path: string, options?: RequestInit) => Promise<T>; stats: Stats | null; health: Health; usage: Record<string, ProviderUsage>; julesReadiness: JulesReadiness | null; julesActivity: JulesActivitySummary | null; mcp: McpStatus | null; project: Project | null; tasks: Task[]; activeTask: Task | null; monitor: RunMonitor | null; events: TaskEvent[]; explanation: string; explanationBusy: boolean; question: string; onQuestion: (value: string) => void; onAsk: () => void; onExplain: () => void; onPause: (task?: Task | null) => void; onResume: (task?: Task | null) => void; onStop: (task?: Task | null) => void; onConfigureJules: () => void; onRefreshJules: (force?: boolean) => Promise<void> }) {
   const running = tasks.filter((task) => !terminalStates.has(task.state)).length;
   return <section><PageHeader eyebrow="Local system and agent status" title="Command Center" subtitle={project ? `Working directory: ${project.root}` : 'Select a project to begin.'} />
@@ -879,68 +829,7 @@ function Dashboard({ api, stats, health, usage, julesReadiness, julesActivity, m
     </div>
     <div className="two-column">
       <Card title="Agent services" icon={<Server />}><div className="service-list">{Object.entries(health).map(([name, item]) => <div key={name}><StatusDot status={item.status} ok={item.available !== false && (item.modelAvailable ?? true)} /><span>{name}</span><small>{item.version || (item.modelAvailable === false ? 'Model missing' : item.available === false ? 'Unavailable' : 'Ready')}</small></div>)}<JulesServiceRow api={api} projectId={project?.id ?? null} readiness={julesReadiness} onConfigure={onConfigureJules} onRefresh={onRefreshJules} /></div></Card>
-      <Card title="Provider usage & Quotas" icon={<Zap />}>
-        <div className="provider-usage-grid">
-          {(['antigravity', 'codex', 'jules'] as const).map((name) => {
-            const item = usage[name];
-            const displayName = name === 'antigravity' ? 'Antigravity' : name === 'codex' ? 'OpenAI Codex' : 'Google Jules';
-            const quotas = item?.quotas || [];
-            const context = item?.context;
-            return (
-              <div key={name} className="provider-usage-block">
-                <div className="provider-block-header">
-                  <div className="provider-title">
-                    <StatusDot ok={item?.available === true} />
-                    <strong>{displayName}</strong>
-                    {item?.model && <span className="provider-model-badge">{item.model}</span>}
-                  </div>
-                  {context?.usedPercent !== null && context?.usedPercent !== undefined && (
-                    <span className="provider-context-badge">
-                      {context.usedPercent.toFixed(0)}% ctx ({((context.inputTokens ?? 0) / 1000).toFixed(0)}k/{((context.windowTokens ?? 1048576) / 1000).toFixed(0)}k)
-                    </span>
-                  )}
-                </div>
-                {name === 'jules' && item?.limitCount !== null && item?.limitCount !== undefined && <div className="jules-usage-counts">
-                  <span><strong>{item.usedCount ?? '—'}</strong> used</span>
-                  <span><strong>{item.remainingCount ?? '—'}</strong> remaining</span>
-                  <span><strong>{item.limitCount}</strong> limit</span>
-                  <span><strong>{item.activeSessions ?? '—'}</strong> active</span>
-                  {item.stale && <span className="pill">Stale</span>}
-                </div>}
-                {item?.available && quotas.length > 0 ? (
-                  <div className="quota-pill-list">
-                    {quotas.map((q) => {
-                      const rem = q.remainingPercent;
-                      const reset = formatResetTimer(q.resetsAt);
-                      const isGemini = q.id.startsWith('gemini') || q.group?.includes('Gemini');
-                      const is3p = q.id.startsWith('3p') || q.group?.includes('Claude') || q.group?.includes('GPT');
-                      const groupLabel = isGemini ? 'Gemini' : is3p ? 'Claude/GPT' : q.group || 'Codex';
-                      const windowLabel = q.window === '5h' || q.id.includes('5h') ? '5h Limit' : 'Weekly';
-                      const statusClass = rem === null ? 'unknown' : rem > 30 ? 'good' : rem > 10 ? 'warning' : 'critical';
-                      return (
-                        <div key={q.id} className={`quota-pill status-${statusClass}`}>
-                          <div className="quota-pill-header">
-                            <span className="quota-group-tag">{groupLabel}</span>
-                            <span className="quota-window-tag">{windowLabel}</span>
-                          </div>
-                          <div className="quota-pill-body">
-                            <span className="quota-percent">{rem !== null && rem !== undefined ? `${rem.toFixed(1)}% left` : 'Active'}</span>
-                            {reset && <span className="quota-reset-timer">{reset}</span>}
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <small className="provider-fallback-msg">
-                    {item?.available ? (item.source || 'Connected') : (item?.reason || 'Waiting for provider source.')}
-                  </small>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </Card>
+      <ProviderUsageCard usage={usage} hasTask={Boolean(activeTask)} />
     </div>
     <div className="jules-live-card"><JulesLiveActivity summary={julesActivity} /></div>
     <div className="mcp-panel"><Card title="Rider MCP" icon={<Terminal />}>
@@ -1753,9 +1642,9 @@ function SettingsView({
       </div>
 
       <div style={{ marginTop: '20px' }}>
-        <Card title="Quota-Based Model Routing Policy" icon={<Zap />}>
+        <Card title="Legacy quota routing policy (inactive)" icon={<Zap />}>
           <p style={{ color: 'var(--muted)', fontSize: '12px', marginBottom: '14px' }}>
-            Orchestra dynamically shifts model reasoning and review profiles as your weekly API quota depletes. Customize the exact models and reasoning effort levels you want running at each remaining quota threshold.
+            These saved tiers are retained for compatibility but no longer influence automatic work. Codex capacity is displayed in the dashboard; task role and risk select the reviewer.
           </p>
           <div className="quota-tiers-table">
             {tiers.map((t) => {
@@ -1770,7 +1659,7 @@ function SettingsView({
                   <div className="tier-controls">
                     <div className="tier-field">
                       <label>Antigravity Model</label>
-                      <select value={cfg.antigravityModel} onChange={(e) => updateTier(t.key, 'antigravityModel', e.target.value)}>
+                      <select disabled value={cfg.antigravityModel} onChange={(e) => updateTier(t.key, 'antigravityModel', e.target.value)}>
                         {(availableModels?.antigravity || [
                           { id: 'gemini-3.7-flash-high', name: 'Gemini 3.7 Flash (High)' },
                           { id: 'gemini-3.7-flash-medium', name: 'Gemini 3.7 Flash (Medium)' },
@@ -1785,7 +1674,7 @@ function SettingsView({
                     </div>
                     <div className="tier-field">
                       <label>Codex Review Model</label>
-                      <select value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
+                      <select disabled value={cfg.codexModel || 'none'} onChange={(e) => updateTier(t.key, 'codexModel', e.target.value)}>
                         {(availableModels?.codex || [
                           { id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' },
                           { id: 'gpt-5.6-terra', name: 'GPT-5.6-Terra' },
@@ -1803,7 +1692,7 @@ function SettingsView({
                       <label>Codex Effort</label>
                       <select
                         value={cfg.codexEffort || 'low'}
-                        disabled={!cfg.codexModel || cfg.codexModel === 'none'}
+                        disabled
                         onChange={(e) => updateTier(t.key, 'codexEffort', e.target.value)}
                       >
                         {(() => {
@@ -1829,7 +1718,7 @@ function SettingsView({
             })}
           </div>
           <div style={{ marginTop: '16px', display: 'flex', justifyContent: 'flex-end' }}>
-            <button className="primary" onClick={() => onSave({ quotaPolicy: policy })}>Save Quota Policy</button>
+            <button className="primary" disabled>Quota routing disabled</button>
           </div>
         </Card>
       </div>

@@ -1,6 +1,6 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { config } from './config.js';
-import type { ChatMessage, Project, Session, TaskEvent, TaskRecord, ExecutionTarget } from './types.js';
+import type { ChatMessage, Project, Session, TaskEvent, TaskRecord, ExecutionTarget, ProviderId, ProviderRun, ProviderRunStatus, ProviderTokenUsage, UsageWindow } from './types.js';
 import { DatabaseManager } from './infrastructure/database/index.js';
 
 // ============================================================================
@@ -149,5 +149,22 @@ export class Store {
 
   setSetting(key: string, value: string) {
     this.manager.settings.set(key, value);
+  }
+
+  startProviderRun(input: { taskId: string; provider: ProviderId; operation: string; model?: string | null; primaryWorker?: boolean; promptFingerprint?: string | null; estimatedInputTokens?: number | null }): ProviderRun {
+    return this.manager.providerRuns.start(input);
+  }
+
+  finishProviderRun(id: string, status: Exclude<ProviderRunStatus, 'running'>, usage?: Partial<ProviderTokenUsage>): ProviderRun {
+    return this.manager.providerRuns.finish(id, status, usage);
+  }
+
+  finishActiveProviderRun(taskId: string, provider: ProviderId, status: Exclude<ProviderRunStatus, 'running'>, usage?: Partial<ProviderTokenUsage>): ProviderRun | null {
+    const active = this.manager.providerRuns.findRunning(taskId, provider);
+    return active ? this.manager.providerRuns.finish(active.id, status, usage) : null;
+  }
+
+  providerUsage(provider: ProviderId, since: string, taskId?: string): UsageWindow {
+    return this.manager.providerRuns.summarize(provider, since, taskId);
   }
 }

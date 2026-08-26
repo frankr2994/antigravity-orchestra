@@ -40,6 +40,7 @@ export class JulesSessionService {
       if (recovered && (existing.state === 'pending' || existing.state === 'ambiguous')) {
         const recoveredTask = this.store.getTask(existing.taskId);
         if (!recoveredTask) throw new ApplicationError('DISPATCH_RECONCILIATION_REQUIRED', 'The dispatch task could not be recovered.', 409);
+        this.ensureJulesRun(existing.taskId);
         const response = { ok: true, taskId: existing.taskId, sessionId: recoveredTask.sessionId,
           remoteSessionId: recovered.remoteSessionId, cloudSession: recovered };
         this.store.manager.transaction(() => {
@@ -63,6 +64,7 @@ export class JulesSessionService {
       if (!sessionId) sessionId = this.store.createSession(project.id, command.prompt.slice(0, 40)).id;
       const task = this.store.createTask(project.id, sessionId!, command.prompt, null, null, 'cloud');
       taskId = task.id;
+      this.store.startProviderRun({ taskId, provider: 'jules', operation: 'implementation', primaryWorker: true });
       this.store.addMessage({ sessionId, taskId, role: 'user', agent: 'system', content: command.prompt });
       this.store.manager.commandIntents.createOrGet({
         taskId, kind: 'jules.dispatch', idempotencyKey: command.idempotencyKey, requestHash,
@@ -90,6 +92,7 @@ export class JulesSessionService {
             { nextAction: 'Keep this task open while Orchestra checks Jules for the existing session.', retryable: false });
         }
         this.store.manager.commandIntents.transition(intent.id, 'pending', 'failed', { errorCode: 'JULES_DISPATCH_REJECTED' });
+        this.store.finishActiveProviderRun(taskId, 'jules', 'failed');
         this.store.manager.julesCapacity.release(taskId);
         throw new ApplicationError('JULES_DISPATCH_REJECTED', result.error ?? 'Jules dispatch was rejected.', 400,
           { resolution: result.resolution, nextAction: result.resolution || 'Open Jules setup diagnostics, correct the failed preflight item, and retry.', retryable: true });
@@ -198,6 +201,7 @@ export class JulesSessionService {
         this.store.updateTask(taskId, { state: 'cancelled', error: 'The Jules cloud session was deleted at the user\'s request.' });
       }
       this.store.manager.julesCapacity.release(taskId);
+      this.store.finishActiveProviderRun(taskId, 'jules', 'cancelled');
       this.store.manager.managedGitResources.scheduleTaskCleanup(taskId);
       this.store.addEvent(taskId, 'jules', 'cloud.cancelled', {
         remoteSessionId: cloud.remoteSessionId,
@@ -274,6 +278,7 @@ export class JulesSessionService {
     const response = { ok: true, taskId: intent.taskId, sessionId: task.sessionId,
       remoteSessionId: adopted.remoteSessionId, cloudSession: adopted.cloudSession };
     this.store.manager.transaction(() => {
+      this.ensureJulesRun(intent.taskId);
       this.store.manager.commandIntents.transition(intent.id, intent.state, 'acknowledged', {
         attemptId: adopted.attempt.id, providerResource: adopted.cloudSession.sessionResourceName, response,
       });
@@ -281,6 +286,11 @@ export class JulesSessionService {
         stage: 'dispatch', subjectSha: baseSha, data: { status: 'provider_reconciled', remoteSessionId: adopted.remoteSessionId } });
     });
     return response;
+  }
+  private ensureJulesRun(taskId: string) {
+    if (!this.store.manager.providerRuns.findRunning(taskId, 'jules')) {
+      this.store.startProviderRun({ taskId, provider: 'jules', operation: 'implementation', primaryWorker: true });
+    }
   }
   private requireCloudSession(taskId: string) {
     const task = this.requireTask(taskId);

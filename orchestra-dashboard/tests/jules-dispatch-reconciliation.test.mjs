@@ -60,6 +60,7 @@ test('ambiguous Jules dispatch is reconciled from the unique remote task identit
     assert.equal(store.manager.commandIntents.getById(intent.id).state, 'acknowledged');
     assert.equal(store.manager.cloudSessions.getByTaskId(task.id).remoteSessionId, 'accepted-123');
     assert.equal(store.getTask(task.id).state, 'running');
+    assert.equal(store.manager.providerRuns.findRunning(task.id, 'jules')?.primaryWorker, true);
   } finally {
     store.close();
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }

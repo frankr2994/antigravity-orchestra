@@ -38,7 +38,8 @@ export function createBootstrapRouter(store: Store, extensions: BootstrapTelemet
   router.get('/usage', async (req, res, next) => {
     try {
       const force = parseForceRefresh(req.query.force);
-      res.json(await getUsage(extensions.julesUsage ? () => extensions.julesUsage!(force) : undefined));
+      const taskId = typeof req.query.taskId === 'string' && /^[0-9a-f-]{36}$/i.test(req.query.taskId) ? req.query.taskId : undefined;
+      res.json(await getUsage(store, extensions.julesUsage ? () => extensions.julesUsage!(force) : undefined, taskId));
     } catch (error) {
       next(error);
     }

@@ -134,6 +134,7 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     assert.equal(savedCloud?.sourceName, 'sources/github/frankr2994/antigravity-orchestra');
     assert.equal(store.manager.julesSourceMappings.get(project.id)?.startingBranch, expectedDispatch);
     assert.equal(store.manager.managedGitResources.listCleanupDue().length, 0);
+    store.startProviderRun({ taskId: task.id, provider: 'jules', operation: 'implementation', primaryWorker: true });
 
     // 5. Poll Session (In-Progress)
     mockSessionState = 'IN_PROGRESS';
@@ -159,6 +160,7 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     const updatedCloud = store.manager.cloudSessions.getByTaskId(task.id);
     assert.equal(updatedCloud?.state, 'COMPLETED');
     assert.equal(updatedCloud?.prUrl, 'https://github.com/frankr2994/antigravity-orchestra/pull/42');
+    assert.equal(store.manager.providerRuns.list('jules', new Date(0).toISOString(), task.id)[0].status, 'completed');
 
     // 7. Cancel Session
     const cancelResult = await manager.cancelSession('sess-1234', { julesClient });

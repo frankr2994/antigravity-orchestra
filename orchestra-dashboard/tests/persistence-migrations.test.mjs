@@ -19,7 +19,7 @@ test('Phase 4 Persistence — Versioned Migrations run on fresh database', () =>
     assert.ok(version >= 3, 'Migration engine must apply all migrations up to at least v3');
 
     const applied = db.prepare('SELECT * FROM schema_migrations ORDER BY version ASC').all();
-    assert.equal(applied.length, 9);
+    assert.equal(applied.length, 10);
     assert.equal(applied[0].version, 1);
     assert.equal(applied[1].version, 2);
     assert.equal(applied[2].version, 3);
@@ -29,11 +29,13 @@ test('Phase 4 Persistence — Versioned Migrations run on fresh database', () =>
     assert.equal(applied[6].version, 7);
     assert.equal(applied[7].version, 8);
     assert.equal(applied[8].version, 9);
+    assert.equal(applied[9].version, 10);
     assert.ok(db.prepare('PRAGMA table_info(cloud_sessions)').all().some((column) => column.name === 'attempt_id'));
+    assert.ok(db.prepare('PRAGMA table_info(provider_runs)').all().some((column) => column.name === 'prompt_fingerprint'));
 
     // Re-running migrations is idempotent
     const rerunVersion = runMigrations(db);
-    assert.equal(rerunVersion, 9);
+    assert.equal(rerunVersion, 10);
 
     db.close();
   } finally {

@@ -13,3 +13,4 @@ export * from './jules-sources.js';
 export * from './jules-activities.js';
 export * from './cloud-workflows.js';
 export * from './jules-capacity.js';
+export * from './provider-runs.js';

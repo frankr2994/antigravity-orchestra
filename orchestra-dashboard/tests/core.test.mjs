@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { attachTrustedLocalArtifacts, buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, codexShellGuidance, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, groundPostflightResult, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { attachTrustedLocalArtifacts, buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, codexShellGuidance, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, groundPostflightResult, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, lmStudioUsage, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { boundGitDiff, createManualCheckpoint, extractGitHubRemoteUrl, getChangedFilesFromBase, getCommitDiffDetails, getDiffFromBase, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
@@ -295,6 +295,11 @@ test('Antigravity 1.1 stream result extracts and streams the final response', ()
 test('Antigravity stream result exposes authoritative turn token usage', () => {
   const raw = JSON.stringify({ event: 'result', result: { status: 'SUCCESS', usage: { input_tokens: 19601, output_tokens: 13, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 19614 } } });
   assert.deepEqual(extractAntigravityUsage(raw), { input_tokens: 19601, output_tokens: 13, thinking_tokens: 0, cache_read_tokens: 0, total_tokens: 19614 });
+});
+
+test('LM Studio usage parsing preserves authoritative token fields and rejects malformed counters', () => {
+  assert.deepEqual(lmStudioUsage({ usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 } }), { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 });
+  assert.equal(lmStudioUsage({ usage: { total_tokens: -1, prompt_tokens: 'unknown' } }), null);
 });
 
 test('read-only Antigravity output survives a late terminal error', () => {

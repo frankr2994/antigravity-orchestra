@@ -812,3 +812,45 @@ An agentic local Gemma model answered a Git-status question with raw model contr
 - Raw or structured tool calls never appear as successful Solo messages and never run commands.
 - Agentic models remain usable for ordinary local conversation; one protocol-correction attempt handles recoverable template mismatches.
 - Streamed fixtures, repeated-tool failures, ordinary Markdown, and real temporary-Git behavior are regression tested.
+
+## 2026-08-26: Provider-neutral routing, bounded review context, and durable usage accounting
+
+### Background
+
+Automatic routing mixed provider quota observations with execution decisions, which made the selected worker difficult to predict and could reduce use of unmetered local inference. Provider dashboards exposed account capacity but did not answer how much work Gemma, Jules, Antigravity, and Codex actually performed. Review cycles also rebuilt large prompt strings without a durable identity, and key frontend workspace transitions remained spread across independent state setters.
+
+### Decision
+
+- Define the free-first execution policy in the domain layer. Read-only repository work and tightly bounded low-risk micro-edits prefer Gemma; standard and deep implementation prefers Jules when its deterministic readiness gates pass; Antigravity is the fallback. Codex remains an independent specialist and reviewer selected by task risk, not remaining account quota.
+- Treat Codex's rolling five-hour and weekly limits as display-only capacity data. Preserve the legacy quota-policy settings for database and API compatibility, but do not consult them while selecting implementation or review models.
+- Permit Gemma mutations only in an isolated managed Git worktree. Reject candidates above three files or 200 changed lines, disallowed paths and change types, binary changes, verification failures, and patches that no longer apply cleanly. Only a verified patch may be applied to the authoritative worktree; rejection falls back to Antigravity without altering it.
+- Run deterministic verification before an independent Codex review. A verification failure goes directly to Gemma distillation and implementation repair. Fingerprint bounded review envelopes and reuse a passing or blocking review only while the exact diff is unchanged; a changed diff receives a fresh review. Repair cycles have no numeric ceiling and stop only on success, explicit user control, or an integrity boundary.
+- Persist every provider turn in `provider_runs`, including task, provider, operation, model, primary-worker status, prompt fingerprint, estimated input size, lifecycle status, and authoritative token fields when the provider reports them. Aggregate current-task, rolling-24-hour, and rolling-seven-day workload separately from account quota. Label missing token telemetry as count-only or partial instead of estimating it.
+- Track Jules from durable dispatch intent through remote completion, rejection, or cancellation. The exact PR handoff remains: resolve and fetch the immutable PR head, verify in an isolated worktree, run one independent Codex review for that head, repair through Jules while possible, safely fast-forward the remote target, read it back, and synchronize the local target branch without overwriting local work.
+- Move authenticated API transport, atomic workspace/conversation transitions, provider usage presentation, routing policy, review-envelope construction, provider-run recording, and managed-worktree mechanics into focused modules. Architecture tests ratchet these ownership boundaries.
+
+### Reasons
+
+- Local inference and Jules provide the least metered implementation capacity, so predictable role-based routing can use them aggressively without allowing volatile quota readings to change correctness policy.
+- An isolated-worktree patch gate lets a local model contribute useful small edits while Git identity and deterministic verification remain authoritative.
+- Verification-first review avoids paying for Codex to report failures already proven by build or test commands.
+- Diff fingerprints and bounded envelopes prevent repeated transmission of unchanged or unbounded context while retaining exact review provenance.
+- Durable provider records survive refreshes and process restarts and distinguish invocation counts from exact token telemetry.
+- Atomic frontend transitions prevent a new-conversation action from partially retaining another conversation's task and activity state.
+
+### Alternatives
+
+- Route automatically from remaining Codex quota: rejected because account capacity is operational telemetry, not a reliable task-risk or correctness signal.
+- Allow Gemma to edit the main worktree directly: rejected because malformed or oversized local-model output must be discardable without repair work.
+- Run Codex before every verification attempt or repeat it for an unchanged diff: rejected because both patterns consume quota without adding new evidence.
+- Infer missing token counts from prompt length: rejected because estimated billing-style totals would be misleading; estimates are retained only as prompt-envelope metadata.
+- Keep provider activity in memory or derive it only from UI events: rejected because restarts and missed browser sessions would erase the workload record.
+
+### Impact
+
+- The dashboard shows Gemma, Jules, Antigravity, and Codex workload for the current task, 24 hours, and seven days alongside independently labeled provider capacity windows.
+- Codex exposes both rolling five-hour and weekly quota buckets when the installed app-server reports them; unknown window durations remain explicitly labeled rather than misclassified.
+- Small safe edits can complete through the loaded LM Studio model, while larger or risky work automatically moves to Jules or Antigravity.
+- Review prompts have a 48,000-character ceiling, SHA-256 identity, and visible estimated input size in provider-run metadata.
+- Provider accounting failures never block task execution, but terminal task transitions reconcile abandoned running records when an agent fails or the process restarts.
+- The new database migration is additive and existing quota-policy values remain readable, though inactive for routing.

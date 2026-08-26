@@ -64,6 +64,13 @@ h1 { margin: 0; font-size: clamp(25px, 3vw, 36px); letter-spacing: -.04em; }
 .service-list { display: grid; gap: 0; }.service-list > div { display: grid; grid-template-columns: 10px 1fr auto; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid rgba(148,163,184,.08); }.service-list > div:last-child { border: 0; }.service-list span:not(.status-dot) { text-transform: capitalize; }.service-list small { color: var(--muted); }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }.status-dot.ok, .status-dot.green { background: var(--green); box-shadow: 0 0 9px rgba(74,222,128,.65); }.status-dot.bad, .status-dot.red { background: var(--red); }.status-dot.yellow { background: #facc15; box-shadow: 0 0 9px rgba(250,204,21,.55); }
 .provider-usage-grid { display: flex; flex-direction: column; gap: 12px; padding-top: 12px; }
+.usage-scope-tabs { display: flex; gap: 6px; margin-top: 10px; }
+.usage-scope-tabs button { padding: 5px 9px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--muted); font-size: 9px; }
+.usage-scope-tabs button.active { border-color: rgba(56,189,248,.45); background: rgba(56,189,248,.1); color: var(--text); }
+.provider-workload-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(78px,1fr)); gap: 6px; margin-top: 8px; }
+.provider-workload-grid span { display: flex; flex-direction: column; gap: 2px; padding: 6px 7px; border-radius: 5px; background: rgba(255,255,255,.025); color: var(--muted); font-size: 8px; text-transform: uppercase; }
+.provider-workload-grid strong { color: var(--text); font-size: 11px; text-transform: none; }
+.provider-workload-grid .usage-coverage { justify-content: center; color: var(--muted); }
 .provider-usage-block { display: flex; flex-direction: column; gap: 8px; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .provider-block-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
 .provider-title { display: flex; align-items: center; gap: 8px; font-size: 13px; }

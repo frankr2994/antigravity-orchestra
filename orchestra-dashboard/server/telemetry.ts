@@ -2,6 +2,8 @@ import si from 'systeminformation';
 import { runProcess, commandAvailable } from './process.js';
 import { lmStudioHealth } from './agents.js';
 import { readAntigravityUsage, readCodexUsage } from './observability.js';
+import type { Store } from './db.js';
+import { ProviderUsageService } from './application/usage/provider-usage-service.js';
 
 let cachedStats: { at: number; value: unknown } | null = null;
 
@@ -199,12 +201,24 @@ export async function getCodexModels(): Promise<CodexModelDescriptor[]> {
   ];
 }
 
-export async function getUsage(jules?: () => Promise<unknown>) {
+export async function getUsage(store: Store, jules?: () => Promise<unknown>, taskId?: string) {
+  const [antigravity, codex, julesUsage] = await Promise.all([
+    readAntigravityUsage(),
+    readCodexUsage(),
+    jules ? jules() : Promise.resolve(undefined),
+  ]);
   const usage: Record<string, unknown> = {
-    antigravity: await readAntigravityUsage(),
-    codex: await readCodexUsage(),
+    antigravity,
+    codex,
   };
-  if (jules) usage.jules = await jules();
+  if (julesUsage !== undefined) usage.jules = julesUsage;
+  const activity = new ProviderUsageService(store).activity(taskId);
+  for (const provider of ['gemma', 'jules', 'antigravity', 'codex'] as const) {
+    const current = usage[provider];
+    usage[provider] = current && typeof current === 'object'
+      ? { ...(current as Record<string, unknown>), activity: activity[provider] }
+      : { available: provider === 'gemma', source: provider === 'gemma' ? 'LM Studio provider runs' : 'provider runs', activity: activity[provider] };
+  }
   return usage;
 }
 

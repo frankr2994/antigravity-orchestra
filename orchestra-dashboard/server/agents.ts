@@ -18,6 +18,7 @@ import {
 } from './lmstudio.js';
 import { compactHeadAndTail, fitGemmaMessages, splitGemmaText } from './application/gemma/context-budget.js';
 import { GemmaDirectChatProtocolError, validateGemmaDirectChatResponse } from './application/gemma/direct-chat-contract.js';
+import { buildReviewPromptEnvelope } from './application/context/review-prompt-envelope.js';
 
 export {
   getInstalledLmStudioModels,
@@ -90,7 +91,7 @@ export async function triageProviderFailure(input: { stage: string; error: strin
   };
 }
 
-async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false, onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void): Promise<string> {
+async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 700, timeoutMs = 60_000, jsonSchema?: JsonSchema, riderTools = false, onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void, onUsage?: (usage: Record<string, number>) => void): Promise<string> {
   const tools = riderTools ? await getGemmaRiderTools() : [];
   const active = await getActiveLmStudioModelInfo();
   const protocolOverhead = JSON.stringify({ jsonSchema: jsonSchema || null, tools });
@@ -107,7 +108,8 @@ async function callGemma(messages: Array<Record<string, unknown>>, maxTokens = 7
       signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) throw new Error(`LM Studio returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
-    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }> };
+    const body = await response.json() as { choices?: Array<{ message?: { content?: string | null; reasoning_content?: string | null; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> } }>; usage?: Record<string, number> };
+    if (body.usage) onUsage?.(body.usage);
     const message = body.choices?.[0]?.message;
     const calls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
     if (calls.length) {
@@ -185,6 +187,7 @@ export async function runGemmaDirectChat(input: {
   signal?: AbortSignal;
   onOutput?: (chunk: string) => void;
   onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void;
+  onUsage?: (usage: Record<string, number>) => void;
   fetchFn?: typeof fetch;
 }): Promise<string> {
   const model = input.model || await getActiveLmStudioModel();
@@ -225,8 +228,8 @@ Instructions:
     });
     if (!response.ok) throw new Error(`LM Studio HTTP ${response.status}: ${await readLmStudioError(response)}`);
     const answer = response.headers.get('content-type')?.includes('application/json')
-      ? await readGemmaDirectJson(response)
-      : await readGemmaDirectStream(response);
+      ? await readGemmaDirectJson(response, input.onUsage)
+      : await readGemmaDirectStream(response, input.onUsage);
     input.onOutput?.(answer);
     return answer;
   } catch (error) {
@@ -246,7 +249,7 @@ Instructions:
       signal,
     });
     if (!response.ok) throw new Error(`LM Studio HTTP ${response.status}: ${await readLmStudioError(response)}`);
-    const answer = await readGemmaDirectJson(response);
+    const answer = await readGemmaDirectJson(response, input.onUsage);
     input.onOutput?.(answer);
     return answer;
   } catch (repairFailure) {
@@ -258,7 +261,7 @@ Instructions:
   }
 }
 
-async function readGemmaDirectStream(response: Response): Promise<string> {
+async function readGemmaDirectStream(response: Response, onUsage?: (usage: Record<string, number>) => void): Promise<string> {
   const reader = response.body?.getReader();
   if (!reader) throw new Error('LM Studio returned a streaming response without a body.');
   const decoder = new TextDecoder();
@@ -276,6 +279,8 @@ async function readGemmaDirectStream(response: Response): Promise<string> {
     let value: unknown;
     try { value = JSON.parse(payload); }
     catch { throw new Error('LM Studio returned malformed streaming JSON.'); }
+    const usage = lmStudioUsage(value);
+    if (usage) onUsage?.(usage);
     accumulated += directContentFromPayload(value);
   };
 
@@ -293,11 +298,21 @@ async function readGemmaDirectStream(response: Response): Promise<string> {
   return validateGemmaDirectChatResponse(accumulated);
 }
 
-async function readGemmaDirectJson(response: Response): Promise<string> {
+async function readGemmaDirectJson(response: Response, onUsage?: (usage: Record<string, number>) => void): Promise<string> {
   let value: unknown;
   try { value = await response.json(); }
   catch { throw new Error('LM Studio returned malformed response JSON.'); }
+  const usage = lmStudioUsage(value);
+  if (usage) onUsage?.(usage);
   return validateGemmaDirectChatResponse(directContentFromPayload(value));
+}
+
+export function lmStudioUsage(value: unknown): Record<string, number> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const usage = (value as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
+  const result = Object.fromEntries(Object.entries(usage).flatMap(([key, raw]) => Number.isSafeInteger(Number(raw)) && Number(raw) >= 0 ? [[key, Number(raw)]] : []));
+  return Object.keys(result).length ? result : null;
 }
 
 function directContentFromPayload(value: unknown): string {
@@ -337,7 +352,7 @@ async function readLmStudioError(response: Response): Promise<string> {
   return text.slice(0, 300);
 }
 
-export async function answerRepositoryQuestion(input: { root: string; prompt: string; evidence: RepositoryEvidence; sessionContext?: string; onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void }): Promise<GemmaRepositoryAnswer> {
+export async function answerRepositoryQuestion(input: { root: string; prompt: string; evidence: RepositoryEvidence; sessionContext?: string; onToolActivity?: (activity: { tool: string; status: 'started' | 'completed' | 'failed'; detail?: string }) => void; onUsage?: (usage: Record<string, number>) => void }): Promise<GemmaRepositoryAnswer> {
   const system = `You are Orchestra's local repository analyst. Answer only from the supplied evidence. Return JSON only with this schema: {"canAnswer":boolean,"confidence":number,"answer":string,"evidenceFiles":string[],"limitations":string[]}.
 Rules:
 - The authoritative repository is exactly ${input.root}. State that path in the answer.
@@ -351,7 +366,7 @@ Rules:
 - Inside JSON strings, write Windows paths with forward slashes (for example F:/project) so backslashes cannot create invalid JSON escapes.
 - Finish every section and sentence; never submit a truncated draft.`;
   const user = `${input.sessionContext ? `Session context:\n${input.sessionContext}\n\n` : ''}Question:\n${input.prompt}\n\n${input.evidence.text}`;
-  let raw = await callGemma([{ role: 'system', content: `${system}\nA bounded read-only JetBrains Rider MCP toolset may be available. Prefer it for solution structure, project dependencies, symbol-aware searches, file problems, and targeted repository inspection when those tools materially improve the answer. Never claim a tool result you did not receive.` }, { role: 'user', content: user }], 4_000, 180_000, undefined, true, input.onToolActivity);
+  let raw = await callGemma([{ role: 'system', content: `${system}\nA bounded read-only JetBrains Rider MCP toolset may be available. Prefer it for solution structure, project dependencies, symbol-aware searches, file problems, and targeted repository inspection when those tools materially improve the answer. Never claim a tool result you did not receive.` }, { role: 'user', content: user }], 4_000, 180_000, undefined, true, input.onToolActivity, input.onUsage);
   
   let parsedRaw: Record<string, unknown>;
   try {
@@ -376,7 +391,7 @@ Rules:
       { role: 'user', content: user },
       { role: 'assistant', content: raw },
       { role: 'user', content: `The draft was rejected for these deterministic reasons: ${result.rejectionReasons.join('; ')}. Return a corrected, complete JSON answer. Use only content-included repository files as evidence and do not end mid-sentence.` },
-    ], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA, false);
+    ], 4_000, 180_000, REPOSITORY_ANSWER_SCHEMA, false, undefined, input.onUsage);
     try {
       result = normalizeRepositoryAnswer(parseJson(raw) as Record<string, unknown>, input, 2);
     } catch {
@@ -664,31 +679,20 @@ export async function triageReview(input: { request: string; diff: string; chang
 }
 
 export function buildReviewPacket(input: { request: string; changedFiles: string[]; diff: string; implementationSummary: string; triage: ReviewTriage; previousReview?: string }) {
-  const lines = [
-    '# Orchestra review packet',
-    '',
-    '## Original request',
-    redactSecrets(attachTrustedLocalArtifacts(input.request)).slice(0, 30_000),
-    '',
-    '## Changed files',
-    ...input.changedFiles.slice(0, 120).map((file) => `- ${file}`),
-    '',
-    '## Local Gemma triage (advisory only)',
+  const triage = [
     `Risk: ${input.triage.risk}`,
     input.triage.summary || 'No summary was available.',
-    ...(input.triage.focusFiles.length ? ['', 'Focus files:', ...input.triage.focusFiles.map((file) => `- ${file}`)] : []),
-    ...(input.triage.concerns.length ? ['', 'Potential concerns:', ...input.triage.concerns.map((item) => `- ${item}`)] : []),
-    '',
-    '## Antigravity implementation report (untrusted; verify against the diff)',
-    redactSecrets(input.implementationSummary).slice(-8_000),
-    ...(input.previousReview ? ['', '## Previous Codex review (confirm repairs, do not repeat obsolete findings)', redactSecrets(input.previousReview).slice(-6_000)] : []),
-    '',
-    '## Bounded Git diff',
-    '```diff',
-    redactSecrets(input.diff).slice(0, 70_000),
-    '```',
-  ];
-  return lines.join('\n').slice(0, 100_000);
+    ...(input.triage.focusFiles.length ? ['Focus files:', ...input.triage.focusFiles.map((file) => `- ${file}`)] : []),
+    ...(input.triage.concerns.length ? ['Potential concerns:', ...input.triage.concerns.map((item) => `- ${item}`)] : []),
+  ].join('\n');
+  return buildReviewPromptEnvelope({
+    request: redactSecrets(attachTrustedLocalArtifacts(input.request)),
+    changedFiles: input.changedFiles,
+    triage: redactSecrets(triage),
+    implementationSummary: redactSecrets(input.implementationSummary),
+    previousReview: input.previousReview ? redactSecrets(input.previousReview) : undefined,
+    diff: redactSecrets(input.diff),
+  }).text;
 }
 
 export function selectReviewProfile(input: {
@@ -1288,6 +1292,7 @@ export async function executeGemmaMicroTask(input: {
   prompt: string;
   signal: AbortSignal;
   onOutput?: (chunk: string) => void;
+  onUsage?: (usage: Record<string, number>) => void;
 }): Promise<{ success: boolean; result: string; changedFiles: string[] }> {
   const text = await callGemma([
     {
@@ -1298,7 +1303,7 @@ export async function executeGemmaMicroTask(input: {
       role: 'user',
       content: `Directory: ${input.root}\n\nTask:\n${input.prompt}`,
     },
-  ], 2000, 60_000, GEMMA_MICRO_TASK_SCHEMA);
+  ], 2000, 60_000, GEMMA_MICRO_TASK_SCHEMA, false, undefined, input.onUsage);
 
   const parsed = parseJson(text) as { files?: Array<{ path: string; action: string; content: string }>; explanation?: string };
   if (!Array.isArray(parsed.files) || !parsed.files.length) {
@@ -1308,6 +1313,10 @@ export async function executeGemmaMicroTask(input: {
   const changedFiles: string[] = [];
   for (const file of parsed.files) {
     const fullPath = resolve(input.root, file.path);
+    const child = relative(resolve(input.root), fullPath);
+    if (!child || child.startsWith('..') || resolve(input.root, child) !== fullPath) {
+      throw new Error(`Gemma proposed an unsafe project path '${file.path}'.`);
+    }
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, file.content, 'utf8');
     changedFiles.push(file.path);

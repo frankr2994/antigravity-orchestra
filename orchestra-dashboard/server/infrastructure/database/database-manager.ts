@@ -20,6 +20,7 @@ import {
   JulesActivityReceiptRepository,
   CloudWorkflowRepository,
   JulesCapacityRepository,
+  ProviderRunRepository,
 } from './repositories/index.js';
 
 // ============================================================================
@@ -49,6 +50,7 @@ export class DatabaseManager {
   readonly julesActivityReceipts: JulesActivityReceiptRepository;
   readonly cloudWorkflows: CloudWorkflowRepository;
   readonly julesCapacity: JulesCapacityRepository;
+  readonly providerRuns: ProviderRunRepository;
 
   constructor(databasePath: string) {
     this.db = new DatabaseSync(databasePath);
@@ -74,6 +76,7 @@ export class DatabaseManager {
     this.julesActivityReceipts = new JulesActivityReceiptRepository(this.db);
     this.cloudWorkflows = new CloudWorkflowRepository(this.db);
     this.julesCapacity = new JulesCapacityRepository(this.db);
+    this.providerRuns = new ProviderRunRepository(this.db);
   }
 
   transaction<T>(work: () => T): T {

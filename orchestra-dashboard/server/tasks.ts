@@ -2,13 +2,13 @@ import { createHash } from 'node:crypto';
 import { config } from './config.js';
 import type { Store } from './db.js';
 import type { AgentName, ModelSelection, Project, RunMonitor, Session, TaskClassification, TaskEvent, TaskRecord, TaskState } from './types.js';
-import type { TaskEventType } from './domain/index.js';
+import { isGemmaMicroEditCandidate, type TaskEventType } from './domain/index.js';
 import { ProjectTaskScheduler } from './application/tasks/project-task-scheduler.js';
 import { ProjectTaskOwnershipService } from './application/tasks/project-task-ownership-service.js';
 import { TaskEventPublisher } from './application/tasks/task-event-publisher.js';
 import { GitFinalizationService } from './application/git/git-finalization-service.js';
 export { appendHandoff } from './application/git/handoff.js';
-import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type QuotaPolicy, type ReviewTriage } from './agents.js';
+import { answerRepositoryQuestion, buildReviewPacket, classifyTask, distillVerificationErrors, extractCodexReviewVerdict, getActiveLmStudioModel, listAntigravityModels, preReviewSanityCheck, resolveAntigravityModel, runAntigravity, runCodexAnalysis, runCodexReview, runGemmaDirectChat, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, summarizeConversation, triageProviderFailure, triageReview, validateAgentResponse, type AgentRunResult, type ProviderFailureTriage, type ReviewTriage } from './agents.js';
 import { collectRepositoryEvidence, type RepositoryEvidence } from './evidence.js';
 import { connectGitHubRemote, extractGitHubRemoteUrl, getChangedFilesFromBase, getDiff, getDiffFromBase, getGitStatus, getRecentCommits } from './git.js';
 import { initializeGreenfieldRepository, isOrchestraInternalPath, onboardProject } from './projects.js';
@@ -17,19 +17,23 @@ import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from 
 import { getMcpStatus, type McpStatus } from './mcp.js';
 import { ApplicationError } from './application/errors.js';
 import { formatDirectGitStatusAnswer, isDirectGitStatusQuestion } from './application/gemma/direct-chat-contract.js';
+import { ProviderRunRecorder } from './application/usage/provider-run-recorder.js';
+import { GemmaMicroEditService } from './application/gemma/micro-edit-service.js';
 
 export class TaskManager {
   private readonly events: TaskEventPublisher;
   private readonly scheduler: ProjectTaskScheduler;
   private readonly ownership: ProjectTaskOwnershipService;
   private readonly gitFinalization: GitFinalizationService;
+  private readonly gemmaMicroEdits = new GemmaMicroEditService();
   private readonly contextWarnings = new Set<string>();
   private readonly manualCommits = new Set<string>();
   private readonly controlRequests = new Map<string, 'pause' | 'stop'>();
   private antigravityModels: string[] = [];
 
   constructor(private readonly store: Store, maxGlobal = 2) {
-    this.events = new TaskEventPublisher(store);
+    const providerRuns = new ProviderRunRecorder(store);
+    this.events = new TaskEventPublisher(store, (event) => providerRuns.observe(event));
     this.scheduler = new ProjectTaskScheduler(store, (taskId, signal) => this.execute(taskId, signal), maxGlobal);
     this.ownership = new ProjectTaskOwnershipService(store, this.scheduler,
       (taskId, type, payload) => this.emit(taskId, 'system', type, payload));
@@ -416,6 +420,7 @@ export class TaskManager {
             evidence,
             signal,
             onOutput: (chunk) => this.stream(taskId, 'gemma', chunk),
+            onUsage: (usage) => this.recordLocalProviderTelemetry(taskId, usage),
           });
           this.emit(taskId, 'gemma', 'agent.completed', { phase: 'direct-chat', result: answer });
           this.complete(taskId, answer, 'gemma');
@@ -480,19 +485,11 @@ export class TaskManager {
         this.complete(taskId, `Connected this project to ${connected.remote} as \`origin\` and pushed \`${connected.branch}\` at commit \`${connected.head}\`.`, 'gemma');
         return;
       }
-      const [codexAccount, antigravityAccount] = await Promise.all([readCodexUsage(), readAntigravityUsage()]);
-      const routingReasons: string[] = [];
-      const antigravityRemaining = minimumRemaining(antigravityAccount);
-      const codexRemaining = minimumRemaining(codexAccount);
-      const quotaPolicyJson = this.store.getSetting('quotaPolicy');
-      let quotaPolicy: QuotaPolicy | undefined;
-      try { quotaPolicy = quotaPolicyJson ? JSON.parse(quotaPolicyJson) as QuotaPolicy : undefined; } catch { /* ignore */ }
-
-      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0, quotaPolicy, codexRemaining), primary: 'antigravity', gemma: activeGemmaModel };
+      const antigravityAccount = await readAntigravityUsage();
+      let models: ModelSelection = { ...selectModels(classification, recovery ? 1 : 0), primary: 'antigravity', gemma: activeGemmaModel };
       const resolved = resolveAntigravityModel(models.antigravity, this.antigravityModels);
       models = { ...models, antigravity: resolved.model };
       if (resolved.warning) this.emit(taskId, 'antigravity', 'warning', { message: resolved.warning });
-      if (routingReasons.length) this.emit(taskId, 'system', 'routing.adjustment', { message: routingReasons.join(' '), antigravityRemaining, codexRemaining });
       this.store.updateTask(taskId, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(models) });
 
       this.transition(taskId, 'preflight');
@@ -615,6 +612,7 @@ export class TaskManager {
             evidence,
             sessionContext,
             onToolActivity: (activity) => this.emit(taskId, 'gemma', 'mcp.tool', { ...activity, message: `Gemma Rider MCP tool ${activity.tool} ${activity.status}${activity.detail ? `: ${activity.detail}` : '.'}` }),
+            onUsage: (usage) => this.recordLocalProviderTelemetry(taskId, usage),
           });
           if (local.canAnswer) {
             models = { ...models, primary: 'gemma' };
@@ -634,23 +632,41 @@ export class TaskManager {
         }
       }
 
+      let agentResult: AgentRunResult | null = null;
+      if (!recovery && status.head && isGemmaMicroEditCandidate(classification, task.prompt)) {
+        this.transition(taskId, 'running');
+        this.emit(taskId, 'gemma', 'agent.started', { phase: 'micro-edit', model: activeGemmaModel });
+        const candidate = await this.gemmaMicroEdits.attempt({ taskId, projectRoot: project.root, baseSha: status.head, prompt: task.prompt, signal, onOutput: (chunk) => this.stream(taskId, 'gemma', chunk), onUsage: (usage) => this.recordLocalProviderTelemetry(taskId, usage) });
+        if (candidate.applied) {
+          models = { ...models, primary: 'gemma', gemma: activeGemmaModel };
+          this.store.updateTask(taskId, { models: JSON.stringify(models) });
+          this.emit(taskId, 'gemma', 'agent.completed', { phase: 'micro-edit', changedFiles: candidate.changedFiles, changedLines: candidate.changedLines, summary: candidate.summary });
+          agentResult = { text: candidate.summary, conversationId: null, raw: candidate.summary, warning: null, usage: null, terminalStatus: 'SUCCESS', incomplete: false, failureReason: null, continuationGuidance: null };
+        } else {
+          this.emit(taskId, 'gemma', 'agent.failed', { phase: 'micro-edit', error: candidate.reason });
+          this.emit(taskId, 'system', 'routing.adjustment', { message: `The bounded Gemma candidate was rejected without changing the main worktree. Falling back to Antigravity. ${candidate.reason}`, from: 'gemma', to: 'antigravity' });
+        }
+      }
+
       let specialistContext = '';
-      if (!recovery && classification.codexRole !== 'none' && models.codex && models.codexEffort) {
+      if (!agentResult && !recovery && classification.codexRole !== 'none' && models.codex && models.codexEffort) {
         this.transition(taskId, 'reviewing');
         this.emit(taskId, 'codex', 'agent.started', { role: classification.codexRole, model: models.codex, effort: models.codexEffort });
         specialistContext = await runCodexAnalysis({ root: project.root, prompt: task.prompt, role: classification.codexRole, model: models.codex, effort: models.codexEffort, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
         this.emit(taskId, 'codex', 'agent.completed', { role: classification.codexRole, summary: specialistContext.slice(-4000) });
       }
 
-      this.transition(taskId, 'running');
-      this.emit(taskId, 'antigravity', 'agent.started', { model: models.antigravity, effort: models.antigravityEffort });
-      const implementationContext = [specialistContext, recoveryReason ? `The previous automatic run paused for this reason:\n${recoveryReason}` : ''].filter(Boolean).join('\n\n');
-      const contextUsed = antigravityAccount.workspace && samePath(antigravityAccount.workspace, project.root) ? antigravityAccount.context?.usedPercent : null;
-      const priorInputTokens = latestAntigravityInputTokens(this.store, project.id, session.id, taskId);
-      const rotateConversation = contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 || priorInputTokens !== null && priorInputTokens >= 200_000;
-      const conversationId = rotateConversation ? null : session.antigravityConversationId;
-      if (!conversationId && session.antigravityConversationId && rotateConversation) this.emit(taskId, 'system', 'routing.adjustment', { message: contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 ? `Antigravity context is ${contextUsed.toFixed(1)}% used. Orchestra started a fresh provider conversation while preserving the local session summary.` : `The previous Antigravity turn used ${priorInputTokens?.toLocaleString()} input tokens. Orchestra started a fresh provider conversation while preserving the local session summary.` });
-      let agentResult = await runAntigravityWithFailover({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId, context: implementationContext, recovery, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) }, 'implementation');
+      if (!agentResult) {
+        this.transition(taskId, 'running');
+        this.emit(taskId, 'antigravity', 'agent.started', { phase: 'implementation', model: models.antigravity, effort: models.antigravityEffort });
+        const implementationContext = [specialistContext, recoveryReason ? `The previous automatic run paused for this reason:\n${recoveryReason}` : ''].filter(Boolean).join('\n\n');
+        const contextUsed = antigravityAccount.workspace && samePath(antigravityAccount.workspace, project.root) ? antigravityAccount.context?.usedPercent : null;
+        const priorInputTokens = latestAntigravityInputTokens(this.store, project.id, session.id, taskId);
+        const rotateConversation = contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 || priorInputTokens !== null && priorInputTokens >= 200_000;
+        const conversationId = rotateConversation ? null : session.antigravityConversationId;
+        if (!conversationId && session.antigravityConversationId && rotateConversation) this.emit(taskId, 'system', 'routing.adjustment', { message: contextUsed !== null && contextUsed !== undefined && contextUsed >= 80 ? `Antigravity context is ${contextUsed.toFixed(1)}% used. Orchestra started a fresh provider conversation while preserving the local session summary.` : `The previous Antigravity turn used ${priorInputTokens?.toLocaleString()} input tokens. Orchestra started a fresh provider conversation while preserving the local session summary.` });
+        agentResult = await runAntigravityWithFailover({ root: project.root, prompt: task.prompt, model: models.antigravity, effort: models.antigravityEffort, mutating: classification.mutating, conversationId, context: implementationContext, recovery, riderAvailable: riderFor('antigravity'), signal, onOutput: (chunk) => this.stream(taskId, 'antigravity', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'antigravity', usage) }, 'implementation');
+      }
       let hadIncompleteAgentRun = agentResult.incomplete;
       if (agentResult.conversationId) this.store.setConversationId(session.id, agentResult.conversationId);
       if (agentResult.warning) this.emit(taskId, 'antigravity', 'warning', { message: agentResult.warning });
@@ -716,6 +732,8 @@ export class TaskManager {
           let previousFindings = '';
           let previousReview = '';
           let previousRepairChanged = true;
+          let lastReviewedDiff = '';
+          let lastReview = '';
           let verificationPassed = false;
           for (let cycle = 0; !verificationPassed; cycle += 1) {
             if (signal.aborted) return;
@@ -725,56 +743,64 @@ export class TaskManager {
               : reviewStatus.files.map((file) => file.path))
               .filter((path) => !isOrchestraInternalPath(path));
             const diff = reviewBaseSha ? await getDiffFromBase(project.root, reviewBaseSha, 80_000) : await getDiff(project.root, 80_000);
+            const currentDiffFingerprint = diffFingerprint(diff);
             if (!changedFiles.length || !diff.trim()) {
               throw new Error('Orchestra could not construct a reviewable base-to-head change set after implementation. The task was stopped before spending review quota on an empty evidence packet.');
             }
-            let triage: ReviewTriage = { risk: 'normal', summary: 'Local triage was unavailable; review the bounded diff directly.', focusFiles: [], concerns: [] };
-            this.emit(taskId, 'gemma', 'agent.started', { phase: 'review-triage', cycle: cycle + 1, changedFiles: changedFiles.length });
+            this.transition(taskId, 'verifying');
+            let verificationFailure = '';
+            let verification: Array<{ command: string; code: number; output: string }> = [];
             try {
-              triage = await triageReview({ request: task.prompt, diff, changedFiles });
-              this.emit(taskId, 'gemma', 'agent.completed', { phase: 'review-triage', cycle: cycle + 1, risk: triage.risk, focusFiles: triage.focusFiles, concerns: triage.concerns });
+              verification = await verifyProject(project.root, signal);
+              this.emit(taskId, 'verification', 'verification.result', { results: verification });
+              verificationFailure = describeVerificationFailure(verification);
             } catch (error) {
-              this.emit(taskId, 'gemma', 'warning', { message: `Local review triage was unavailable; Codex will receive the deterministic diff packet. ${error instanceof Error ? error.message : String(error)}` });
+              verificationFailure = error instanceof Error ? error.message : String(error);
+              this.emit(taskId, 'verification', 'warning', { message: `Verification infrastructure failed; Orchestra is routing the failure through automatic repair before spending Codex review usage. ${verificationFailure}` });
             }
-            try {
-              const sanity = await preReviewSanityCheck({ root: project.root, changedFiles, diff });
-              if (!sanity.passed && sanity.issues.length) {
-                this.emit(taskId, 'gemma', 'warning', { message: `Local sanity check noted issues: ${sanity.issues.join('; ')}` });
-              }
-            } catch { /* non-blocking */ }
-            const profile = selectReviewProfile({ request: task.prompt, cycle, changedFileCount: changedFiles.length, triageRisk: triage.risk, repeatedFindings: cycle > 0 && !previousRepairChanged, codexRemaining, quotaPolicy });
-            this.emit(taskId, 'system', 'routing.adjustment', { message: `Review cycle ${cycle + 1} uses ${profile.model} (${profile.reason}).`, reviewModel: profile.model, reviewEffort: profile.effort, reason: profile.reason });
-            const reviewPacket = buildReviewPacket({ request: task.prompt, changedFiles, diff, implementationSummary: agentResult.text, triage, previousReview });
-            this.transition(taskId, 'reviewing');
-            this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: profile.model, effort: profile.effort, cycle: cycle + 1, changedFiles: changedFiles.length, triageRisk: triage.risk });
-            let review = await runCodexReview({ root: project.root, model: profile.model, effort: profile.effort, reviewPacket, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
-            const reviewResult = extractCodexReviewVerdict(review);
-            let blocked = reviewResult.blocked;
-            this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, verdict: reviewResult.verdict, model: profile.model, cycle: cycle + 1, summary: review.slice(-5000) });
-            if (!blocked) {
-              this.transition(taskId, 'verifying');
-              let verificationFailure = '';
-              let verification: Array<{ command: string; code: number; output: string }> = [];
-              try {
-                verification = await verifyProject(project.root, signal);
-                this.emit(taskId, 'verification', 'verification.result', { results: verification });
-                verificationFailure = describeVerificationFailure(verification);
-              } catch (error) {
-                verificationFailure = error instanceof Error ? error.message : String(error);
-                this.emit(taskId, 'verification', 'warning', { message: `Verification infrastructure failed; Orchestra is routing the failure through automatic repair instead of stopping. ${verificationFailure}` });
-              }
-              if (!verificationFailure) {
-                verificationPassed = true;
-                break;
-              }
-              blocked = true;
+
+            let review = '';
+            let blocked = true;
+            if (verificationFailure) {
               const failedItem = verification.find((item) => item.code !== 0);
               const failedCmd = failedItem?.command || 'verification';
               this.emit(taskId, 'gemma', 'agent.started', { phase: 'verification-distillation', command: failedCmd });
               const distilled = await distillVerificationErrors(verificationFailure, failedCmd);
               this.emit(taskId, 'gemma', 'agent.completed', { phase: 'verification-distillation', summary: distilled.summary, findingCount: distilled.findings.length });
-              review = `VERDICT: BLOCK\n\nOrchestra deterministic verification failed after Codex review passed.\n\n${distilled.repairPromptChunk}`;
-              this.emit(taskId, 'system', 'task.model-takeover', { message: `Deterministic verification failed. Gemma distilled ${distilled.findings.length} actionable failure finding(s) for Antigravity repair.`, from: 'verification', to: 'antigravity-repair', cycle: cycle + 1 });
+              review = `VERDICT: BLOCK\n\nOrchestra deterministic verification failed before independent review.\n\n${distilled.repairPromptChunk}`;
+              this.emit(taskId, 'system', 'task.model-takeover', { message: `Deterministic verification failed before Codex review. Gemma distilled ${distilled.findings.length} actionable failure finding(s) for Antigravity repair.`, from: 'verification', to: 'antigravity-repair', cycle: cycle + 1 });
+            } else if (currentDiffFingerprint === lastReviewedDiff && lastReview) {
+              review = lastReview;
+              blocked = extractCodexReviewVerdict(review).blocked;
+              this.emit(taskId, 'system', 'routing.adjustment', { message: 'The verified diff is unchanged since the previous independent review. Orchestra reused that review instead of spending another Codex turn.', reviewReused: true, diffFingerprint: currentDiffFingerprint });
+            } else {
+              let triage: ReviewTriage = { risk: 'normal', summary: 'Local triage was unavailable; review the bounded diff directly.', focusFiles: [], concerns: [] };
+              this.emit(taskId, 'gemma', 'agent.started', { phase: 'review-triage', cycle: cycle + 1, changedFiles: changedFiles.length });
+              try {
+                triage = await triageReview({ request: task.prompt, diff, changedFiles });
+                this.emit(taskId, 'gemma', 'agent.completed', { phase: 'review-triage', cycle: cycle + 1, risk: triage.risk, focusFiles: triage.focusFiles, concerns: triage.concerns });
+              } catch (error) {
+                this.emit(taskId, 'gemma', 'warning', { message: `Local review triage was unavailable; Codex will receive the deterministic diff packet. ${error instanceof Error ? error.message : String(error)}` });
+              }
+              try {
+                const sanity = await preReviewSanityCheck({ root: project.root, changedFiles, diff });
+                if (!sanity.passed && sanity.issues.length) this.emit(taskId, 'gemma', 'warning', { message: `Local sanity check noted issues: ${sanity.issues.join('; ')}` });
+              } catch { /* non-blocking */ }
+              const profile = selectReviewProfile({ request: task.prompt, cycle, changedFileCount: changedFiles.length, triageRisk: triage.risk, repeatedFindings: cycle > 0 && !previousRepairChanged });
+              this.emit(taskId, 'system', 'routing.adjustment', { message: `Verified review cycle ${cycle + 1} uses ${profile.model} (${profile.reason}).`, reviewModel: profile.model, reviewEffort: profile.effort, reason: profile.reason });
+              const reviewPacket = buildReviewPacket({ request: task.prompt, changedFiles, diff, implementationSummary: agentResult.text, triage, previousReview });
+              this.transition(taskId, 'reviewing');
+              this.emit(taskId, 'codex', 'agent.started', { role: 'review', model: profile.model, effort: profile.effort, cycle: cycle + 1, changedFiles: changedFiles.length, triageRisk: triage.risk, packetCharacters: reviewPacket.length, packetFingerprint: diffFingerprint(reviewPacket), estimatedInputTokens: Math.ceil(reviewPacket.length / 2) });
+              review = await runCodexReview({ root: project.root, model: profile.model, effort: profile.effort, reviewPacket, riderAvailable: riderFor('codex'), signal, onOutput: (chunk) => this.stream(taskId, 'codex', chunk), onUsage: (usage) => this.recordProviderTelemetry(taskId, 'codex', usage) });
+              lastReviewedDiff = currentDiffFingerprint;
+              lastReview = review;
+              const reviewResult = extractCodexReviewVerdict(review);
+              blocked = reviewResult.blocked;
+              this.emit(taskId, 'codex', 'agent.completed', { role: 'review', blocked, verdict: reviewResult.verdict, model: profile.model, cycle: cycle + 1, summary: review.slice(-5000) });
+              if (!blocked) {
+                verificationPassed = true;
+                break;
+              }
             }
             const findings = reviewFingerprint(review);
             const repeatedWithoutProgress = Boolean(previousFindings && findings === previousFindings && !previousRepairChanged);
@@ -925,6 +951,10 @@ export class TaskManager {
     });
   }
 
+  private recordLocalProviderTelemetry(taskId: string, usage: Record<string, number>) {
+    this.emit(taskId, 'gemma', 'provider.telemetry', { usage });
+  }
+
   private emit(taskId: string, agent: AgentName, type: TaskEventType, payload: unknown) {
     this.events.publish(taskId, agent, type, payload);
   }
@@ -972,10 +1002,6 @@ export function hasReviewablePreservedProviderOutput(result: Pick<AgentRunResult
 }
 
 function diffFingerprint(diff: string) { return createHash('sha256').update(diff).digest('hex'); }
-function minimumRemaining(value: { quotas?: Array<{ remainingPercent: number | null }> }) {
-  const numbers = (value.quotas || []).map((item) => item.remainingPercent).filter((item): item is number => item !== null && Number.isFinite(item));
-  return numbers.length ? Math.min(...numbers) : null;
-}
 function latestProviderTelemetry(events: TaskEvent[], agent: 'antigravity' | 'codex'): Record<string, any> | null {
   const event = events.findLast((item) => item.agent === agent && item.type === 'provider.telemetry');
   return event?.payload && typeof event.payload === 'object' ? event.payload as Record<string, any> : null;

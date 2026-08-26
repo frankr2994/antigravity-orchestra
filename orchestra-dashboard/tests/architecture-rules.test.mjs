@@ -231,3 +231,22 @@ test('Modularity ratchet — frontend contracts and UI primitives stay outside A
   assert.doesNotMatch(app, /^type (?:Project|Task|TaskEvent|SettingsData)\s*=/m);
   assert.doesNotMatch(app, /^function (?:Metric|PageHeader|Card|NavButton|Empty|StatusDot|StateBadge|Field)\b/m);
 });
+
+test('Modularity ratchet — routing policy and managed worktrees have provider-neutral owners', () => {
+  const routing = readFileSync(join(serverDir, 'domain', 'execution', 'routing-policy.ts'), 'utf8');
+  const microEdit = readFileSync(join(serverDir, 'application', 'gemma', 'micro-edit-service.ts'), 'utf8');
+  const providerRouter = readFileSync(join(serverDir, 'providers', 'jules', 'router.ts'), 'utf8');
+  assert.doesNotMatch(routing, /from\s+['"][^'"]*(?:application|providers|infrastructure)/);
+  assert.doesNotMatch(microEdit, /providers\/jules/);
+  assert.doesNotMatch(providerRouter, /application\/jules/);
+});
+
+test('Modularity ratchet — App delegates workspace transactions, API transport, and usage presentation', () => {
+  const app = readFileSync(resolve(serverDir, '..', 'src', 'App.tsx'), 'utf8');
+  assert.match(app, /useWorkspaceState/);
+  assert.match(app, /useApiClient/);
+  assert.match(app, /ProviderUsageCard/);
+  assert.doesNotMatch(app, /useState<Project\[\]>/);
+  assert.doesNotMatch(app, /function api</);
+  assert.doesNotMatch(app, /function resetTimer/);
+});

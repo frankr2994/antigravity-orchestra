@@ -186,3 +186,12 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Add a contract layer to validate that only plain Markdown is emitted in non-agentic modes
 - Implement a single fallback retry for recoverable template mismatches without leaking internal protocol text
 - Extend the test suite with full roundtrip verification of buffered responses and real repository data
+
+
+## [2026-08-26 07:49:08] Handoff Update
+- Add provider-neutral routing and usage accounting to DESIGN.md with detailed decision/impact sections
+- Track per-provider runs (task, model, tokens) for accurate workload attribution
+- Implement a bounded review prompt envelope with SHA-256 fingerprinting and 48k character cap
+- Expose Codex's rolling 5h and weekly quota windows independently rather than as a single value
+- Add tests verifying provider run state transitions (cancelled/completed), usage aggregation, and task recovery
+- Update migration schema to include `provider_runs` with prompt fingerprint and latest version bump

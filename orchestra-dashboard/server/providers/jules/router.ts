@@ -4,6 +4,7 @@ import { CredentialVault } from '../../infrastructure/security/vault.js';
 import type { JulesApiClient } from './client.js';
 import { resolveJulesApiKey } from './credentials.js';
 import { runJulesPreflight } from './preflight.js';
+import { decideFreeFirstRoute, isGemmaMicroEditCandidate } from '../../domain/index.js';
 
 // ============================================================================
 // Google Jules & Orchestra Dynamic Task Routing Policy Engine
@@ -36,7 +37,6 @@ export async function routeTask(input: TaskRoutingInput): Promise<RoutingDecisio
     projectRoot,
     classification,
     requestedTarget = 'auto',
-    localQuotaExhausted = false,
     vault,
     julesClient,
     store,
@@ -89,14 +89,20 @@ export async function routeTask(input: TaskRoutingInput): Promise<RoutingDecisio
 
   // 3. Auto-Routing Decision Matrix
 
-  // 3a. Read-only queries or repository inspections stay local for instant response
+  // 3a. Read-only queries start with the local model.
   if (classification && (!classification.mutating || classification.type === 'question')) {
     const decision: RoutingDecision = {
       target: 'local',
-      worker: 'antigravity',
-      reason: 'Read-only queries and repository inspections execute locally for low latency.',
+      worker: 'gemma',
+      reason: decideFreeFirstRoute(classification, input.prompt, { julesReady: false }).reason,
       fallbackAvailable: false,
     };
+    logRoutingEvent(store, taskId, decision);
+    return decision;
+  }
+
+  if (classification && isGemmaMicroEditCandidate(classification, input.prompt)) {
+    const decision: RoutingDecision = { target: 'local', worker: 'gemma', reason: decideFreeFirstRoute(classification, input.prompt, { julesReady: false }).reason, fallbackAvailable: true };
     logRoutingEvent(store, taskId, decision);
     return decision;
   }
@@ -135,33 +141,20 @@ export async function routeTask(input: TaskRoutingInput): Promise<RoutingDecisio
     return decision;
   }
 
-  // 3d. If local Antigravity quota is under pressure or exhausted -> offload to cloud
-  if (localQuotaExhausted) {
+  // 3d. All eligible standard/deep mutations prefer Jules. Quota telemetry is display-only.
+  if (classification?.mutating) {
     const decision: RoutingDecision = {
       target: 'cloud',
       worker: 'jules',
       preflightOk: true,
-      reason: 'Local Antigravity quota is under pressure or exhausted; offloading to Jules cloud worker.',
+      reason: decideFreeFirstRoute(classification, input.prompt, { julesReady: true }).reason,
       fallbackAvailable: true,
     };
     logRoutingEvent(store, taskId, decision);
     return decision;
   }
 
-  // 3e. If task is deep complexity or multi-file architectural refactor -> prefer cloud
-  if (classification?.complexity === 'deep') {
-    const decision: RoutingDecision = {
-      target: 'cloud',
-      worker: 'jules',
-      preflightOk: true,
-      reason: 'Deep complexity and multi-file refactoring routed to Google Jules cloud worker.',
-      fallbackAvailable: true,
-    };
-    logRoutingEvent(store, taskId, decision);
-    return decision;
-  }
-
-  // 3f. Default for standard mutating tasks -> local Antigravity for interactive pairing
+  // 3e. Missing classification cannot be delegated safely.
   const decision: RoutingDecision = {
     target: 'local',
     worker: 'antigravity',

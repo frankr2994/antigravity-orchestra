@@ -398,6 +398,34 @@ export const MIGRATIONS: Migration[] = [
       db.exec('CREATE INDEX IF NOT EXISTS idx_cloud_sessions_attempt ON cloud_sessions(attempt_id);');
     },
   },
+  {
+    version: 10,
+    name: 'provider_run_accounting',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE provider_runs (
+          id TEXT PRIMARY KEY,
+          task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL CHECK(provider IN ('gemma','jules','antigravity','codex')),
+          operation TEXT NOT NULL,
+          model TEXT,
+          primary_worker INTEGER NOT NULL CHECK(primary_worker IN (0,1)),
+          prompt_fingerprint TEXT,
+          estimated_input_tokens INTEGER CHECK(estimated_input_tokens IS NULL OR estimated_input_tokens >= 0),
+          status TEXT NOT NULL CHECK(status IN ('running','completed','failed','cancelled')),
+          input_tokens INTEGER CHECK(input_tokens IS NULL OR input_tokens >= 0),
+          cached_input_tokens INTEGER CHECK(cached_input_tokens IS NULL OR cached_input_tokens >= 0),
+          output_tokens INTEGER CHECK(output_tokens IS NULL OR output_tokens >= 0),
+          reasoning_tokens INTEGER CHECK(reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+          total_tokens INTEGER CHECK(total_tokens IS NULL OR total_tokens >= 0),
+          started_at TEXT NOT NULL,
+          completed_at TEXT
+        );
+        CREATE INDEX idx_provider_runs_provider_time ON provider_runs(provider, started_at DESC);
+        CREATE INDEX idx_provider_runs_task_time ON provider_runs(task_id, started_at DESC);
+      `);
+    },
+  },
 ];
 
 export function runMigrations(db: DatabaseSync, migrations: readonly Migration[] = MIGRATIONS): number {

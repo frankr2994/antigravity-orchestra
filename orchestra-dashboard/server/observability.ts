@@ -35,6 +35,7 @@ export interface ProviderUsage {
   conversationId?: string;
   workspace?: string;
   stale?: boolean;
+  activity?: import('./domain/index.js').ProviderActivity;
 }
 
 export function ensureAntigravityStatusCollector() {
@@ -90,20 +91,7 @@ export async function readCodexUsage(): Promise<ProviderUsage> {
       codexAppServer.request('account/rateLimits/read', {}),
       codexAppServer.request('account/usage/read', {}),
     ]);
-    const buckets = rate.rateLimitsByLimitId || (rate.rateLimits ? { [rate.rateLimits.limitId || 'codex']: rate.rateLimits } : {});
-    const quotas: ProviderQuotaBucket[] = Object.entries(buckets).map(([id, raw]) => {
-      const bucket = raw as Record<string, any>; const primary = bucket.primary || {};
-      return {
-        id,
-        name: 'Weekly Limit',
-        group: 'OpenAI Codex',
-        window: 'weekly',
-        usedPercent: finite(primary.usedPercent),
-        remainingPercent: finite(primary.usedPercent) === null ? null : 100 - Number(primary.usedPercent),
-        resetsAt: primary.resetsAt ? new Date(Number(primary.resetsAt) * 1000).toISOString() : null,
-        windowMinutes: finite(primary.windowDurationMins),
-      };
-    });
+    const quotas = extractCodexQuotas(rate);
     const summary = activity.summary && typeof activity.summary === 'object' ? activity.summary as Record<string, unknown> : {};
     const tokenActivity = Object.fromEntries(Object.entries(summary).map(([key, value]) => [key, finite(value)]));
     const value: ProviderUsage = { available: quotas.length > 0 || Object.keys(tokenActivity).length > 0, source: 'codex-app-server', checkedAt, quotas, tokenActivity, reason: quotas.length || Object.keys(tokenActivity).length ? undefined : 'Codex account telemetry returned no quota or usage fields for the current authentication mode.' };
@@ -112,6 +100,62 @@ export async function readCodexUsage(): Promise<ProviderUsage> {
     const value = { available: false, source: 'codex-app-server', checkedAt, reason: error instanceof Error ? error.message : String(error) } satisfies ProviderUsage;
     codexCache = { at: Date.now(), value }; return value;
   }
+}
+
+export function extractCodexQuotas(rate: Record<string, unknown>): ProviderQuotaBucket[] {
+  const direct = record(rate.rateLimitsByLimitId);
+  const single = record(rate.rateLimits);
+  const buckets = direct ?? (single ? { [String(single.limitId || 'codex')]: single } : {});
+  const quotas: ProviderQuotaBucket[] = [];
+  for (const [limitId, raw] of Object.entries(buckets)) {
+    const limit = record(raw);
+    if (!limit) continue;
+    const namedWindows = ['primary', 'secondary']
+      .map((role) => [role, record(limit[role])] as const)
+      .filter((entry): entry is readonly [string, Record<string, unknown>] => entry[1] !== null);
+    const windows = namedWindows.length ? namedWindows : [['limit', limit] as const];
+    for (const [role, window] of windows) {
+      const usedPercent = finite(window.usedPercent);
+      const duration = finite(window.windowDurationMins);
+      if (usedPercent === null && duration === null && window.resetsAt === undefined) continue;
+      const normalizedUsed = usedPercent === null ? null : Math.max(0, Math.min(100, usedPercent));
+      quotas.push({
+        id: `${limitId}:${role}`,
+        name: quotaWindowName(duration),
+        group: 'OpenAI Codex',
+        window: quotaWindowId(duration),
+        usedPercent: normalizedUsed,
+        remainingPercent: normalizedUsed === null ? null : Math.round((100 - normalizedUsed) * 100) / 100,
+        resetsAt: resetTimestamp(window.resetsAt),
+        windowMinutes: duration,
+      });
+    }
+  }
+  return quotas;
+}
+
+function record(value: unknown): Record<string, any> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : null;
+}
+
+function quotaWindowId(minutes: number | null): string {
+  if (minutes === 300) return '5h';
+  if (minutes !== null && minutes >= 6 * 24 * 60 && minutes <= 8 * 24 * 60) return 'weekly';
+  if (minutes !== null && minutes % 60 === 0) return `${minutes / 60}h`;
+  return minutes === null ? 'unknown' : `${minutes}m`;
+}
+
+function quotaWindowName(minutes: number | null): string {
+  const id = quotaWindowId(minutes);
+  if (id === '5h') return 'Rolling 5-hour limit';
+  if (id === 'weekly') return 'Weekly limit';
+  return id === 'unknown' ? 'Rate limit' : `${id} limit`;
+}
+
+function resetTimestamp(value: unknown): string | null {
+  if (typeof value === 'string' && Number.isFinite(Date.parse(value))) return new Date(value).toISOString();
+  const epochSeconds = finite(value);
+  return epochSeconds === null ? null : new Date(epochSeconds * 1000).toISOString();
 }
 
 export function readAntigravityTranscript(conversationId: string | null, limit = 30) {
