@@ -213,3 +213,7 @@ feat: Implement local Git logger skill for incremental change logging and commit
 - Decoupled Jules routing from the concrete `TaskManager` via a minimal `LocalTaskQueue` port for isolated testing and deployment
 - Moved dashboard state and telemetry out of `App.tsx` into feature hooks (`useDashboardTelemetry`, `useComposerState`)
 - Tightened architecture tests to enforce small public facades, no network/process code in the React root, and correct dependency directions
+
+
+## [2026-08-26 21:05:08] Handoff Update
+- Bump orchestra-dashboard version from 1.0.7 to 1.0.8 in package.json and lockfile
