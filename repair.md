@@ -3618,3 +3618,23 @@ Delivered operational constraints:
 - Concurrent cloud sessions are configurable (`JULES_MAX_CONCURRENT_SESSIONS`, default 2, local safety bound 1–32); no provider-account maximum is hardcoded.
 - Repository verification executes checked-out PR code on the Orchestra host with a sanitized environment, time/output/resource bounds, and an isolated managed worktree. This is hardened host-local execution, not an OS security sandbox.
 - Automatic integration is a non-force update guarded by exact PR identity, ancestry, review/verification success, repository fencing, unchanged PR head, unchanged target SHA, and remote readback.
+
+## Repair implementation checkpoint — Shared Solo Provider Project-Access Contract (2026-08-27)
+
+Status: **Implementation complete; full workspace validation green (223/223 tests passing); local commit 7cf78ef**
+
+Resolution summary:
+
+- **Centralized Security Redaction Boundary**: Centralized credential redaction across `server/infrastructure/security/redaction.ts` and `server/application/agents/agent-data-utils.ts`. Sanitizes Bearer/Basic headers, quoted JSON/YAML credential key-value pairs (`"password": "..."`, `"client_secret": "..."`, `"private_key": "..."`), assignments, private keys, and deep error/data structures with negative lookahead to prevent double-redaction or URI mangling.
+- **Shared Project-Access Contract**: Gemma Solo, Codex Solo, and Antigravity Solo share an explicit, contained, grounded project-access contract. Authoritative project directory facts and launch commands (`npm run dev`, `pnpm run dev`, `yarn run dev`, `bun run dev`) are answered deterministically from local state with `lstatSync` validation against symlinks and path traversal.
+- **Bounded Project Read Tools**: Gemma Solo is equipped with 3 server-enforced read-only tools (`project_list_files`, `project_read_file`, `project_search_text`). Prohibits shell execution, rejects `.env`, secrets, credentials, certificates, binaries, and symlinks, imposes 750 KB per-file read bounds, 40,000 char truncation notices, 200-directory / depth-8 recursion bounds, and searchable text pre-filtering during search. Excludes `.gradle`, `out`, and `.orchestra` from inventories.
+- **Model Capability Detection & Grounded Fallbacks**: `DirectTaskExecutor` and `runGemmaDirectChat` evaluate model capabilities. When an installed model lacks tool calling, tools are omitted and grounded repository evidence is provided via `collectRepositoryEvidence` with prompt-ranked source contents (e.g. `src/auth.ts`). Unloaded models budget context conservatively without assuming unverified architectural maximums.
+- **Enforced Evidence Invariants**: Project questions regarding framework, dependencies, files, implementation, architecture, and code enforce evidence reads (`successfulReads > 0`), failing closed against ungrounded guesses while safely exempting conversational follow-ups.
+- **Preserved Git Evidence**: Direct Gemma inquiries regarding Git status, commits, diffs, or branches gather bounded snapshots (`getGitStatus`, `getRecentCommits`, `getDiff`) directly into evidence.
+- **Role-Scoped Diagnostics**: Unrequested diagnostics are restricted in direct Solo mode while keeping specialist coordinator roles unhindered.
+- **Offline Evidence & Verification**:
+  - Full workspace test suite: 223 / 223 tests passing with 0 failures across 188 files.
+  - OxLint: 0 warnings and 0 errors.
+  - TypeScript build: 0 errors (`tsc -p tsconfig.server.json && tsc -b && vite build`).
+  - 6 iterative review rounds conducted with Codex CLI; all P1 and P2 findings remediated in code and validated in `tests/direct-provider-access.test.mjs`; recorded that final verification cycle hit external ChatGPT account usage quota (`try again at 11:47 PM`).
+
