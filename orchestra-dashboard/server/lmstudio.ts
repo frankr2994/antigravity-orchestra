@@ -158,12 +158,12 @@ export async function getActiveLmStudioModel(): Promise<string> {
   return (await getActiveLmStudioModelInfo()).id;
 }
 
-export async function getActiveLmStudioModelInfo(): Promise<{ id: string; contextLength: number | undefined }> {
+export async function getActiveLmStudioModelInfo(): Promise<{ id: string; contextLength: number | undefined; capabilities: string[] | undefined }> {
   const models = await getInstalledLmStudioModels();
   const loaded = models.find((model) => model.state === 'loaded');
   return loaded
-    ? { id: loaded.id, contextLength: loaded.loadedContextLength }
-    : { id: config.lmStudioModel, contextLength: undefined };
+    ? { id: loaded.id, contextLength: loaded.loadedContextLength, capabilities: loaded.capabilities }
+    : { id: config.lmStudioModel, contextLength: undefined, capabilities: undefined };
 }
 
 export async function loadLmStudioModel(

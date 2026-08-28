@@ -35,7 +35,7 @@ export interface CodexTurnOptions {
   model: string;
   effort: string;
   signal: AbortSignal;
-  onOutput: (message: string) => void;
+  onOutput?: (message: string) => void;
   onTelemetry?: (value: CodexContextSnapshot | Record<string, unknown>) => void;
 }
 
@@ -180,10 +180,10 @@ class CodexAppServer {
       }
       if (method === 'model/rerouted') {
         options.onTelemetry?.({ threadId, turnId: String(params.turnId || turnId), reroute: { fromModel: params.fromModel, toModel: params.toModel, reason: params.reason } });
-        options.onOutput(`Codex was rerouted from ${String(params.fromModel)} to ${String(params.toModel)} by the provider.`);
+        options.onOutput?.(`Codex was rerouted from ${String(params.fromModel)} to ${String(params.toModel)} by the provider.`);
       }
       const progress = codexProgressMessage(method, params);
-      if (progress && !notices.has(progress)) { notices.add(progress); options.onOutput(progress); }
+      if (progress && !notices.has(progress)) { notices.add(progress); options.onOutput?.(progress); }
       if (method === 'turn/completed') {
         const status = String(params.turn?.status || 'completed');
         if (status === 'completed') resolveTurn();

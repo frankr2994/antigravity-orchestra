@@ -60,6 +60,17 @@ test('Gemma direct-chat contract preserves ordinary Markdown and identifies Git-
   assert.match(formatDirectGitStatusAnswer('F:\\project', { isGit: true, root: 'F:\\project', branch: 'main', head: 'abc', upstream: null, files: [], dirty: false }), /working tree is clean/i);
 });
 
+test('Gemma direct-chat contract removes serialized hidden reasoning and rejects unbounded control tokens', () => {
+  assert.equal(
+    validateGemmaDirectChatResponse('<|channel>thought\nprivate reasoning\n<channel|>wiring-app; npm run dev'),
+    'wiring-app; npm run dev',
+  );
+  assert.throws(
+    () => validateGemmaDirectChatResponse('<|channel>thought\nprivate reasoning without a final boundary'),
+    (error) => error?.code === 'GEMMA_UNSUPPORTED_TOOL_OUTPUT',
+  );
+});
+
 test('Gemma Solo buffers streamed Markdown until it passes the response contract', async () => {
   const requests = [];
   const output = [];

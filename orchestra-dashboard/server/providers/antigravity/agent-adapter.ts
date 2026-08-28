@@ -1,5 +1,6 @@
 import { ProcessIdleTimeoutError, ProcessTimeoutError, runProcess } from '../../process.js';
 import { attachTrustedLocalArtifacts } from '../../application/context/agent-prompt-context.js';
+import { directProjectAccessInstruction } from '../../application/context/direct-project-access.js';
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
 export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; usage: Record<string, number> | null; terminalStatus: string | null; incomplete: boolean; failureReason: string | null; continuationGuidance: string | null; }
@@ -12,7 +13,7 @@ export async function listAntigravityModels(): Promise<string[]> {
   } catch { return []; }
 }
 
-export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; recovery?: boolean; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<AgentRunResult> {
+export async function runAntigravity(input: { root: string; prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null; context?: string; sessionContext?: string; recovery?: boolean; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<AgentRunResult> {
   const prompt = buildAntigravityPrompt(input);
   const args = buildAntigravityArgs({ ...input, prompt });
   const startedAt = Date.now();
@@ -40,7 +41,7 @@ export async function runAntigravity(input: { root: string; prompt: string; mode
     clearInterval(progressTimer);
   }
   decoder.flush();
-  if (result.code !== 0) throw new Error(result.stderr || `Antigravity exited with ${result.code}`);
+  if (result.code !== 0) throw new Error(extractAntigravityError(result.stdout) || result.stderr.trim() || `Antigravity exited with ${result.code}`);
   const terminal = interpretAntigravityOutput(result.stdout, input.mutating, input.mutating);
   const usage = extractAntigravityUsage(result.stdout);
   input.onUsage?.({ conversationId: terminal.conversationId, usage });
@@ -60,7 +61,20 @@ export function extractAntigravityUsage(output: string) {
   return usage;
 }
 
-export function buildAntigravityPrompt(input: { root: string; prompt: string; mutating: boolean; context?: string; recovery?: boolean; riderAvailable?: boolean }) {
+export function extractAntigravityError(output: string): string | null {
+  for (const line of output.split(/\r?\n/).reverse()) {
+    try {
+      const value = JSON.parse(line) as Record<string, unknown>;
+      const result = value.event === 'result' && value.result && typeof value.result === 'object'
+        ? value.result as Record<string, unknown>
+        : value;
+      if (typeof result.error === 'string' && result.error.trim()) return result.error.trim().slice(0, 1_000);
+    } catch { /* Ignore diagnostics outside the structured protocol. */ }
+  }
+  return null;
+}
+
+export function buildAntigravityPrompt(input: { root: string; prompt: string; mutating: boolean; context?: string; sessionContext?: string; recovery?: boolean; riderAvailable?: boolean }) {
   const action = input.mutating
     ? 'Implement and verify the request. Do not commit or push; the dashboard owns Git finalization.'
     : 'Answer the request using read-only inspection. Do not modify files.';
@@ -69,7 +83,10 @@ export function buildAntigravityPrompt(input: { root: string; prompt: string; mu
     : '';
   const rider = input.riderAvailable ? 'JetBrains Rider MCP is healthy and enabled for this turn. Prefer Rider for solution-aware navigation, symbol searches and usages, project dependencies, IDE diagnostics, safe refactors, and targeted file operations when its semantic context is better than raw shell inspection. Use Git and ordinary shell tools where they are more appropriate; do not force unrelated work through MCP.\n\n' : '';
   const request = attachTrustedLocalArtifacts(input.prompt);
-  return `${input.context ? `A read-only Codex specialist provided this analysis:\n\n${input.context}\n\n` : ''}Authoritative active project directory: ${input.root}\n\nThis exact directory is the repository for the task. Start every repository inspection in this directory and keep all file access inside it. Do not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${rider}${recovery ? `${recovery}\n\n` : ''}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion. If a tool unexpectedly creates background work, wait for it directly and cancel or close it before returning. End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
+  const access = input.mutating
+    ? `Authoritative active project directory: ${input.root}\nThis exact directory is the repository for the task. Start every repository inspection in this directory and keep all file access inside it.`
+    : directProjectAccessInstruction(input.root, 'antigravity');
+  return `${input.context ? `A read-only Codex specialist provided this analysis:\n\n${input.context}\n\n` : ''}${access}\n\nDo not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${input.sessionContext ? `${input.sessionContext}\n\n` : ''}${rider}${recovery ? `${recovery}\n\n` : ''}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion. If a tool unexpectedly creates background work, wait for it directly and cancel or close it before returning. End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
 }
 
 export function interpretAntigravityOutput(output: string, mutating: boolean, preserveIncompleteMutation = false) {
@@ -87,8 +104,14 @@ export function interpretAntigravityOutput(output: string, mutating: boolean, pr
 }
 
 export function buildAntigravityArgs(input: { prompt: string; model: string; effort: string; mutating: boolean; conversationId: string | null }) {
-  const args = ['--output-format', 'stream-json', '--model', input.model, '--effort', input.effort, '--mode', 'accept-edits', '--print-timeout', '20m'];
-  if (!input.mutating) args.push('--sandbox');
+  const args = ['--output-format', 'stream-json', '--model', input.model];
+  // Current Antigravity model IDs encode their supported effort (for example,
+  // gemini-3.7-flash-high). Supplying a second --effort value makes agy reject
+  // the invocation when the values differ. Keep --effort for unsuffixed model
+  // IDs, where the CLI still uses it as an independent selection.
+  if (!/-(?:low|medium|high)$/i.test(input.model)) args.push('--effort', input.effort);
+  args.push('--mode', input.mutating ? 'accept-edits' : 'plan', '--print-timeout', '20m');
+  if (!input.mutating) args.push('--sandbox', '--disable-slash-commands');
   if (input.conversationId) args.push('--conversation', input.conversationId);
   // --print and --prompt both take a prompt value. A bare --print would consume
   // the following flag as the user's prompt, so keep this value-taking option last.

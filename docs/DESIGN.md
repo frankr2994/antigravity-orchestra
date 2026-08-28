@@ -927,3 +927,50 @@ The first compatibility extraction reduced the public hotspot files, but `applic
 - `TaskManager` and `App` are now small public composition surfaces, while their runtime owners expose explicit seams for the next review-loop and chat-panel extractions.
 - Jules local routing can be constructed with a test double or alternative queue implementation without importing task execution.
 - Architecture tests fail if compatibility barrels regain process/network implementation, Jules reimports the task manager, or the root React component regains controller responsibilities.
+
+## 2026-08-27: Solo providers share an explicit project-access contract
+
+### Background
+
+Solo questions about starting an application exposed inconsistent provider behavior. Gemma received repository evidence only when a keyword heuristic matched and could therefore claim that a valid selected project was unavailable. Codex had a real read-only working directory but was told to analyze the repository thoroughly, so a capability question triggered unrelated typecheck and test commands. Antigravity was started for read-only questions with the contradictory `accept-edits` mode plus sandbox restrictions and could remain silent while initializing. The behavior predated the provider-module extraction; the new boundaries made the shared contract failure visible.
+
+### Decision
+
+- Validate and canonicalize the selected project directory before any Solo provider turn.
+- Answer exact project-access and manifest-backed launch questions deterministically from server-owned facts, with system provenance and no model usage.
+- Give every Solo provider bounded recent conversation context and an explicit authoritative project root.
+- Give Gemma Solo three server-enforced read-only tools: list project files, read one permitted text file, and search literal project text. Optional repository evidence is quoted and context-budgeted rather than injected as mandatory system text. Reject traversal, symlinks, sensitive paths, binary/oversized reads, excessive calls, and undeclared tools.
+- Fit every Gemma Solo request and every subsequent tool round to the loaded model's reported context length, using the shared conservative Gemma budget. Bound recent session history separately and reserve response capacity before sending the request.
+- For prompts that make claims about the selected application, code, files, or architecture, provide a small server-built overview from the root inventory and conventional manifests/README, then require at least one real project tool call before accepting an answer. Exclude generated and agent-workspace directories from default inventories while retaining explicit contained reads.
+- Start Codex Solo with its existing read-only app-server sandbox while instructing it to inspect only what directly answers the question. Builds, tests, type checks, linters, and broad diagnostics require an explicit user request.
+- Start non-mutating Antigravity turns in `plan` mode with sandboxing and slash-command expansion disabled. Mutating Orchestra turns retain `accept-edits` mode.
+- Treat Antigravity model IDs ending in `-low`, `-medium`, or `-high` as complete selections and omit the separate `--effort` flag; the installed CLI rejects conflicting duplicate effort selections. Preserve structured CLI error details when a process exits unsuccessfully.
+- Treat provider progress callbacks as optional at the Codex app-server boundary, and suppress serialized LM Studio hidden-reasoning/control-channel markup before a Gemma answer reaches chat.
+- Preserve the no-arbitrary-shell rule for Gemma and the no-file-mutation rule for all Solo modes.
+
+### Reasons
+
+- Filesystem authority is an application contract and must not depend on whether a model interprets an ambiguous prompt correctly.
+- Deterministic local facts are faster, exact, and consume no provider quota.
+- Gemma needs on-demand project reads without paying the prompt cost of a repository snapshot on unrelated conversation, but those reads must remain path-contained and non-executable.
+- A conversational question should not silently become repository-wide verification or consume repeated provider turns.
+- Antigravity's CLI mode must agree with the requested read-only behavior so noninteractive tool permissions are predictable.
+
+### Alternatives
+
+- Expand only the Gemma keyword list: rejected because future phrasing would recreate the same access failure.
+- Inject every project file into every local-model prompt: rejected because large repositories would overflow context and expose unnecessary sensitive data.
+- Give Gemma arbitrary Bash access: rejected because a model-generated command is not execution authorization.
+- Auto-approve every Antigravity permission: rejected because it would weaken the read-only Solo boundary.
+- Shorten provider timeouts without changing access modes and prompts: rejected because it limits the symptom but does not repair the contract.
+
+### Impact
+
+- All Solo modes identify the same canonical selected project and retain recent conversation continuity.
+- Common access and launch questions return immediately from inspected local state.
+- Gemma can inspect omitted project files on demand without gaining command execution or out-of-root access.
+- An 8K local context remains usable for ordinary chat and project inspection; large history/evidence is compacted before LM Studio receives it instead of failing with `n_keep >= n_ctx`.
+- Obvious greetings and model-identity questions do not expose project tools; project-dependent evaluations cannot answer solely from model priors when no repository read occurred.
+- Codex no longer runs verification merely because a direct question mentions the repository.
+- Antigravity read-only invocation flags align with the installed CLI's documented modes.
+- Provider protocol mistakes now produce actionable diagnostics instead of opaque exits, and internal model-control text cannot leak into Solo chat.

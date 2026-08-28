@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { attachTrustedLocalArtifacts, buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, codexShellGuidance, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, groundPostflightResult, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, lmStudioUsage, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
+import { attachTrustedLocalArtifacts, buildAntigravityArgs, buildAntigravityPrompt, buildContinuationPrompt, buildReviewPacket, codexShellGuidance, decodeAntigravityProgressLine, decodeCodexProgressLine, distillVerificationErrors, extractAntigravityError, extractAntigravityText, extractAntigravityUsage, extractCodexReviewVerdict, findContinuationRecoveryTask, friendlyCodexError, groundPostflightResult, hasExplicitMutationIntent, interpretAntigravityOutput, isConnectGitRemoteIntent, isContinuationCommand, lmStudioUsage, normalizeClassification, normalizeEvidenceFile, normalizePostflightResult, normalizeRiskFlags, parseJson, preReviewSanityCheck, responseDefersRequestedWork, responseIdentifiesProject, sanitizeCodexPath, selectModels, selectReviewProfile, shouldAttemptGemmaAnswer, sliceSemanticCommits, validateAgentResponse, redactSecrets } from '../dist-server/agents.js';
 import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { boundGitDiff, createManualCheckpoint, extractGitHubRemoteUrl, getChangedFilesFromBase, getCommitDiffDetails, getDiffFromBase, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
@@ -324,6 +324,11 @@ test('Antigravity terminal errors without final text remain failures', () => {
   assert.throws(() => interpretAntigravityOutput(raw, false), /without a final response/);
 });
 
+test('Antigravity structured CLI errors remain actionable', () => {
+  const raw = JSON.stringify({ event: 'result', result: { status: 'ERROR', error: 'selected model conflicts with effort' } });
+  assert.equal(extractAntigravityError(raw), 'selected model conflicts with effort');
+});
+
 test('Antigravity command events do not leak structured protocol', () => {
   const raw = JSON.stringify({ event: 'command_result', command: { name: 'help', data: { secret: 'not-chat-output' } } });
   assert.equal(decodeAntigravityProgressLine(raw), null);
@@ -334,8 +339,15 @@ test('Antigravity CLI arguments cannot consume an option as the prompt', () => {
   assert.equal(args.includes('--print'), false);
   assert.deepEqual(args.slice(-2), ['--prompt', 'explain this repo']);
   assert.equal(args[args.indexOf('--output-format') + 1], 'stream-json');
-  assert.equal(args[args.indexOf('--mode') + 1], 'accept-edits');
+  assert.equal(args[args.indexOf('--mode') + 1], 'plan');
+  assert.equal(args.includes('--effort'), false, 'effort is already encoded in the selected model ID');
   assert.equal(args.includes('--sandbox'), true);
+  assert.equal(args.includes('--disable-slash-commands'), true);
+});
+
+test('Antigravity CLI keeps explicit effort for model IDs that do not encode it', () => {
+  const args = buildAntigravityArgs({ prompt: 'explain this repo', model: 'claude-sonnet-4-6', effort: 'high', mutating: false, conversationId: null });
+  assert.equal(args[args.indexOf('--effort') + 1], 'high');
 });
 
 test('mutating Antigravity tasks use edit mode without the read-only sandbox', () => {

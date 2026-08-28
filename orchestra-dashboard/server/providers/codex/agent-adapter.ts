@@ -2,11 +2,10 @@ import { delimiter } from 'node:path';
 import { codexAppServer } from '../../codex-app-server.js';
 import { attachTrustedLocalArtifacts, codexShellGuidance } from '../../application/context/agent-prompt-context.js';
 import { redactSecrets } from '../../application/agents/agent-data-utils.js';
+import { directProjectAccessInstruction } from '../../application/context/direct-project-access.js';
 
-export async function runCodexAnalysis(input: { root: string; prompt: string; role: string; model: string; effort: string; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<string> {
-  const rider = input.riderAvailable ? '\nJetBrains Rider MCP is healthy and enabled. Prefer its read-only semantic tools for solution structure, symbol navigation, usages, dependencies, and IDE diagnostics when they are more precise than shell searches. Never call Rider mutation, execution, build, or database tools in this Codex role.' : '';
-  const shell = codexShellGuidance();
-  const instruction = `## Task Type: ${input.role}\n\n## Question\n${attachTrustedLocalArtifacts(input.prompt)}\n\n## Instructions\nAnalyze the selected repository thoroughly. Do not edit files. Return concrete recommendations and identify blocking risks.${rider}${shell}`;
+export async function runCodexAnalysis(input: { root: string; prompt: string; role: string; model: string; effort: string; riderAvailable?: boolean; sessionContext?: string; signal: AbortSignal; onOutput?: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<string> {
+  const instruction = buildCodexAnalysisPrompt(input);
   try {
     const result = await codexAppServer.runReadOnlyTurn({ ...input, prompt: instruction, onTelemetry: input.onUsage });
     return result.text || 'Codex completed its analysis without a final text response.';
@@ -16,13 +15,26 @@ export async function runCodexAnalysis(input: { root: string; prompt: string; ro
       const fallbackModel = input.model === 'gpt-5.6-sol' ? 'gpt-5.6-terra' : 'gpt-5.6-luna';
       const fallbackEffort = input.effort === 'high' ? 'medium' : 'low';
       if (input.model !== fallbackModel) {
-        input.onOutput(`Codex model ${input.model} (${input.effort}) is temporarily at capacity. Automatically falling back to ${fallbackModel} (${fallbackEffort}).`);
+        input.onOutput?.(`Codex model ${input.model} (${input.effort}) is temporarily at capacity. Automatically falling back to ${fallbackModel} (${fallbackEffort}).`);
         const result = await codexAppServer.runReadOnlyTurn({ ...input, model: fallbackModel, effort: fallbackEffort, prompt: instruction, onTelemetry: input.onUsage });
         return result.text || 'Codex completed its analysis without a final text response.';
       }
     }
     throw error;
   }
+}
+
+export function buildCodexAnalysisPrompt(input: { root: string; prompt: string; role: string; riderAvailable?: boolean; sessionContext?: string }) {
+  const rider = input.riderAvailable ? '\nJetBrains Rider MCP is healthy and enabled. Prefer its read-only semantic tools for solution structure, symbol navigation, usages, dependencies, and IDE diagnostics when they are more precise than shell searches. Never call Rider mutation, execution, build, or database tools in this Codex role.' : '';
+  const shell = codexShellGuidance();
+  const direct = /direct/i.test(input.role);
+  const projectAccess = direct
+    ? `## Project Access\n${directProjectAccessInstruction(input.root, 'codex')}\n\n`
+    : `## Repository Context\nThe active project root is: ${input.root}. Inspect only the relevant project files needed for this specialist analysis.\n\n`;
+  const work = direct
+    ? 'Answer only the user’s question. Use the smallest necessary read-only inspection. Do not broaden the task into an audit or search for blocking risks.'
+    : 'Analyze the selected repository to the depth required by this specialist role. Return concrete recommendations and identify blocking risks.';
+  return `## Task Type: ${input.role}\n\n${projectAccess}${input.sessionContext ? `## Conversation Context\n${input.sessionContext}\n\n` : ''}## Question\n${attachTrustedLocalArtifacts(input.prompt)}\n\n## Instructions\n${work} Do not edit files.${rider}${shell}`;
 }
 
 export async function runCodexReview(input: { root: string; model: string; effort: string; reviewPacket: string; riderAvailable?: boolean; signal: AbortSignal; onOutput: (chunk: string) => void; onUsage?: (value: unknown) => void }): Promise<string> {
@@ -95,4 +107,3 @@ export function friendlyCodexError(stderr: string, code: number) {
 export function sanitizeCodexPath(value: string) {
   return value.split(delimiter).filter((entry) => !/\\WindowsApps(?:\\|$)/i.test(entry)).join(delimiter);
 }
-

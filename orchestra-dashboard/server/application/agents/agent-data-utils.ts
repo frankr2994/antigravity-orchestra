@@ -1,9 +1,6 @@
-export function redactSecrets(value: string) {
-  return value
-    .replace(/(api[_-]?key|token|password|secret)\s*[:=]\s*["']?[^\s"']+/gi, '$1=[REDACTED]')
-    .replace(/\b(sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{12,})\b/g, '[REDACTED_TOKEN]')
-    .replace(/-----BEGIN [^-]+PRIVATE KEY-----[\s\S]*?-----END [^-]+PRIVATE KEY-----/g, '[REDACTED_PRIVATE_KEY]');
-}
+import { redactSecrets } from '../../infrastructure/security/redaction.js';
+
+export { redactSecrets };
 
 export function parseJson(text: string): unknown {
   const match = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -29,4 +26,3 @@ function repairCommonJson(value: string) {
   }
   return result.replace(/,\s*([}\]])/g, '$1');
 }
-

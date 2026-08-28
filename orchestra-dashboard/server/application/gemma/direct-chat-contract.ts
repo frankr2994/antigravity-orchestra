@@ -16,13 +16,26 @@ const rawToolInvocationPatterns = [
   /^\s*call:[A-Za-z_][\w.-]*\s*\{[\s\S]{0,240}(?:command|arguments)\s*:/i,
 ];
 
+const internalControlTokenPattern = /<\|(?:channel|message|start|end|im_start|im_end)(?:\|>|>)|<(?:channel|message)\|>/i;
+
 /** Accepts user-facing Markdown and rejects model/runtime control syntax. */
 export function validateGemmaDirectChatResponse(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error('LM Studio returned an empty chat response.');
   }
-  const answer = value.trim();
+  let answer = value.trim();
+  // Some LM Studio chat templates serialize a hidden reasoning channel into the
+  // content field. Keep only the user-facing segment when the template supplies
+  // an explicit boundary; never display or preserve the hidden segment.
+  if (/^<\|channel>thought\b/i.test(answer)) {
+    const boundary = answer.lastIndexOf('<channel|>');
+    if (boundary < 0) throw new GemmaDirectChatProtocolError();
+    answer = answer.slice(boundary + '<channel|>'.length).trim();
+  }
   if (rawToolInvocationPatterns.some((pattern) => pattern.test(answer))) {
+    throw new GemmaDirectChatProtocolError();
+  }
+  if (!answer || internalControlTokenPattern.test(answer)) {
     throw new GemmaDirectChatProtocolError();
   }
   return answer;
