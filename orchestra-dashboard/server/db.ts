@@ -35,8 +35,12 @@ export class Store {
     return this.manager.projects.getByRoot(root);
   }
 
-  upsertProject(input: { name: string; root: string; gitRoot: string | null }): Project {
+  upsertProject(input: { name: string; root: string; gitRoot: string | null; evidenceMode?: 'legacy' | 'snapshot' }): Project {
     return this.manager.projects.upsert(input);
+  }
+
+  updateProjectEvidenceMode(id: string, mode: 'legacy' | 'snapshot'): Project | null {
+    return this.manager.projects.setEvidenceMode(id, mode);
   }
 
   updateProjectOnboarding(id: string, status: string, version: string | null) {

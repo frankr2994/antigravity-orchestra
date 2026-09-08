@@ -16,6 +16,7 @@ function mapProject(row: unknown): Project {
     activeSessionId: r.active_session_id ? String(r.active_session_id) : null,
     createdAt: String(r.created_at),
     updatedAt: String(r.updated_at),
+    evidenceMode: r.evidence_mode === 'snapshot' ? 'snapshot' : 'legacy',
   };
 }
 
@@ -36,19 +37,25 @@ export class ProjectRepository {
     return row ? mapProject(row) : null;
   }
 
-  upsert(input: { name: string; root: string; gitRoot: string | null }): Project {
+  upsert(input: { name: string; root: string; gitRoot: string | null; evidenceMode?: 'legacy' | 'snapshot' }): Project {
     const existing = this.getByRoot(input.root);
     const stamp = now();
     if (existing) {
-      this.db.prepare('UPDATE projects SET name=?, git_root=?, updated_at=? WHERE id=?')
-        .run(input.name, input.gitRoot, stamp, existing.id);
+      const evidenceMode = input.evidenceMode === undefined ? existing.evidenceMode : input.evidenceMode;
+      this.db.prepare('UPDATE projects SET name=?, git_root=?, evidence_mode=?, updated_at=? WHERE id=?')
+        .run(input.name, input.gitRoot, evidenceMode, stamp, existing.id);
       return this.getById(existing.id)!;
     }
     const id = randomUUID();
     this.db.prepare(`INSERT INTO projects
-      (id,name,root,git_root,onboarding_status,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`)
-      .run(id, input.name, input.root, input.gitRoot, 'pending', stamp, stamp);
+      (id,name,root,git_root,onboarding_status,evidence_mode,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
+      .run(id, input.name, input.root, input.gitRoot, 'pending', input.evidenceMode || 'legacy', stamp, stamp);
     return this.getById(id)!;
+  }
+
+  setEvidenceMode(id: string, mode: 'legacy' | 'snapshot'): Project | null {
+    this.db.prepare("UPDATE projects SET evidence_mode=?, updated_at=? WHERE id=?").run(mode, now(), id);
+    return this.getById(id);
   }
 
   updateOnboarding(id: string, status: string, version: string | null) {

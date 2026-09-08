@@ -76,6 +76,19 @@ export function createProjectsRouter(store: Store): Router {
     }
   });
 
+  router.patch('/projects/:id/evidence-mode', (req, res, next) => {
+    try {
+      const mode = req.body?.mode;
+      if (mode !== 'legacy' && mode !== 'snapshot') {
+        res.status(400).json({ error: 'Evidence mode must be legacy or snapshot.' });
+        return;
+      }
+      const project = store.updateProjectEvidenceMode(req.params.id, mode);
+      if (!project) { res.status(404).json({ error: 'Project not found.' }); return; }
+      res.json(project);
+    } catch (error) { next(error); }
+  });
+
   router.delete('/projects/:id', (req, res) => {
     store.forgetProject(req.params.id);
     res.status(204).end();

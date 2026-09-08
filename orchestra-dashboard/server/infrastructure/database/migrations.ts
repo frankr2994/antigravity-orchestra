@@ -24,6 +24,7 @@ export const MIGRATIONS: Migration[] = [
           onboarding_status TEXT NOT NULL DEFAULT 'pending',
           onboarding_version TEXT,
           active_session_id TEXT,
+          evidence_mode TEXT NOT NULL DEFAULT 'legacy' CHECK(evidence_mode IN ('legacy','snapshot')),
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );

@@ -49,7 +49,11 @@ export function canonicalizeDirectory(input: string): string {
 export async function registerProject(store: Store, input: string): Promise<Project> {
   const root = canonicalizeDirectory(input);
   const status = await getGitStatus(root);
-  return store.upsertProject({ name: basename(root), root, gitRoot: status.root });
+  const existing = store.getProjectByRoot(root);
+  return store.upsertProject({
+    name: basename(root), root, gitRoot: status.root,
+    ...(existing ? {} : { evidenceMode: config.evidenceMode }),
+  });
 }
 
 export function inspectProjectScope(root: string, rootIsGitRepository = false) {

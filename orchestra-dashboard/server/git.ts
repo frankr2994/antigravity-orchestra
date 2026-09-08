@@ -96,7 +96,8 @@ export async function getDiffFromBase(cwd: string, baseSha: string, maxChars = 8
     .filter((file) => file.index === '?' && file.worktree === '?')
     .map((file) => `UNTRACKED: ${file.path}`)
     .join('\n');
-  return boundGitDiff(`${tracked.stdout}\n${untracked}`, maxChars);
+  const complete = `${tracked.stdout}\n${untracked}`;
+  return Number.isFinite(maxChars) ? boundGitDiff(complete, maxChars) : complete;
 }
 
 export function boundGitDiff(diff: string, maxChars: number): string {
@@ -115,7 +116,10 @@ export function boundGitDiff(diff: string, maxChars: number): string {
 
 export async function getChangedFilesFromBase(cwd: string, baseSha: string): Promise<string[]> {
   const [tracked, status] = await Promise.all([
-    git(['diff', '--name-only', '-z', baseSha, '--'], cwd),
+    // Keep rename source and destination paths independently addressable. The
+    // full diff still carries the rename status; this manifest must let
+    // historical-source lookup inspect the base-side path as well.
+    git(['diff', '--name-only', '--no-renames', '-z', baseSha, '--'], cwd),
     getGitStatus(cwd),
   ]);
   if (tracked.code !== 0) throw new Error(tracked.stderr || `Git could not list changes since base ${baseSha}.`);
@@ -123,6 +127,13 @@ export async function getChangedFilesFromBase(cwd: string, baseSha: string): Pro
     ...tracked.stdout.split('\0').filter(Boolean),
     ...status.files.filter((file) => file.index === '?' && file.worktree === '?').map((file) => file.path),
   ])];
+}
+
+export async function getHistoricalSource(cwd: string, revision: string, path: string, maxChars = 750_000): Promise<{ path: string; content: string; baseline: string } | null> {
+  if (!/^[0-9a-f]{7,64}$/i.test(revision) || !path || path.includes('\0') || path.startsWith('/') || path.replaceAll('\\', '/').split('/').includes('..')) return null;
+  const result = await git(['show', `${revision}:${path.replaceAll('\\', '/')}`], cwd, 30_000);
+  if (result.code !== 0 || result.stdout.length > maxChars) return null;
+  return { path: path.replaceAll('\\', '/'), content: result.stdout, baseline: revision };
 }
 
 export async function getRecentCommits(cwd: string, count = 10): Promise<string> {

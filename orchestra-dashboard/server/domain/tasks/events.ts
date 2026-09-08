@@ -495,6 +495,7 @@ export interface Project {
   activeSessionId: string | null;
   createdAt: string;
   updatedAt: string;
+  evidenceMode: 'legacy' | 'snapshot';
 }
 
 export interface Session {

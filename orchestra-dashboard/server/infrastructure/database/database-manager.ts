@@ -56,6 +56,13 @@ export class DatabaseManager {
     this.db = new DatabaseSync(databasePath);
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     this.schemaVersion = runMigrations(this.db);
+    // v1 databases created before snapshot mode did not have this optional
+    // column. Repair the shape idempotently without changing the migration
+    // history contract used by existing installations.
+    const projectColumns = this.db.prepare("PRAGMA table_info('projects')").all() as Array<{ name: string }>;
+    if (!projectColumns.some(column => column.name === 'evidence_mode')) {
+      this.db.exec("ALTER TABLE projects ADD COLUMN evidence_mode TEXT NOT NULL DEFAULT 'legacy' CHECK(evidence_mode IN ('legacy','snapshot')); ");
+    }
 
     this.projects = new ProjectRepository(this.db);
     this.sessions = new SessionRepository(this.db);

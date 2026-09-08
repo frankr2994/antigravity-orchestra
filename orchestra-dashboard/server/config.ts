@@ -25,6 +25,15 @@ export const JULES_ROLLOUT_STAGES = [
 
 export type JulesRolloutStage = typeof JULES_ROLLOUT_STAGES[number];
 
+export const EVIDENCE_MODES = ['legacy', 'snapshot'] as const;
+export type EvidenceMode = typeof EVIDENCE_MODES[number];
+
+export function parseEvidenceMode(value: string | undefined): EvidenceMode {
+  return EVIDENCE_MODES.includes(value?.trim().toLowerCase() as EvidenceMode)
+    ? value!.trim().toLowerCase() as EvidenceMode
+    : 'legacy';
+}
+
 export function parseStrictBoolean(value: string | undefined): boolean {
   return value?.trim().toLowerCase() === 'true';
 }
@@ -62,6 +71,7 @@ export const config = {
   lmStudioModel: process.env.LM_STUDIO_MODEL || '',
   maxGlobalTasks: 2,
   onboardingVersion: '1.0.0',
+  evidenceMode: parseEvidenceMode(process.env.ORCHESTRA_EVIDENCE_MODE),
   jules: {
     enabled: julesEnabled,
     rolloutStage: julesRolloutStage,
