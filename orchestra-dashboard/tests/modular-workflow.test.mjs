@@ -24,6 +24,16 @@ test('workspace reducer starts a genuinely blank conversation without losing pro
   assert.deepEqual(next.sessions.map((session) => session.id), ['new', 'old']);
 });
 
+test('displayed conversation task is independent from project ownership and restores terminal tasks', async () => {
+  const { selectDisplayedTask } = await tsImport('../src/app/workspace-state.ts', import.meta.url);
+  const owner = { id: 'owner', sessionId: 'session-a', createdAt: '2026-08-30T20:00:00Z', state: 'running' };
+  const completed = { id: 'completed', sessionId: 'session-b', createdAt: '2026-08-30T21:00:00Z', state: 'completed' };
+  const older = { id: 'older', sessionId: 'session-b', createdAt: '2026-08-30T19:00:00Z', state: 'failed' };
+  assert.equal(selectDisplayedTask([owner, older, completed], 'session-a', owner).id, 'owner');
+  assert.equal(selectDisplayedTask([owner, older, completed], 'session-b', owner).id, 'completed');
+  assert.equal(selectDisplayedTask([older, completed], 'session-b', null).id, 'completed');
+});
+
 test('review envelope is bounded, fingerprinted, and reports compaction', () => {
   const envelope = buildReviewPromptEnvelope({
     request: 'review this change',

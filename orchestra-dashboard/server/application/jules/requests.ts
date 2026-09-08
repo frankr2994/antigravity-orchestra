@@ -94,6 +94,8 @@ export interface JulesDispatchCommand {
   requirePlanApproval: boolean;
   autoPr: boolean;
   idempotencyKey: string;
+  /** Internal orchestration may create a child task without impersonating a new user message. */
+  recordUserMessage?: boolean;
 }
 export interface JulesBatchCommand {
   idempotencyKey: string;

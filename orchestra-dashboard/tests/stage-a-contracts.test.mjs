@@ -33,6 +33,7 @@ test('Stage A Contracts — Task State Transitions matrix and invariants', () =>
   assert.equal(isValidTaskStateTransition('running', 'reviewing'), true);
   assert.equal(isValidTaskStateTransition('running', 'paused'), true);
   assert.equal(isValidTaskStateTransition('paused', 'recovering'), true);
+  assert.equal(isValidTaskStateTransition('recovering', 'preflight'), true); // Local Jules takeover re-runs safety sensing
   assert.equal(isValidTaskStateTransition('paused', 'cancelled'), true);
   assert.equal(isValidTaskStateTransition('reviewing', 'verifying'), true);
   assert.equal(isValidTaskStateTransition('running', 'failed'), true);

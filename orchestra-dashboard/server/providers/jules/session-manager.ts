@@ -13,6 +13,8 @@ import type { JulesActivity, JulesSession } from './types.js';
 import { JulesApiError } from './errors.js';
 import { translateJulesActivity } from './activity-translator.js';
 
+const TERMINAL_OUTPUT_GRACE_MS = 2 * 60_000;
+
 // ============================================================================
 // Google Jules Cloud Dispatch & Session Lifecycle Manager
 // ============================================================================
@@ -192,7 +194,9 @@ export class JulesSessionManager {
       let pageToken: string | undefined;
       const seenTokens = new Set<string>();
       for (let page = 0; page < 100; page += 1) {
-        const response = await client.listActivities(remoteSessionId, 100, pageToken, undefined, cursor.lastActivityAt ?? undefined);
+        // Jules ListActivities supports pageSize/pageToken only. Durable activity
+        // receipts provide incremental processing without an unsupported timestamp filter.
+        const response = await client.listActivities(remoteSessionId, 100, pageToken);
         activities.push(...response.activities);
         if (!response.nextPageToken) break;
         if (seenTokens.has(response.nextPageToken)) throw new Error('Jules activity pagination repeated a page token');
@@ -254,9 +258,49 @@ export class JulesSessionManager {
         state: julesState, prUrl, lastActivityId: newest?.id || newest?.name || cloudSession.lastActivityId,
         lastActivityAt: newest?.createTime || cloudSession.lastActivityAt,
       });
-      if (julesState === 'COMPLETED' && cloudSession.state !== 'COMPLETED') {
+      const dispatchContract = this.store.manager.checkpoints.latest(cloudSession.taskId, 'dispatch_contract');
+      // Cloud implementation sessions created before dispatch contracts were persisted also
+      // requested AUTO_CREATE_PR. Treat a missing historical contract as requiring the
+      // reviewable handoff; otherwise a terminal session with no output polls forever.
+      const requiresPullRequest = dispatchContract
+        ? dispatchContract.data.autoPr === true
+        : this.store.getTask(cloudSession.taskId)?.target === 'cloud';
+      const completedWithoutRequiredOutput = julesState === 'COMPLETED' && requiresPullRequest && !prUrl;
+      const outputWait = this.store.manager.checkpoints.latest(cloudSession.taskId, 'jules_terminal_output');
+      const firstSeenAt = typeof outputWait?.data.firstSeenAt === 'string' && Number.isFinite(Date.parse(outputWait.data.firstSeenAt))
+        ? outputWait.data.firstSeenAt : new Date().toISOString();
+      const outputGraceExpired = Date.now() - Date.parse(firstSeenAt) >= TERMINAL_OUTPUT_GRACE_MS;
+      if (completedWithoutRequiredOutput && !outputGraceExpired) {
+        const message = 'Jules completed; Orchestra is waiting briefly for the required pull-request output to propagate.';
+        this.store.updateTask(cloudSession.taskId, { state: 'reviewing', error: message });
+        if (!outputWait) {
+          this.store.manager.checkpoints.append({ taskId: cloudSession.taskId, attemptId: cloudSession.attemptId,
+            stage: 'jules_terminal_output', subjectSha: cloudSession.baseSha,
+            data: { status: 'waiting', firstSeenAt, requiredOutput: 'pull_request' } });
+          this.store.addEvent(cloudSession.taskId, 'orchestra', 'cloud.reviewing', {
+            stage: 'awaiting_output', message, remoteSessionId,
+          });
+        }
+      } else if (completedWithoutRequiredOutput) {
+        const message = 'Jules completed without the required pull-request output or reviewable implementation artifact.';
         this.store.finishActiveProviderRun(cloudSession.taskId, 'jules', 'completed');
-        this.store.updateTask(cloudSession.taskId, { state: mapping.taskState });
+        this.store.updateTask(cloudSession.taskId, { state: 'failed', error: message });
+        for (const attempt of this.store.manager.attempts.listByTaskId(cloudSession.taskId)) {
+          if (attempt.worker === 'jules' && attempt.state === 'WORKING') {
+            this.store.manager.attempts.update(attempt.id, { state: 'FAILED', error: message, completedAt: new Date().toISOString() });
+          }
+        }
+        this.store.manager.julesCapacity.release(cloudSession.taskId);
+        this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.failed', {
+          remoteSessionId, state: julesState, code: 'JULES_COMPLETED_WITHOUT_OUTPUT', error: message,
+        });
+        this.store.manager.evidence.record({ taskId: cloudSession.taskId, attemptId: cloudSession.attemptId,
+          kind: 'provider_output', outcome: 'failed', payload: { remoteSessionId, state: julesState,
+            code: 'JULES_COMPLETED_WITHOUT_OUTPUT', prUrl: null } });
+      } else if (julesState === 'COMPLETED' && (cloudSession.state !== 'COMPLETED'
+        || Boolean(this.store.manager.providerRuns.findRunning(cloudSession.taskId, 'jules')))) {
+        this.store.finishActiveProviderRun(cloudSession.taskId, 'jules', 'completed');
+        this.store.updateTask(cloudSession.taskId, { state: mapping.taskState, error: null });
         this.store.addEvent(cloudSession.taskId, 'jules', 'cloud.completed', { remoteSessionId, prUrl });
         this.store.manager.evidence.record({ taskId: cloudSession.taskId, attemptId: cloudSession.attemptId,
           kind: 'provider_output', outcome: 'completed', payload: { remoteSessionId, prUrl: prUrl ?? null, state: julesState } });

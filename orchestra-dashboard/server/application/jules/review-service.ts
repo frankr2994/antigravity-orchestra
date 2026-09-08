@@ -4,6 +4,7 @@ import { git, getGitStatus } from '../../git.js';
 import { getWorktreePath, runWorktreeReview, type WorktreeReviewResult } from '../../providers/jules/worktree-review.js';
 import { runCodexReviewForJules, type JulesCodexReviewResult } from '../../providers/jules/codex-review.js';
 import { ApplicationError } from '../errors.js';
+import { parseJulesOutstandingRepair } from '../../domain/index.js';
 import { executeDualEngineRepair, type DualEngineRepairResult } from '../../providers/jules/repair-coordinator.js';
 import { redactSecrets } from '../../infrastructure/security/redaction.js';
 import type { ReviewFinding } from '../../domain/execution/review.js';
@@ -15,6 +16,7 @@ const ZERO_SHA = '0000000000000000000000000000000000000000';
 export interface JulesReviewServiceOptions {
   codexRunner?: (prompt: string, options: { model: string; effort: 'low' | 'medium' | 'high' }) => Promise<string>;
   repairHandler?: (input: Parameters<typeof executeDualEngineRepair>[0]) => Promise<DualEngineRepairResult>;
+  sessionService?: { sendRepairFeedback(taskId: string, prompt: string, idempotencyKey: string): Promise<unknown> };
 }
 
 export interface LocalTargetSyncResult {
@@ -157,6 +159,18 @@ export class JulesReviewService {
         throw new ApplicationError('PR_HEAD_UNAVAILABLE', 'The exact pull request head could not be resolved from origin.', 409);
       }
       const headSha = rows[0][0].toLowerCase();
+      const outstandingCheckpoint = this.store.manager.checkpoints.latest(taskId, 'jules_outstanding_repair');
+      if (outstandingCheckpoint) {
+        let outstanding;
+        try { outstanding = parseJulesOutstandingRepair(outstandingCheckpoint.data); }
+        catch { throw new ApplicationError('JULES_AUTOMATION_STATE_CORRUPT', 'Persisted Jules repair state is malformed; review reuse and integration are blocked.', 409); }
+        if (outstanding.status === 'awaiting_new_head' && outstanding.headSha !== headSha) {
+          this.store.manager.checkpoints.append({ taskId, attemptId: cloud.attemptId, stage: 'jules_outstanding_repair', subjectSha: headSha,
+            data: { ...outstanding, headSha, status: 'head_changed' } });
+          this.store.addEvent(taskId, 'orchestra', 'cloud.head_changed', { previousHeadSha: outstanding.headSha, headSha,
+            repairId: outstanding.repairId, message: 'A different PR head is ready for fresh deterministic verification.' });
+        }
+      }
       const fetch = await git(['fetch', '--no-tags', 'origin', headSha], status.root, 120_000);
       if (fetch.code !== 0) throw new ApplicationError('PR_FETCH_FAILED', 'The exact pull request head could not be fetched.', 409);
       const object = await git(['rev-parse', '--verify', `${headSha}^{commit}`], status.root);
@@ -182,7 +196,7 @@ export class JulesReviewService {
         if (!findings.length) findings.push({ severity: 'blocking',
           explanation: 'The unchanged Jules pull request still has the previously recorded review or verification failure.' });
         const verificationResults = priorVerification ? verificationFromEvidence(priorVerification.payload) : undefined;
-        const message = 'Jules completed without changing the blocked pull request head. Orchestra is sending the recorded findings again and will keep repairing until review passes or you stop the task.';
+        const message = 'Jules completed without changing the blocked pull request head. Orchestra is waiting durably for a different PR head and will not resend acknowledged feedback.';
         this.store.updateTask(taskId, { state: 'reviewing', error: message });
         this.store.addEvent(taskId, 'orchestra', 'cloud.reviewing', { message, stage: 'repair_retry', headSha, reusedReview: true });
         const repair = await this.requestRepair({ taskId, projectRoot: status.root, remoteSessionId: cloud.remoteSessionId,
@@ -195,6 +209,10 @@ export class JulesReviewService {
       let codex: JulesCodexReviewResult | undefined;
       if (!reuseApprovedReview) {
         this.store.updateTask(taskId, { state: 'reviewing', error: null });
+        this.store.manager.checkpoints.append({ taskId, attemptId: cloud.attemptId, stage: 'jules_automation', subjectSha: headSha,
+          data: { version: 1, state: 'locally_verifying', handler: 'deterministic', model: null, effort: null,
+            reason: 'A new immutable PR head requires fresh deterministic verification.', pendingCommand: null, retryAt: null,
+            authoritativeTaskState: 'reviewing', updatedAt: new Date().toISOString() } });
         this.store.addEvent(taskId, 'orchestra', 'cloud.reviewing', { message: 'Running deterministic verification in an isolated worktree.', stage: 'verification', headSha });
         const worktreeResource = this.store.manager.managedGitResources.register({ taskId, attemptId: cloud.attemptId,
           repositoryRoot: status.root, kind: 'worktree', resourceValue: getWorktreePath(status.root, taskId) });
@@ -219,6 +237,10 @@ export class JulesReviewService {
         }
 
         this.store.addEvent(taskId, 'orchestra', 'cloud.reviewing', { message: 'Deterministic checks passed. Starting independent Codex review.', stage: 'independent_review', headSha });
+        this.store.manager.checkpoints.append({ taskId, attemptId: cloud.attemptId, stage: 'jules_automation', subjectSha: headSha,
+          data: { version: 1, state: 'independently_reviewing', handler: 'codex', model: null, effort: null,
+            reason: 'Deterministic verification passed and risk-routed independent review is starting.', pendingCommand: null, retryAt: null,
+            authoritativeTaskState: 'reviewing', updatedAt: new Date().toISOString() } });
         codex = await runCodexReviewForJules({
           taskId, projectRoot: status.root, request: task.prompt, baseSha: cloud.baseSha, headSha,
           diff: review.diff, changedFiles: review.changedFiles, verificationResults: review.verificationResults,
@@ -228,6 +250,10 @@ export class JulesReviewService {
           outcome: codex.verdict.toLowerCase(), payload: { summary: codex.summary.slice(0, 2_000), findings: codex.findings,
             rawReviewText: redactSecrets(codex.rawReviewText).slice(0, 100_000),
             verification: review.verificationResults.map((result) => ({ command: result.command, code: result.code })) } });
+        this.store.manager.checkpoints.append({ taskId, attemptId: cloud.attemptId, stage: 'jules_automation', subjectSha: headSha,
+          data: { version: 1, state: 'reviewed', handler: 'codex', model: null, effort: null,
+            reason: `Independent review returned ${codex.verdict}.`, pendingCommand: null, retryAt: null,
+            authoritativeTaskState: 'reviewing', updatedAt: new Date().toISOString() } });
         if (codex.blocked) {
           this.store.updateTask(taskId, { state: 'reviewing', error: 'Independent review blocked integration.' });
           const repair = await this.requestRepair({ taskId, projectRoot: status.root, remoteSessionId: cloud.remoteSessionId,
@@ -290,7 +316,7 @@ export class JulesReviewService {
     taskId: string; projectRoot: string; remoteSessionId: string; baseSha: string; headSha: string;
     findings: ReviewFinding[]; verificationResults?: WorktreeReviewResult['verificationResults'];
   }) {
-    return (this.options.repairHandler ?? executeDualEngineRepair)({ ...input, store: this.store });
+    return (this.options.repairHandler ?? executeDualEngineRepair)({ ...input, store: this.store, sessionService: this.options.sessionService });
   }
 
   private async prepareLocalTakeover(input: {

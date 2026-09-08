@@ -18,6 +18,7 @@ export interface JulesSupervisorOptions {
   isEnabled?: () => boolean;
   reconcile?: () => Promise<void>;
   cleanup?: () => Promise<void>;
+  onAttentionRequired?: (taskId: string) => Promise<void>;
   onTerminal?: (event: {
     taskId: string;
     remoteSessionId: string;
@@ -145,6 +146,12 @@ export class JulesSupervisor {
         }
       };
       await Promise.all(Array.from({ length: Math.min(limit, due.length) }, () => worker()));
+      if (this.options.onAttentionRequired) {
+        // The durable handoff controller also observes non-attention states so it can
+        // confirm that a previously acknowledged response actually resumed Jules.
+        const observed = this.options.store.manager.cloudSessions.listNonTerminal();
+        await Promise.all(observed.map((session) => this.options.onAttentionRequired!(session.taskId)));
+      }
       await this.options.cleanup?.();
       return { polled, active: nonTerminalSessions.length, errors };
     } finally {

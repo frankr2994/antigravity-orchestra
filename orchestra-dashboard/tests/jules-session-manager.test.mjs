@@ -177,3 +177,84 @@ test('Phase 10 Session Manager — dispatchSession, pollSession and cancelSessio
     try { rmSync(bareDir, { recursive: true, force: true }); } catch { /* Windows file lock */ }
   }
 });
+
+test('Phase 10 Session Manager — required AUTO_CREATE_PR completion waits briefly, then fails closed without output', async () => {
+  const dbPath = join(tmpdir(), `orchestra-jules-empty-output-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const fixtureDir = join(tmpdir(), `orchestra-jules-empty-root-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(fixtureDir, { recursive: true });
+  const store = new Store(dbPath);
+  try {
+    const project = store.upsertProject({ name: 'empty-output', root: fixtureDir, gitRoot: fixtureDir });
+    const conversation = store.createSession(project.id, 'Empty output');
+    const task = store.createTask(project.id, conversation.id, 'Implement through Jules', null, null, 'cloud');
+    store.updateTask(task.id, { state: 'running' });
+    store.startProviderRun({ taskId: task.id, provider: 'jules', operation: 'implementation', primaryWorker: true });
+    const attempt = store.manager.attempts.create({ taskId: task.id, target: 'cloud', worker: 'jules', baseSha: 'a'.repeat(40), state: 'WORKING' });
+    const cloud = store.manager.cloudSessions.create({ taskId: task.id, attemptId: attempt.id, sourceName: 'sources/test',
+      sessionResourceName: 'sessions/empty-output', remoteSessionId: 'empty-output', dispatchBranch: 'orchestra/jules/empty-output',
+      targetBranch: 'main', baseSha: 'a'.repeat(40), state: 'IN_PROGRESS' });
+    store.manager.activityCursors.ensure(cloud.id);
+    store.manager.julesCapacity.restore(task.id);
+    store.manager.checkpoints.append({ taskId: task.id, attemptId: attempt.id, stage: 'dispatch_contract',
+      data: { requirePlanApproval: true, autoPr: true } });
+    const manager = new JulesSessionManager(store);
+    const julesClient = {
+      getSession: async () => ({ name: 'sessions/empty-output', id: 'empty-output', state: 'COMPLETED', outputs: [] }),
+      listActivities: async () => ({ activities: [] }),
+    };
+    const result = await manager.pollSession('empty-output', { julesClient });
+    assert.equal(result.ok, true);
+    assert.equal(result.isTerminal, true);
+    assert.equal(store.getTask(task.id).state, 'reviewing');
+    assert.match(store.getTask(task.id).error, /waiting briefly/i);
+    assert.equal(store.listEvents(task.id).some((event) => event.type === 'cloud.failed'), false);
+
+    store.manager.checkpoints.append({ taskId: task.id, attemptId: attempt.id, stage: 'jules_terminal_output',
+      data: { status: 'waiting', firstSeenAt: new Date(Date.now() - 3 * 60_000).toISOString(), requiredOutput: 'pull_request' } });
+    const failedResult = await manager.pollSession('empty-output', { julesClient });
+    assert.equal(failedResult.ok, true);
+    assert.equal(store.getTask(task.id).state, 'failed');
+    assert.match(store.getTask(task.id).error, /without the required pull-request output/i);
+    assert.equal(store.manager.attempts.getById(attempt.id).state, 'FAILED');
+    assert.equal(store.manager.julesCapacity.activeCount(), 0);
+    const failed = store.listEvents(task.id).findLast((event) => event.type === 'cloud.failed');
+    assert.equal(failed.payload.code, 'JULES_COMPLETED_WITHOUT_OUTPUT');
+    assert.equal(store.listEvents(task.id).some((event) => event.type === 'cloud.completed'), false);
+  } finally {
+    store.close();
+    try { rmSync(dbPath, { force: true }); } catch {}
+    try { rmSync(fixtureDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
+test('Phase 10 Session Manager — legacy cloud sessions without a dispatch contract cannot stall after empty completion', async () => {
+  const dbPath = join(tmpdir(), `orchestra-jules-legacy-output-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const fixtureDir = join(tmpdir(), `orchestra-jules-legacy-root-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  mkdirSync(fixtureDir, { recursive: true });
+  const store = new Store(dbPath);
+  try {
+    const project = store.upsertProject({ name: 'legacy-output', root: fixtureDir, gitRoot: fixtureDir });
+    const conversation = store.createSession(project.id, 'Legacy output');
+    const task = store.createTask(project.id, conversation.id, 'Implement through Jules', null, null, 'cloud');
+    store.updateTask(task.id, { state: 'running' });
+    store.updateTask(task.id, { state: 'reviewing' });
+    const attempt = store.manager.attempts.create({ taskId: task.id, target: 'cloud', worker: 'jules', baseSha: 'a'.repeat(40), state: 'WORKING' });
+    store.manager.cloudSessions.create({ taskId: task.id, attemptId: attempt.id, sourceName: 'sources/test',
+      sessionResourceName: 'sessions/legacy-output', remoteSessionId: 'legacy-output', dispatchBranch: 'orchestra/jules/legacy-output',
+      targetBranch: 'main', baseSha: 'a'.repeat(40), state: 'COMPLETED' });
+    store.manager.checkpoints.append({ taskId: task.id, attemptId: attempt.id, stage: 'jules_terminal_output',
+      data: { status: 'waiting', firstSeenAt: new Date(Date.now() - 3 * 60_000).toISOString(), requiredOutput: 'pull_request' } });
+    const manager = new JulesSessionManager(store);
+    await manager.pollSession('legacy-output', { julesClient: {
+      getSession: async () => ({ name: 'sessions/legacy-output', id: 'legacy-output', state: 'COMPLETED', outputs: [] }),
+      listActivities: async () => ({ activities: [] }),
+    } });
+    assert.equal(store.getTask(task.id).state, 'failed');
+    assert.equal(store.manager.attempts.getById(attempt.id).state, 'FAILED');
+    assert.equal(store.listEvents(task.id).findLast((event) => event.type === 'cloud.failed').payload.code, 'JULES_COMPLETED_WITHOUT_OUTPUT');
+  } finally {
+    store.close();
+    try { rmSync(dbPath, { force: true }); } catch {}
+    try { rmSync(fixtureDir, { recursive: true, force: true }); } catch {}
+  }
+});

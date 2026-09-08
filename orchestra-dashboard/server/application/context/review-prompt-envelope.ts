@@ -20,13 +20,28 @@ export function buildReviewPromptEnvelope(input: {
   implementationSummary: string;
   previousReview?: string;
   diff: string;
+  ripwireQualityDelta?: string;
+  ripwireTestGate?: string;
+  ripwireSitu?: string;
 }): PromptEnvelope {
   const request = bounded(input.request, 8_000);
   const files = bounded(input.changedFiles.slice(0, 120).map((file) => `- ${file}`).join('\n'), 6_000);
   const triage = bounded(input.triage, 5_000);
   const summary = bounded(input.implementationSummary, 4_000, true);
   const previous = bounded(input.previousReview || '', 3_000, true);
-  const fixed = [request.text, files.text, triage.text, summary.text, previous.text].join('\n\n');
+  const ripwireQd = input.ripwireQualityDelta ? bounded(input.ripwireQualityDelta, 3_000) : null;
+  const ripwireTg = input.ripwireTestGate ? bounded(input.ripwireTestGate, 2_000) : null;
+  const ripwireSitu = input.ripwireSitu ? bounded(input.ripwireSitu, 3_000) : null;
+  const ripwireSections = [
+    ripwireQd?.text ? `### Quality Delta (what this diff degraded)\n${ripwireQd.text}` : '',
+    ripwireTg?.text ? `### Test Gate (minimal tests covering changed files)\n${ripwireTg.text}` : '',
+    ripwireSitu?.text ? `### Blast Radius (transitive callers & touched symbols)\n${ripwireSitu.text}` : '',
+  ].filter(Boolean);
+  const ripwireBlock = ripwireSections.length
+    ? `## Ripwire deterministic review analysis\n${ripwireSections.join('\n\n')}`
+    : '';
+
+  const fixed = [request.text, files.text, triage.text, summary.text, previous.text, ripwireBlock].filter(Boolean).join('\n\n');
   const diffBudget = Math.max(6_000, TOTAL_CHARACTERS - fixed.length - 1_000);
   const diff = bounded(input.diff, diffBudget);
   const text = [
@@ -38,6 +53,7 @@ export function buildReviewPromptEnvelope(input: {
     '## Local Gemma triage (advisory)', triage.text,
     '## Implementation report (untrusted)', summary.text,
     ...(previous.text ? ['## Previous Codex review (unresolved)', previous.text] : []),
+    ...(ripwireBlock ? [ripwireBlock] : []),
     '## Bounded current diff', '```diff', diff.text, '```',
   ].join('\n\n').slice(0, TOTAL_CHARACTERS);
   return {
@@ -45,6 +61,6 @@ export function buildReviewPromptEnvelope(input: {
     text,
     fingerprint: createHash('sha256').update(text).digest('hex'),
     estimatedInputTokens: Math.ceil(text.length / CHARACTERS_PER_TOKEN),
-    compacted: [request, files, triage, summary, previous, diff].some((section) => section.compacted),
+    compacted: [request, files, triage, summary, previous, diff, ripwireQd, ripwireTg, ripwireSitu].some((section) => section?.compacted),
   };
 }

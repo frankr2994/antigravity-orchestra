@@ -9,7 +9,6 @@ import {
   formatRepairFeedbackPrompt,
   executeDualEngineRepair,
 } from '../dist-server/providers/jules/repair-coordinator.js';
-import { JulesApiClient } from '../dist-server/providers/jules/client.js';
 
 // ============================================================================
 // Phase 13 Dual-Engine Local/Cloud Repair Loop Test Suite
@@ -78,16 +77,7 @@ test('Phase 13 Repair Loop — executeDualEngineRepair keeps Jules working at hi
     });
 
     let feedbackCount = 0;
-    const mockFetch = async (url) => {
-      const urlStr = String(url);
-      if (urlStr.includes('sendMessage') || urlStr.includes('sendFeedback')) {
-        feedbackCount += 1;
-        return { ok: true, status: 200, json: async () => ({}) };
-      }
-      return { ok: true, status: 200, json: async () => ({}) };
-    };
-
-    const julesClient = new JulesApiClient({ apiKey: 'test-key', fetchFn: mockFetch });
+    const sessionService = { sendRepairFeedback: async () => { feedbackCount += 1; return { ok: true }; } };
 
     // 1. Cycle 1: Cloud Feedback
     const cloudRepairRes = await executeDualEngineRepair({
@@ -95,61 +85,55 @@ test('Phase 13 Repair Loop — executeDualEngineRepair keeps Jules working at hi
       projectRoot: fixtureDir,
       remoteSessionId: cloudSession.remoteSessionId,
       baseSha: 'base-sha-123',
-      headSha: 'head-sha-456',
+      headSha: 'b'.repeat(40),
       findings: [{ severity: 'blocking', explanation: 'Fix typo in return object' }],
       cycle: 1,
       store,
-      julesClient,
+      sessionService,
     });
 
     assert.equal(cloudRepairRes.strategy, 'cloud_feedback');
     assert.equal(cloudRepairRes.ok, true);
     assert.equal(feedbackCount, 1);
 
-    const attemptsAfter1 = store.manager.attempts.listByTaskId(task.id);
-    assert.equal(attemptsAfter1.length, 1);
-    assert.equal(attemptsAfter1[0].target, 'cloud');
-    assert.equal(attemptsAfter1[0].worker, 'jules');
+    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 0, 'repair feedback does not create a provider attempt');
 
     // 2. Cycle 20: Jules still receives feedback. The cycle number is telemetry,
     // not a stop condition.
-    const highCycleRes = await executeDualEngineRepair({
-      taskId: task.id,
-      projectRoot: fixtureDir,
-      remoteSessionId: cloudSession.remoteSessionId,
-      baseSha: 'base-sha-123',
-      headSha: 'head-sha-456',
-      findings: [{ severity: 'blocking', explanation: 'Persistent issue still needs repair' }],
-      cycle: 20,
-      store,
-      julesClient,
+    let highCycleRes;
+    for (let cycle = 2; cycle <= 23; cycle += 1) highCycleRes = await executeDualEngineRepair({
+      taskId: task.id, projectRoot: fixtureDir, remoteSessionId: cloudSession.remoteSessionId,
+      baseSha: 'base-sha-123', headSha: 'b'.repeat(40),
+      findings: [{ severity: 'blocking', explanation: 'Fix typo in return object' }], cycle, store, sessionService,
     });
 
     assert.equal(highCycleRes.strategy, 'cloud_feedback');
     assert.equal(highCycleRes.ok, true);
-    assert.equal(highCycleRes.cycle, 20);
-    assert.equal(feedbackCount, 2);
-    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 2);
+    assert.equal(highCycleRes.cycle, 23);
+    assert.equal(feedbackCount, 1, '22 unchanged-head completions must not resend acknowledged feedback');
+    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 0);
 
-    // 3. Jules becomes unavailable: request a local takeover. The review service must first
-    // import the exact PR head before it queues a real local attempt.
-    store.manager.cloudSessions.update(cloudSession.id, { state: 'FAILED' });
+    // 3. A terminal Jules snapshot after acknowledged feedback confirms that the
+    // worker cannot mutate this head. Request a local takeover; the review
+    // service must first import the exact PR head before it queues a real
+    // local attempt.
+    store.manager.cloudSessions.update(cloudSession.id, { state: 'COMPLETED' });
     const takeoverRes = await executeDualEngineRepair({
       taskId: task.id,
       projectRoot: fixtureDir,
       remoteSessionId: cloudSession.remoteSessionId,
       baseSha: 'base-sha-123',
-      headSha: 'head-sha-456',
+      headSha: 'b'.repeat(40),
       findings: [{ severity: 'blocking', explanation: 'Continue locally' }],
       cycle: 21,
       store,
-      julesClient,
+      sessionService,
     });
 
     assert.equal(takeoverRes.strategy, 'local_takeover');
     assert.equal(takeoverRes.ok, true);
     assert.equal(takeoverRes.cycle, 21);
-    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 2);
+    assert.equal(store.manager.attempts.listByTaskId(task.id).length, 0);
     assert.equal(store.listEvents(task.id).at(-1)?.type, 'task.takeover_local');
     assert.notEqual(store.getTask(task.id)?.state, 'review_disputed');
 

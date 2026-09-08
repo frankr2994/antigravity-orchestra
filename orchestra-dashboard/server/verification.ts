@@ -22,7 +22,9 @@ export async function verifyProject(root: string, signal: AbortSignal): Promise<
   if (existsSync(packagePath)) {
     try {
       const pkg = JSON.parse(readFileSync(packagePath, 'utf8')) as { scripts?: Record<string, string> };
-      if (existsSync(join(root, 'package-lock.json'))) commands.push({ ...npmInvocation(['ci', '--ignore-scripts']), label: 'npm ci --ignore-scripts' });
+      if (existsSync(join(root, 'package-lock.json')) && !existsSync(join(root, 'node_modules'))) {
+        commands.push({ ...npmInvocation(['ci', '--ignore-scripts']), label: 'npm ci --ignore-scripts' });
+      }
       if (pkg.scripts?.lint) commands.push({ ...npmInvocation(['run', 'lint']), label: 'npm run lint' });
       if (pkg.scripts?.build) commands.push({ ...npmInvocation(['run', 'build']), label: 'npm run build' });
       if (pkg.scripts?.test && !/no test specified/i.test(pkg.scripts.test)) commands.push({ ...npmInvocation(['test']), label: 'npm test' });
@@ -48,7 +50,7 @@ export async function verifyProject(root: string, signal: AbortSignal): Promise<
   };
   for (const item of commands) {
     const result = await runProcess(item.command, item.args, {
-      cwd: root, timeoutMs: 10 * 60_000, idleTimeoutMs: 2 * 60_000, signal,
+      cwd: root, timeoutMs: 10 * 60_000, idleTimeoutMs: 5 * 60_000, signal,
       inheritEnv: false, env: safeEnvironment, maxOutputChars: 100_000,
     });
     results.push({ command: item.label, code: result.code, output: `${result.stdout}\n${result.stderr}`.trim().slice(-12_000) });

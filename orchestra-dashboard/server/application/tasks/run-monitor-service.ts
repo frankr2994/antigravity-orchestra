@@ -3,6 +3,7 @@ import { getGitStatus } from '../../git.js';
 import { readAntigravityTranscript, readAntigravityUsage, readCodexUsage } from '../../observability.js';
 import { isOrchestraInternalPath } from '../../projects.js';
 import type { AgentName, RunMonitor, TaskEvent, TaskState } from '../../types.js';
+import { parseJulesAutomationStatus, type JulesAutomationState } from '../../domain/index.js';
 
 export interface TaskRunState {
   isRunning(taskId: string): boolean;
@@ -21,17 +22,27 @@ export async function buildRunMonitor(store: Store, runs: TaskRunState, taskId: 
   const repairEvent = events.findLast((event) => event.type === 'task.repair-progress');
   const cloud = task.target === 'cloud' ? store.manager.cloudSessions.getByTaskId(task.id) : null;
   const providerState = cloud?.state ?? null;
+  const automationCheckpoint = cloud ? store.manager.checkpoints.latest(taskId, 'jules_automation') : null;
+  let automationState: JulesAutomationState | null = null;
+  let automationCorrupt = false;
+  try { automationState = automationCheckpoint ? parseJulesAutomationStatus(automationCheckpoint.data).state : null; }
+  catch { automationCorrupt = true; }
   const cloudActive = Boolean(cloud && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(cloud.state));
   const handoffPending = Boolean(cloud && cloud.state === 'COMPLETED' && task.target === 'cloud' && ['running', 'reviewing', 'verifying', 'committing', 'pushing'].includes(task.state));
   const latestReviewProgress = events.findLast((event) => event.type === 'cloud.reviewing');
   const handoffBusy = Boolean(handoffPending && latestReviewProgress && now - Date.parse(latestReviewProgress.createdAt) < 90_000);
-  const processAlive = runs.isRunning(taskId) || cloudActive || handoffBusy;
+  // A task-owned foreground heartbeat is emitted from the same awaited
+  // Antigravity turn.  Scheduling/process inspection can briefly lag that
+  // turn on Windows, so do not present a fresh heartbeat as a dead worker.
+  const foregroundHeartbeat = hasRecentForegroundHeartbeat(events, now);
+  const processAlive = runs.isRunning(taskId) || cloudActive || handoffBusy || foregroundHeartbeat;
   const durableActivityTimes = [cloud?.lastActivityAt, lastEvent?.createdAt, task.updatedAt].filter((value): value is string => Boolean(value));
   const lastActivityAt = durableActivityTimes.sort((left, right) => Date.parse(right) - Date.parse(left))[0] || task.updatedAt;
   const inactiveMs = Math.max(0, now - Date.parse(lastActivityAt));
   let changedFiles: string[] = [];
   try { changedFiles = (await getGitStatus(project.root)).files.map((file) => file.path).filter((path) => !isOrchestraInternalPath(path)); } catch { /* Monitoring must not alter task execution. */ }
-  const providerNeedsAttention = Boolean(providerState && ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(providerState));
+  const providerNeedsAttention = Boolean(providerState && ['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(providerState)
+    && (automationCorrupt || automationState === 'blocked'));
   const health = task.state === 'paused' || providerNeedsAttention ? 'needs_attention'
     : handoffPending && !handoffBusy ? 'waiting'
     : evaluateRunHealth(task.state, processAlive, inactiveMs);
@@ -57,8 +68,8 @@ export async function buildRunMonitor(store: Store, runs: TaskRunState, taskId: 
     inactiveMs,
     processAlive,
     providerState,
-    progressDetail: cloud ? cloudProgressDetail(task.state, providerState, Boolean(cloud.prUrl)) : summary,
-    nextAction: taskNextAction(task.state, providerState),
+    progressDetail: cloud ? cloudProgressDetail(task.state, providerState, Boolean(cloud.prUrl), automationState, automationCorrupt) : summary,
+    nextAction: taskNextAction(task.state, providerState, automationState, automationCorrupt),
     reviewCycle,
     repairAttempt,
     changedFiles,
@@ -78,6 +89,13 @@ export function evaluateRunHealth(state: TaskState, processAlive: boolean, inact
   if (!processAlive || inactiveMs >= 5 * 60_000) return 'possibly_stalled';
   if (inactiveMs >= 90_000) return 'waiting';
   return 'active';
+}
+
+export function hasRecentForegroundHeartbeat(events: readonly TaskEvent[], now = Date.now()): boolean {
+  const event = events.findLast((item) => item.agent === 'antigravity' && item.type === 'agent.output'
+    && typeof (item.payload as Record<string, unknown> | undefined)?.text === 'string'
+    && /still working in the foreground/i.test(String((item.payload as Record<string, unknown>).text)));
+  return Boolean(event && now - Date.parse(event.createdAt) < 90_000);
 }
 
 function latestProviderTelemetry(events: TaskEvent[], agent: 'antigravity' | 'codex'): Record<string, any> | null {
@@ -109,10 +127,11 @@ function agentForState(state: TaskState): AgentName {
   return 'system';
 }
 
-function taskNextAction(state: TaskState, providerState: string | null): string | null {
-  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'Review and approve the Jules plan to continue.';
-  if (providerState === 'AWAITING_USER_FEEDBACK') return 'Send Jules the missing decision or clarification.';
-  if (providerState === 'PAUSED') return 'Send focused guidance to resume Jules, or stop and delete the cloud session.';
+export function taskNextAction(state: TaskState, providerState: string | null, automationState: JulesAutomationState | null, automationCorrupt: boolean): string | null {
+  if (automationCorrupt) return 'Inspect the malformed durable automation checkpoint; Orchestra will not authorize an automatic action from it.';
+  if (automationState === 'blocked') return 'Review the reported credential, destructive-operation, or authority blocker.';
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'No manual action is needed. Orchestra is reviewing the exact Jules plan automatically.';
+  if (providerState === 'AWAITING_USER_FEEDBACK' || providerState === 'PAUSED') return 'No manual action is needed. Orchestra is resolving the latest Jules handoff and will confirm later provider activity.';
   if (providerState === 'COMPLETED' && ['running', 'reviewing', 'verifying', 'committing', 'pushing'].includes(state)) return 'Keep this task open; Orchestra is reviewing or retrying the exact PR handoff automatically.';
   if (state === 'paused') return 'Select Resume to continue this task with its preserved state.';
   if (state === 'recovery_required') return 'Select Resume to continue the preserved implementation through review and verification.';
@@ -122,15 +141,21 @@ function taskNextAction(state: TaskState, providerState: string | null): string 
   return null;
 }
 
-function cloudProgressDetail(taskState: TaskState, providerState: string | null, hasPr: boolean): string {
+export function cloudProgressDetail(taskState: TaskState, providerState: string | null, hasPr: boolean, automationState: JulesAutomationState | null, automationCorrupt: boolean): string {
   if (taskState === 'reviewing') return hasPr ? 'The Jules PR is being fetched into an isolated local worktree for deterministic checks and independent review.' : 'Jules finished; Orchestra is waiting for a verified pull-request output before local review.';
   if (taskState === 'verifying') return 'The exact Jules PR head is running the project verification suite in an isolated worktree.';
   if (taskState === 'pushing' || taskState === 'committing') return 'The reviewed PR head is being integrated into the verified target branch.';
   if (providerState === 'QUEUED') return 'Jules accepted the session and is waiting for cloud capacity.';
   if (providerState === 'PLANNING') return 'Jules is inspecting the repository and building its implementation plan.';
-  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'Jules has produced a plan and is waiting for approval.';
-  if (providerState === 'AWAITING_USER_FEEDBACK') return 'Jules needs an answer before it can continue.';
-  if (providerState === 'PAUSED') return 'The Jules session is paused remotely and is not consuming active work until resumed.';
+  if (automationCorrupt) return 'Jules needs attention, but the persisted automation state is malformed and cannot authorize a response.';
+  if (automationState === 'blocked') return 'Jules requested credentials, destructive action, or authority outside the original task; Orchestra failed closed.';
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return 'Jules produced a plan. Orchestra is reviewing and approving or correcting it automatically.';
+  if (providerState === 'AWAITING_USER_FEEDBACK') return automationState === 'awaiting_provider_resume'
+    ? 'Orchestra answered the latest Jules clarification and is waiting for later agent activity before declaring resumption.'
+    : 'Orchestra is resolving the latest Jules clarification automatically.';
+  if (providerState === 'PAUSED') return automationState === 'awaiting_provider_resume'
+    ? 'Orchestra sent bounded resume guidance and is waiting for later Jules agent activity.'
+    : 'Orchestra is resolving the remote pause automatically.';
   if (providerState === 'IN_PROGRESS') return 'Jules is implementing and testing in its cloud workspace. New provider activities appear below.';
   if (providerState === 'COMPLETED') return 'Jules execution completed; Orchestra owns the remaining local review and integration stages.';
   if (providerState === 'FAILED') return 'Jules reported a provider failure. The durable task record remains available for diagnosis.';

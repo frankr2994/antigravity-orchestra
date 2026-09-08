@@ -8,6 +8,7 @@ import { runGemmaDirectChat } from '../dist-server/agents.js';
 import {
   formatDirectGitStatusAnswer,
   isDirectGitStatusQuestion,
+  parseTextToolCalls,
   validateGemmaDirectChatResponse,
 } from '../dist-server/application/gemma/direct-chat-contract.js';
 import { Store } from '../dist-server/db.js';
@@ -69,6 +70,24 @@ test('Gemma direct-chat contract removes serialized hidden reasoning and rejects
     () => validateGemmaDirectChatResponse('<|channel>thought\nprivate reasoning without a final boundary'),
     (error) => error?.code === 'GEMMA_UNSUPPORTED_TOOL_OUTPUT',
   );
+  // Tests thought tags and control token stripping with real text answer
+  assert.equal(
+    validateGemmaDirectChatResponse('<thought>Analyzing codebase...</thought>\n\nThe project uses Express and SQLite.<|im_end|>'),
+    'The project uses Express and SQLite.',
+  );
+});
+
+test('parseTextToolCalls extracts XML tool calls from agentic model outputs', () => {
+  const xmlPayload = '<tool_call>\n{"name": "project_read_file", "arguments": {"path": "package.json"}}\n</tool_call>';
+  const calls = parseTextToolCalls(xmlPayload);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, 'project_read_file');
+  assert.deepEqual(calls[0].args, { path: 'package.json' });
+
+  const rawCall = 'call:project_list_files{}';
+  const rawParsed = parseTextToolCalls(rawCall);
+  assert.equal(rawParsed.length, 1);
+  assert.equal(rawParsed[0].name, 'project_list_files');
 });
 
 test('Gemma Solo buffers streamed Markdown until it passes the response contract', async () => {

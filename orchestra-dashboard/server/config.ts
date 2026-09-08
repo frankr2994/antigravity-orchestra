@@ -59,7 +59,7 @@ export const config = {
   databasePath: resolve(dataDir, 'orchestra.db'),
   uiToken: randomBytes(24).toString('hex'),
   lmStudioBaseUrl: process.env.LM_STUDIO_BASE_URL || 'http://127.0.0.1:1234/v1',
-  lmStudioModel: process.env.LM_STUDIO_MODEL || 'gemma-4-e2b-it-qat',
+  lmStudioModel: process.env.LM_STUDIO_MODEL || '',
   maxGlobalTasks: 2,
   onboardingVersion: '1.0.0',
   jules: {
@@ -68,5 +68,6 @@ export const config = {
     maxConcurrentSessions: boundedInteger(process.env.JULES_MAX_CONCURRENT_SESSIONS, 2, 1, 32),
     maxConcurrentPolls: boundedInteger(process.env.JULES_MAX_CONCURRENT_POLLS, 2, 1, 32),
     pollIntervalMs: boundedInteger(process.env.JULES_POLL_INTERVAL_MS, 5_000, 1_000, 300_000),
+    pipelineTimeoutMs: boundedInteger(process.env.JULES_PIPELINE_TIMEOUT_MS, 45 * 60_000, 60_000, 6 * 60 * 60_000),
   },
 };

@@ -47,9 +47,13 @@ export class DirectTaskExecutor {
       return { handled: true, activeGemmaModel: selectedModel };
     }
 
+    let mcpStatus: McpStatus | null = null;
+    try { mcpStatus = await getMcpStatus(); } catch { /* Direct chat remains available without Rider. */ }
+    const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
+
     if (classification.executionMode === 'direct') {
       const directAgent = classification.directAgent || 'gemma';
-      const deterministic = deterministicDirectProjectAnswer(projectRoot, task.prompt, directAgent);
+      const deterministic = deterministicDirectProjectAnswer(projectRoot, task.prompt, directAgent, riderFor(directAgent as keyof McpStatus['agents']));
       if (deterministic) {
         const directModel = (classification as TaskClassification & { directModel?: string }).directModel || null;
         const requestedEffort = (classification as TaskClassification & { directEffort?: string }).directEffort;
@@ -101,9 +105,6 @@ export class DirectTaskExecutor {
     this.store.updateTask(task.id, { title: classification.title, classification: JSON.stringify(classification), models: JSON.stringify(directModels) });
     this.runtime.transition(task.id, 'running');
 
-    let mcpStatus: McpStatus | null = null;
-    try { mcpStatus = await getMcpStatus(); } catch { /* Direct chat remains available without Rider. */ }
-    const riderFor = (agent: keyof McpStatus['agents']) => mcpStatus?.agents[agent].available === true;
     const sessionContext = buildDirectSessionContext(this.store.listMessages(session.id), task.id);
 
     if (directAgent === 'gemma') {
@@ -156,7 +157,7 @@ export class DirectTaskExecutor {
           : undefined;
       }
       const promptText = projectToolsEnabled
-        ? `${directProjectAccessInstruction(projectRoot, 'gemma')}\n\nUser question:\n${task.prompt}`
+        ? `${directProjectAccessInstruction(projectRoot, 'gemma', riderFor('gemma'))}\n\nUser question:\n${task.prompt}`
         : task.prompt;
       const selectedContextLength = selectedModelInfo?.state === 'loaded' && typeof selectedModelInfo.loadedContextLength === 'number'
         ? selectedModelInfo.loadedContextLength
@@ -167,6 +168,7 @@ export class DirectTaskExecutor {
         sessionContext, signal, enableProjectTools: projectToolsEnabled, requireProjectToolUse: projectToolRequired,
         modelSupportsTools, capabilities: modelCapabilities,
         contextLength: selectedContextLength,
+        riderAvailable: riderFor('gemma'),
         onOutput: (chunk) => this.runtime.stream(task.id, 'gemma', chunk),
         onToolActivity: (activity) => this.runtime.emit(task.id, 'gemma', 'mcp.tool', { ...activity, message: `Gemma project read tool ${activity.tool} ${activity.status}.` }),
         onUsage: (usage) => this.runtime.recordLocalProviderTelemetry(task.id, usage),

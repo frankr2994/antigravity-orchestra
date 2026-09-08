@@ -6,8 +6,8 @@ import { redactSecrets } from '../agents/agent-data-utils.js';
 
 export function codexShellGuidance(platform = process.platform) {
   return platform === 'win32'
-    ? '\nThis host is Windows. Use PowerShell-compatible commands, one command per tool call. Quote ripgrep alternation patterns with double quotes, do not use cmd/findstr fallbacks, and prefer Rider semantic reads when shell quoting would be fragile.'
-    : '';
+    ? '\nThis host is Windows. Use PowerShell-compatible commands, one command per tool call. Quote ripgrep alternation patterns with double quotes, do not use cmd/findstr fallbacks, and prefer Rider semantic reads when shell quoting would be fragile. Ripwire is available on PATH as `ripwire`: prefer `ripwire <dir> --for="<task>"`, `--callers=SYM`, `--impact=SYM`, and `--expand=SYM --top-k=0` over reading whole files into context.'
+    : '\nRipwire is available on PATH as `ripwire`: prefer `ripwire <dir> --for="<task>"`, `--callers=SYM`, `--impact=SYM`, and `--expand=SYM --top-k=0` over reading whole files into context.';
 }
 
 export function attachTrustedLocalArtifacts(prompt: string, trustedRoot = resolve(process.env.USERPROFILE || '', '.gemini', 'antigravity-cli', 'brain')) {

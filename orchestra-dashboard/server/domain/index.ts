@@ -12,3 +12,4 @@ export * from './execution/routing-policy.js';
 export * from './execution/prompt-envelope.js';
 export * from './providers/provider.js';
 export * from './usage/provider-run.js';
+export * from './jules/handoff.js';

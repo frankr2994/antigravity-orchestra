@@ -5,6 +5,8 @@ export * from '../../providers/codex/agent-adapter.js';
 export * from '../../providers/antigravity/agent-adapter.js';
 export * from '../gemma/gemma-agent-services.js';
 export * from '../gemma/micro-task-executor.js';
+export * from '../gemma/prompt-refinement-service.js';
+export * from '../gemma/diff-condenser-service.js';
 export * from '../review/review-services.js';
 export * from '../git/change-summary-service.js';
 export * from './agent-data-utils.js';

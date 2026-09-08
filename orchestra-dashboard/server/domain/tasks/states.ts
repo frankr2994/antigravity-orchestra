@@ -106,11 +106,14 @@ export const TASK_STATE_TRANSITIONS: Readonly<Record<OrchestraTaskState, readonl
     'cancelled',
   ],
   paused: ['recovering', 'queued', 'committing', 'recovery_required', 'failed', 'cancelled'],
-  recovering: ['running', 'reviewing', 'recovery_required', 'paused', 'failed', 'cancelled'],
+  // A recovered local takeover deliberately re-runs sensing/preflight against
+  // the imported immutable head before invoking Antigravity.  This keeps the
+  // normal safety gate intact after a cloud worker becomes unavailable.
+  recovering: ['preflight', 'running', 'reviewing', 'recovery_required', 'paused', 'failed', 'cancelled'],
   recovery_required: ['recovering', 'running', 'queued', 'committing', 'failed', 'cancelled'],
   reviewing: ['running', 'verifying', 'summarizing', 'committing', 'recovering', 'recovery_required', 'paused', 'review_disputed', 'completed', 'failed', 'cancelled'],
   review_disputed: ['running', 'recovering', 'summarizing', 'committing', 'pushing', 'failed', 'cancelled'],
-  verifying: ['summarizing', 'committing', 'recovering', 'reviewing', 'paused', 'review_disputed', 'failed', 'cancelled'],
+  verifying: ['running', 'summarizing', 'committing', 'recovering', 'reviewing', 'paused', 'review_disputed', 'failed', 'cancelled'],
   summarizing: ['committing', 'pushing', 'review_disputed', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
   committing: ['pushing', 'baseline_required', 'paused', 'recovery_required', 'review_disputed', 'completed', 'completed_unpushed', 'failed', 'cancelled'],
   pushing: ['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'completed', 'completed_unpushed', 'failed', 'cancelled'],

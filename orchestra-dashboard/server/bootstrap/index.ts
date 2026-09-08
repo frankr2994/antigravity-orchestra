@@ -4,7 +4,7 @@ import { Store } from '../db.js';
 import { TaskManager } from '../tasks.js';
 import { ensureAntigravityStatusCollector } from '../observability.js';
 import { closeCodexAppServer } from '../codex-app-server.js';
-import { reconcileStartupTasks } from './recovery.js';
+import { automaticInterruptedLocalRecoveryTaskIds, reconcileStartupTasks } from './recovery.js';
 import { createApp } from './app.js';
 import { JulesSessionManager } from '../providers/jules/session-manager.js';
 import { JulesSupervisor } from '../providers/jules/supervisor.js';
@@ -14,6 +14,10 @@ import { JulesConnectionService } from '../application/jules/connection-service.
 import { JulesSessionService } from '../application/jules/session-service.js';
 import { JulesBatchService } from '../application/jules/batch-service.js';
 import { JulesCleanupService } from '../application/git/jules-cleanup-service.js';
+import { JulesPipelineBuilderService } from '../application/jules/pipeline-builder-service.js';
+import { JulesPlanReviewService } from '../application/jules/plan-review-service.js';
+import { JulesHandoffService } from '../application/jules/handoff-service.js';
+import { parseCodexCapacityRetry } from '../application/tasks/task-execution-coordinator.js';
 
 export interface OrchestraServerInstance {
   server: Server;
@@ -29,7 +33,28 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
   await reconcileStartupTasks(store);
 
   const tasks = new TaskManager(store, config.maxGlobalTasks);
+  // Codex capacity waits are durable.  Reinstall the in-memory wake-up after
+  // a restart instead of requiring a dashboard retry for preserved work.
   for (const task of store.listTasks().filter((item) => item.target === 'local' && item.state === 'recovery_required')) {
+    const checkpoint = store.manager.checkpoints.latest(task.id, 'codex_capacity_retry');
+    const retry = checkpoint ? parseCodexCapacityRetry(checkpoint.data) : null;
+    const retryAt = retry ? Date.parse(retry.retryAt) : NaN;
+    if (!Number.isFinite(retryAt)) continue;
+    const delay = Math.max(0, retryAt - Date.now());
+    const timer = setTimeout(() => {
+      void tasks.resumeAfterCodexCapacity(task.id).catch((error) => console.error(`Codex capacity recovery (${task.id}): ${error instanceof Error ? error.message : String(error)}`));
+    }, delay);
+    timer.unref();
+  }
+  // Ordinary local work interrupted by a process restart is safe to resume
+  // when its own recovery routine already proved that implementation changes
+  // remain in the task's repository.  Explicit user pauses/stops do not carry
+  // this restart marker and remain under their existing manual controls.
+  for (const taskId of automaticInterruptedLocalRecoveryTaskIds(store)) {
+    void tasks.recover(taskId).catch((error) => console.error(`Interrupted local task recovery (${taskId}): ${error instanceof Error ? error.message : String(error)}`));
+  }
+  for (const task of store.listTasks().filter((item) => item.target === 'local' && item.state === 'recovery_required')) {
+    if (store.manager.checkpoints.latest(task.id, 'pipeline_child')) continue;
     const takeover = store.manager.checkpoints.latest(task.id, 'local_takeover');
     if (takeover && ['prepared', 'queued'].includes(String(takeover.data.status))) {
       void tasks.resumePreparedJulesTakeover(task.id).catch((error) => console.error(`Jules local takeover (${task.id}): ${error instanceof Error ? error.message : String(error)}`));
@@ -39,9 +64,12 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
   const manager = new JulesSessionManager(store, vault);
   const connection = new JulesConnectionService(store, vault);
   const sessions = new JulesSessionService(store, vault, manager, () => connection.client());
+  tasks.configureJulesBuilder(new JulesPipelineBuilderService(store, sessions));
   const batches = new JulesBatchService(store, sessions);
   const cleanup = new JulesCleanupService(store);
-  const reviewer = new JulesReviewService(store);
+  const reviewer = new JulesReviewService(store, { sessionService: sessions });
+  const planReviewer = new JulesPlanReviewService(store, sessions);
+  const handoffs = new JulesHandoffService(store, sessions, planReviewer, reviewer);
   const julesSupervisor = new JulesSupervisor({
     store, sessionManager: manager, pollIntervalMs: config.jules.pollIntervalMs,
     maxConcurrentPolls: config.jules.maxConcurrentPolls,
@@ -52,10 +80,12 @@ export async function bootstrapServer(): Promise<OrchestraServerInstance> {
       for (const batch of store.manager.cloudWorkflows.listRunning()) await batches.launchReady(batch.id);
     },
     cleanup: () => cleanup.tick(),
+    onAttentionRequired: async (taskId) => { await handoffs.reconcile(taskId); },
     onTerminal: async ({ taskId, state, prUrl }) => {
       if (!connection.hasCapability('integrate') || state !== 'COMPLETED' || !prUrl) return;
-      const outcome = await reviewer.reviewAndIntegrate(taskId);
-      if (outcome.stage === 'local_takeover') await tasks.resumePreparedJulesTakeover(taskId);
+      const outcome = await handoffs.reconcile(taskId);
+      const pipelineChild = store.manager.checkpoints.latest(taskId, 'pipeline_child');
+      if (outcome.stage === 'local_takeover' && !pipelineChild) await tasks.resumePreparedJulesTakeover(taskId);
       await batches.reconcileTask(taskId);
     },
     onError: (error, session) => console.error(`Jules supervisor${session ? ` (${session.remoteSessionId})` : ''}: ${error.message}`),

@@ -87,4 +87,18 @@ export class ResourceLeaseRepository {
       .run(resourceType, resourceId, ownerId, fencingToken);
     return Number(result.changes) === 1;
   }
+
+  /**
+   * Review leases are process-local: their owner id is generated in memory and
+   * cannot survive a server restart.  Startup uses this narrowly-scoped helper
+   * to release only those orphaned owners rather than making a broad lease
+   * reset that could steal a live worker's lock.
+   */
+  releaseProcessLocalOwners(resourceType: string, ownerPrefix: string): number {
+    if (!resourceType || !ownerPrefix) throw new TypeError('Lease type and owner prefix are required');
+    const result = this.db.prepare(`UPDATE resource_leases SET expires_at='1970-01-01T00:00:00.000Z'
+      WHERE resource_type=? AND owner_id LIKE ? AND expires_at>'1970-01-01T00:00:00.000Z'`)
+      .run(resourceType, `${ownerPrefix}%`);
+    return Number(result.changes);
+  }
 }

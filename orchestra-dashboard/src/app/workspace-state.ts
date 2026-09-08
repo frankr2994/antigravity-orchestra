@@ -17,6 +17,13 @@ export const initialWorkspaceState: WorkspaceState = {
   projects: [], project: null, sessions: [], session: null, messages: [], tasks: [], activeTask: null, projectOwnerTask: null, activity: [],
 };
 
+export function selectDisplayedTask(tasks: Task[], selectedSessionId: string, owner: Task | null): Task | null {
+  if (owner?.sessionId === selectedSessionId) return owner;
+  return tasks
+    .filter((task) => task.sessionId === selectedSessionId)
+    .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt))[0] || null;
+}
+
 export type WorkspaceAction =
   | { type: 'set'; key: keyof WorkspaceState; value: unknown }
   | { type: 'open-session'; session: Session; messages?: Message[]; task?: Task | null; activity?: TaskEvent[] }

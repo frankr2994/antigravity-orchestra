@@ -120,6 +120,19 @@ test('Modular task controls — stop preserves changed files as recoverable work
   assert.equal(events.some((event) => event.type === 'task.recovery-required'), true);
 });
 
+test('Modular task controls — a rejected cloud dispatch with no remote session can be cancelled locally', async () => {
+  const task = { id: 'rejected-cloud-task', projectId: 'project', target: 'cloud', state: 'queued' };
+  const store = {
+    getTask: () => task,
+    getProject: () => ({ id: 'project', root: 'F:/project' }),
+    updateTask: (_id, patch) => Object.assign(task, patch),
+    manager: { cloudSessions: { getByTaskId: () => null }, attempts: { listByTaskId: () => [], update: () => {} } },
+  };
+  const scheduler = { remove: () => {}, isRunning: () => false, abortAndWait: async () => {}, enqueue: () => {} };
+  const controls = new TaskControlService(store, scheduler, new Map(), () => {}, async () => ({ isGit: true, files: [] }));
+  assert.equal((await controls.stop(task.id)).state, 'cancelled');
+});
+
 test('Modular ownership — never probes or releases a task while its process is running', async () => {
   const task = { id: 'live-recovery', projectId: 'project', target: 'local', state: 'recovery_required' };
   let statusReads = 0;

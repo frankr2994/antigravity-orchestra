@@ -1,9 +1,9 @@
 import type { Store } from '../../db.js';
 import type { ReviewFinding } from '../../domain/execution/review.js';
 import type { VerificationResult } from '../../verification.js';
-import { JulesApiClient } from './client.js';
-import { resolveJulesApiKey } from './credentials.js';
 import { redactSecrets } from './errors.js';
+import { createHash } from 'node:crypto';
+import { parseJulesOutstandingRepair, type JulesOutstandingRepair } from '../../domain/index.js';
 
 // ============================================================================
 // Google Jules & Orchestra Dual-Engine Local/Cloud Repair Loop
@@ -28,7 +28,7 @@ export interface DualEngineRepairOptions {
   verificationResults?: VerificationResult[];
   cycle?: number;
   store: Store;
-  julesClient?: JulesApiClient;
+  sessionService?: { sendRepairFeedback(taskId: string, prompt: string, idempotencyKey: string): Promise<unknown> };
   onEvent?: (event: { name: string; payload: unknown }) => void;
 }
 
@@ -109,7 +109,6 @@ export async function executeDualEngineRepair(
     findings,
     verificationResults,
     store,
-    julesClient,
     onEvent,
   } = options;
 
@@ -120,10 +119,15 @@ export async function executeDualEngineRepair(
   const cycle = options.cycle ?? (repairAttempts.length + 1);
 
   // 2. Check cloud session state
+  // A completed session can still be retained for audit and PR handoff, but it
+  // cannot apply a repair.  Treating it as live here was the source of the
+  // retry storm: each terminal poll re-entered the cloud-feedback path even
+  // after Jules had acknowledged the packet and exited without a new head.
+  // Only states in which the provider can still consume a command are cloud
+  // repair-capable.  A completed/failed/cancelled worker is the explicit,
+  // durable signal required before a local takeover is allowed.
   const isCloudSessionActive = Boolean(
-    cloudSession &&
-    cloudSession.state !== 'CANCELLED' &&
-    cloudSession.state !== 'FAILED'
+    cloudSession && ['QUEUED', 'IN_PROGRESS', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(cloudSession.state)
   );
 
   // 3. Evaluate dynamic repair strategy
@@ -136,46 +140,42 @@ export async function executeDualEngineRepair(
 
   // 4. Case: Cloud Feedback
   if (decision.strategy === 'cloud_feedback') {
-    let client = julesClient;
-    if (!client) {
-      const { apiKey } = resolveJulesApiKey();
-      if (!apiKey) {
-        throw new Error('JULES_API_KEY is not configured for cloud feedback.');
-      }
-      client = new JulesApiClient({ apiKey });
-    }
-
     const feedbackMessage = formatRepairFeedbackPrompt(findings, verificationResults);
+    const findingsFingerprint = createHash('sha256').update(JSON.stringify({ findings,
+      verificationResults: verificationResults?.map((item) => ({ command: item.command, code: item.code, output: redactSecrets(item.output).slice(-2_000) })) || [] })).digest('hex');
+    if (!headSha || !/^[a-f0-9]{40,64}$/i.test(headSha)) throw new Error('A valid reviewed PR head is required before repair feedback.');
+    const repairId = createHash('sha256').update(`${taskId}:${headSha.toLowerCase()}:${findingsFingerprint}`).digest('hex');
+    const feedbackCommandKey = `jules-repair:${repairId}`;
+    const priorCheckpoint = store.manager.checkpoints.latest(taskId, 'jules_outstanding_repair');
+    if (priorCheckpoint) {
+      let prior: JulesOutstandingRepair;
+      try { prior = parseJulesOutstandingRepair(priorCheckpoint.data); }
+      catch { throw new Error('Persisted Jules repair automation state is malformed; repair feedback is blocked.'); }
+      if (prior.repairId === repairId && ['feedback_acknowledged', 'awaiting_new_head'].includes(prior.status)) {
+        store.addEvent(taskId, 'orchestra', 'cloud.waiting_for_head', { headSha, repairId, findingsFingerprint,
+          message: 'The repair feedback is acknowledged; Orchestra is waiting for a different PR head.' });
+        return { strategy: 'cloud_feedback', ok: true, cycle };
+      }
+    }
+    if (!options.sessionService) throw new Error('Durable JulesSessionService is required for repair feedback.');
+    const pending: JulesOutstandingRepair = { version: 1, taskId, headSha: headSha.toLowerCase(), findingsFingerprint, repairId,
+      feedbackCommandKey, status: 'pending', acknowledgedAt: null, createdAt: new Date().toISOString() };
+    store.manager.checkpoints.append({ taskId, attemptId: cloudSession?.attemptId, stage: 'jules_outstanding_repair', subjectSha: headSha,
+      data: pending as unknown as Record<string, unknown> });
 
     try {
-      await client.sendMessage(remoteSessionId, feedbackMessage);
-    } catch {
-      const payload = {
-        cycle,
-        reason: 'Jules could not accept repair feedback. Continuing locally with Antigravity.',
-        headSha,
-        baseSha,
-        findingsCount: findings.length,
-        prepared: false,
-      };
-      store.addEvent(taskId, 'orchestra', 'task.takeover_local', payload);
-      onEvent?.({ name: 'task.takeover_local', payload: { taskId, ...payload } });
-      return { strategy: 'local_takeover', ok: true, cycle };
+      await options.sessionService.sendRepairFeedback(taskId, feedbackMessage, feedbackCommandKey);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      store.addEvent(taskId, 'orchestra', 'warning', { code: 'JULES_REPAIR_FEEDBACK_UNCONFIRMED',
+        message: `Repair feedback acknowledgement is unresolved; Orchestra will reconcile it without resending or taking over locally: ${message}` });
+      return { strategy: 'cloud_feedback', ok: false, cycle, error: message };
     }
 
-    // Record new execution attempt
-    const attempt = store.manager.attempts.create({
-      taskId,
-      target: 'cloud',
-      worker: 'jules',
-      baseSha,
-      providerSessionId: remoteSessionId,
-      state: 'WORKING',
-    });
-
-    // Update cloud session state & task state
+    const acknowledged: JulesOutstandingRepair = { ...pending, status: 'awaiting_new_head', acknowledgedAt: new Date().toISOString() };
+    store.manager.checkpoints.append({ taskId, attemptId: cloudSession?.attemptId, stage: 'jules_outstanding_repair', subjectSha: headSha,
+      data: acknowledged as unknown as Record<string, unknown> });
     if (cloudSession) {
-      store.manager.cloudSessions.update(cloudSession.id, { state: 'IN_PROGRESS' });
       const cursor = store.manager.activityCursors.ensure(cloudSession.id);
       store.manager.activityCursors.compareAndSet(cloudSession.id, cursor.version, {
         nextPollAt: new Date().toISOString(), consecutiveFailures: 0, lastErrorCode: null,
@@ -188,19 +188,19 @@ export async function executeDualEngineRepair(
       remoteSessionId,
       cycle,
       findingsCount: findings.length,
-      attemptId: attempt.id,
+      repairId,
+      headSha,
     });
 
     onEvent?.({
       name: 'cloud.repair_requested',
-      payload: { taskId, remoteSessionId, cycle, attemptId: attempt.id },
+      payload: { taskId, remoteSessionId, cycle, repairId, headSha },
     });
 
     return {
       strategy: 'cloud_feedback',
       ok: true,
       cycle,
-      attemptId: attempt.id,
     };
   }
 

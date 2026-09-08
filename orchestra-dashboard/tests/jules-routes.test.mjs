@@ -267,6 +267,16 @@ test('Phase 16 Routes — Task cloud dispatch, session retrieval, plan approval,
     assert.equal(approveRes.status, 200);
     assert.equal(approvedPlan, true);
 
+    // A local plan reviewer can request a revision before approval.
+    currentRemoteState = 'AWAITING_PLAN_APPROVAL';
+    const planFeedbackRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message: 'Revise the plan to include failure-path tests.', idempotencyKey: 'plan-feedback-route-1' }),
+    });
+    assert.equal(planFeedbackRes.status, 200);
+    assert.equal(feedbackReceived, 'Revise the plan to include failure-path tests.');
+
     // 4. Send feedback
     currentRemoteState = 'AWAITING_USER_FEEDBACK';
     const feedbackRes = await authorizedFetch(`${baseUrl}/tasks/${taskId}/jules/feedback`, {

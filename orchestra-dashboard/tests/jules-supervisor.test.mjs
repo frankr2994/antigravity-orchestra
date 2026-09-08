@@ -200,3 +200,26 @@ test('Phase 14 Supervisor — non-retryable PR identity conflicts stop polling w
     store.close(); try { rmSync(dbPath, { force: true }); } catch {}
   }
 });
+
+test('Phase 14 Supervisor — waiting plans invoke the local plan-review gate even when no provider poll is due', async () => {
+  const dbPath = join(tmpdir(), `orchestra-sup-plan-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const store = new Store(dbPath);
+  try {
+    const project = store.upsertProject({ name: 'plan', root: 'F:/plan', gitRoot: 'F:/plan' });
+    const conversation = store.createSession(project.id, 'Plan');
+    const task = store.createTask(project.id, conversation.id, 'Review a Jules plan', null, null, 'cloud');
+    const cloud = store.manager.cloudSessions.create({ taskId: task.id, sourceName: 'sources/test', sessionResourceName: 'sessions/plan',
+      remoteSessionId: 'plan', dispatchBranch: 'orchestra/jules/plan', targetBranch: 'main', baseSha: 'a'.repeat(40), state: 'AWAITING_PLAN_APPROVAL' });
+    const cursor = store.manager.activityCursors.ensure(cloud.id);
+    store.manager.activityCursors.compareAndSet(cloud.id, cursor.version, { nextPollAt: '2999-01-01T00:00:00.000Z',
+      consecutiveFailures: 0, lastActivityId: null, lastActivityAt: null });
+    const reviewed = [];
+    const supervisor = new JulesSupervisor({ store, sessionManager: new JulesSessionManager(store),
+      onAttentionRequired: async (taskId) => { reviewed.push(taskId); } });
+    const result = await supervisor.tick();
+    assert.equal(result.polled, 0);
+    assert.deepEqual(reviewed, [task.id]);
+  } finally {
+    store.close(); try { rmSync(dbPath, { force: true }); } catch {}
+  }
+});

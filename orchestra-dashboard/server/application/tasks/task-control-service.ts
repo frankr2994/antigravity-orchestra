@@ -58,7 +58,7 @@ export class TaskControlService {
 
   async stop(taskId: string): Promise<TaskRecord> {
     const task = requireTask(this.store, taskId);
-    if (task.target === 'cloud') {
+    if (task.target === 'cloud' && this.store.manager.cloudSessions.getByTaskId(taskId)) {
       throw new ApplicationError('JULES_REMOTE_STOP_REQUIRED', 'Cloud tasks must be stopped through the Jules session control so the remote worker is confirmed deleted.', 409,
         { nextAction: 'Use Stop Jules in the cloud-session panel.', retryable: false });
     }

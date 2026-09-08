@@ -18,12 +18,77 @@ const rawToolInvocationPatterns = [
 
 const internalControlTokenPattern = /<\|(?:channel|message|start|end|im_start|im_end)(?:\|>|>)|<(?:channel|message)\|>/i;
 
+export interface TextToolCall {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+export function parseTextToolCalls(content: string): TextToolCall[] {
+  if (typeof content !== 'string' || !content.trim()) return [];
+  const results: TextToolCall[] = [];
+
+  const xmlPatterns = [
+    /<tool_call>([\s\S]*?)<\/tool_call>/gi,
+    /<\|tool_call\|>([\s\S]*?)<\|\/tool_call\|>/gi,
+    /<\|tool_call(?:\|>|>)([\s\S]*?)(?:<\|tool_call_end(?:\|>|>)|<\|im_end\|>|$)/gi,
+  ];
+
+  for (const pattern of xmlPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(content)) !== null) {
+      const inner = match[1].trim();
+      if (!inner) continue;
+      try {
+        const parsed = JSON.parse(inner);
+        if (parsed && typeof parsed === 'object') {
+          const name = String(parsed.name || parsed.tool || parsed.function || '');
+          let args = (parsed.arguments && typeof parsed.arguments === 'object' && !Array.isArray(parsed.arguments))
+            ? parsed.arguments
+            : (typeof parsed.arguments === 'string' ? JSON.parse(parsed.arguments) : (parsed.parameters && typeof parsed.parameters === 'object' ? parsed.parameters : parsed));
+          if (typeof args !== 'object' || args === null || Array.isArray(args)) args = {};
+          if (name) {
+            results.push({ name, args });
+            continue;
+          }
+        }
+      } catch { /* Try function call expression */ }
+
+      const callMatch = /^(?:call:)?([A-Za-z0-9_.-]+)\s*(\{[\s\S]*\})$/i.exec(inner);
+      if (callMatch) {
+        const name = callMatch[1];
+        try {
+          const args = JSON.parse(callMatch[2]);
+          if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
+            results.push({ name, args });
+          }
+        } catch { /* Ignore malformed arguments */ }
+      }
+    }
+  }
+
+  if (!results.length) {
+    const rawCallMatch = /^\s*call:([A-Za-z0-9_.-]+)\s*(\{[\s\S]*\})\s*$/i.exec(content);
+    if (rawCallMatch) {
+      const name = rawCallMatch[1];
+      try {
+        const args = JSON.parse(rawCallMatch[2]);
+        if (typeof args === 'object' && args !== null && !Array.isArray(args)) {
+          results.push({ name, args });
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  return results;
+}
+
 /** Accepts user-facing Markdown and rejects model/runtime control syntax. */
 export function validateGemmaDirectChatResponse(value: unknown): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error('LM Studio returned an empty chat response.');
   }
   let answer = value.trim();
+
   // Some LM Studio chat templates serialize a hidden reasoning channel into the
   // content field. Keep only the user-facing segment when the template supplies
   // an explicit boundary; never display or preserve the hidden segment.
@@ -32,6 +97,18 @@ export function validateGemmaDirectChatResponse(value: unknown): string {
     if (boundary < 0) throw new GemmaDirectChatProtocolError();
     answer = answer.slice(boundary + '<channel|>'.length).trim();
   }
+
+  // Strip reasoning blocks if followed by markdown answer
+  answer = answer.replace(/<thought>[\s\S]*?<\/thought>/gi, '').trim();
+  answer = answer.replace(/<\|thought\|>[\s\S]*?<\|end_thought\|>/gi, '').trim();
+
+  // Strip inline XML tool tags if text response is present
+  answer = answer.replace(/<tool_call>[\s\S]*?<\/tool_call>/gi, '').trim();
+  answer = answer.replace(/<\|tool_call\|>[\s\S]*?<\|\/tool_call\|>/gi, '').trim();
+
+  // Strip boundary control tokens
+  answer = answer.replace(/<\|(?:im_start|im_end|start|end|eot_id|endoftext|start_header_id|end_header_id)(?:\|>|>)?/gi, '').trim();
+
   if (rawToolInvocationPatterns.some((pattern) => pattern.test(answer))) {
     throw new GemmaDirectChatProtocolError();
   }

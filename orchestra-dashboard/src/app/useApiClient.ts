@@ -10,16 +10,23 @@ export function useApiClient() {
       ...options,
       headers: { 'Content-Type': 'application/json', ...(activeToken ? { 'X-Orchestra-Token': activeToken } : {}), ...options.headers },
     });
-    let response = await request(tokenRef.current || overrideToken || '');
+    let response: Response;
+    try {
+      response = await request(tokenRef.current || overrideToken || '');
+    } catch (networkError) {
+      throw new Error(`Unable to connect to Orchestra backend (${networkError instanceof Error ? networkError.message : 'connection refused'}). Please verify the server is running.`);
+    }
     if (response.status === 403) {
-      const bootstrapResponse = await fetch('/api/bootstrap', { cache: 'no-store' });
-      if (bootstrapResponse.ok) {
-        const bootstrap: unknown = await bootstrapResponse.json();
-        const freshToken = bootstrap && typeof bootstrap === 'object' && typeof (bootstrap as Record<string, unknown>).token === 'string'
-          ? String((bootstrap as Record<string, unknown>).token)
-          : '';
-        if (freshToken) { setToken(freshToken); response = await request(freshToken); }
-      }
+      try {
+        const bootstrapResponse = await fetch('/api/bootstrap', { cache: 'no-store' });
+        if (bootstrapResponse.ok) {
+          const bootstrap: unknown = await bootstrapResponse.json();
+          const freshToken = bootstrap && typeof bootstrap === 'object' && typeof (bootstrap as Record<string, unknown>).token === 'string'
+            ? String((bootstrap as Record<string, unknown>).token)
+            : '';
+          if (freshToken) { setToken(freshToken); response = await request(freshToken); }
+        }
+      } catch { /* Fallback to existing response */ }
     }
     return response;
   }, [setToken]);

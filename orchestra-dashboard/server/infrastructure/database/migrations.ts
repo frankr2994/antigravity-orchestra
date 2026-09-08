@@ -403,7 +403,7 @@ export const MIGRATIONS: Migration[] = [
     name: 'provider_run_accounting',
     up: (db) => {
       db.exec(`
-        CREATE TABLE provider_runs (
+        CREATE TABLE IF NOT EXISTS provider_runs (
           id TEXT PRIMARY KEY,
           task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
           provider TEXT NOT NULL CHECK(provider IN ('gemma','jules','antigravity','codex')),
@@ -421,9 +421,22 @@ export const MIGRATIONS: Migration[] = [
           started_at TEXT NOT NULL,
           completed_at TEXT
         );
-        CREATE INDEX idx_provider_runs_provider_time ON provider_runs(provider, started_at DESC);
-        CREATE INDEX idx_provider_runs_task_time ON provider_runs(task_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_provider_runs_provider_time ON provider_runs(provider, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_provider_runs_task_time ON provider_runs(task_id, started_at DESC);
       `);
+    },
+  },
+  {
+    version: 11,
+    name: 'provider_runs_token_estimates_and_fingerprints',
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info('provider_runs')").all() as Array<{ name: string }>;
+      if (!columns.some((column) => column.name === 'prompt_fingerprint')) {
+        db.exec('ALTER TABLE provider_runs ADD COLUMN prompt_fingerprint TEXT;');
+      }
+      if (!columns.some((column) => column.name === 'estimated_input_tokens')) {
+        db.exec('ALTER TABLE provider_runs ADD COLUMN estimated_input_tokens INTEGER CHECK(estimated_input_tokens IS NULL OR estimated_input_tokens >= 0);');
+      }
     },
   },
 ];

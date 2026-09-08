@@ -974,3 +974,176 @@ Solo questions about starting an application exposed inconsistent provider behav
 - Codex no longer runs verification merely because a direct question mentions the repository.
 - Antigravity read-only invocation flags align with the installed CLI's documented modes.
 - Provider protocol mistakes now produce actionable diagnostics instead of opaque exits, and internal model-control text cannot leak into Solo chat.
+
+## 2026-08-29: Hybrid construction is a sequential exact-SHA handoff
+
+### Background
+
+The prompt-refinement contract could select Antigravity, Jules, or both, but the builder stage always invoked Antigravity. The modular finalization stage also bypassed the canonical task completion path, which lost `completed_unpushed`, assistant-message, and execution-attempt bookkeeping. Diff condensation could replace the authoritative review evidence with a 50,000-character prefix.
+
+### Decision
+
+- Represent Jules construction behind a `JulesBuilderPort` owned by the task application layer.
+- For Jules-only construction, dispatch a durable cloud child task, wait for the existing Jules supervisor to verify and integrate its exact PR head, then complete the local parent through the canonical completion lifecycle.
+- For hybrid construction, run Jules first from the clean immutable base. After its independently reviewed PR is integrated and synchronized to the authoritative local branch, run Antigravity on that exact commit. Audit the combined base-to-working-tree result before finalization.
+- If Jules cannot continue a blocked PR remotely and prepares a local takeover, keep the child dormant and let the foreground hybrid parent perform the repair. Complete the adopted child only after the parent passes verification, review, and Git finalization.
+- Select Jules or hybrid construction only when persisted runtime settings enable integration, credentials are configured, the source mapping is current, capacity is available, and the repository is clean and pushed.
+- Keep Gemma's stripped/truncated diff only as triage input. The independent Codex review always receives the original diff through the existing per-file bounded review envelope.
+- Route all terminal local pipeline results through the coordinator's canonical completion method so push failures remain `completed_unpushed`, assistant results are persisted, and working attempts are closed.
+
+### Reasons
+
+- Sequential execution avoids racing two mutating builders or attempting to merge unrelated uncontrolled working trees.
+- Exact full commit identities preserve the established Jules verification, review, and integration contract.
+- A durable child task lets the existing supervisor, repair loop, capacity accounting, and provider reconciliation remain authoritative.
+- Canonical completion keeps task state, retry controls, conversation history, and attempt accounting consistent.
+- Triage may reduce model cost, but it must never remove authoritative evidence from an independent review gate.
+
+### Alternatives
+
+- Run Jules and Antigravity concurrently in the same worktree: rejected because the resulting changes have no safe ownership or merge boundary.
+- Run both in separate worktrees and synthesize their diffs automatically: deferred because conflict resolution would require a new durable merge protocol and independent verification of the synthesized result.
+- Let the local pipeline directly poll and integrate Jules provider data: rejected because it would duplicate the existing supervisor and review service and weaken durable reconciliation.
+- Complete the parent by writing `state: completed` in the finalization stage: rejected because it loses unpushed and lifecycle side effects.
+
+### Impact
+
+- Refiner-selected `jules` and `both` routes now have executable production paths; unavailable Jules capability falls back explicitly to Antigravity before dispatch.
+- Hybrid output is reviewed as one combined change set from the original immutable base.
+- Jules-only and hybrid parent tasks produce normal assistant messages and retryable unpushed states.
+- Locally adopted Jules repair attempts do not restart independently or remain permanently `WORKING` after the hybrid parent succeeds.
+- Lockfiles, generated-file changes, and late diff hunks remain present in the authoritative review evidence even when omitted from Gemma annotations.
+## 2026-08-29: Orchestra-owned Jules plan review and approval
+
+Jules cloud construction uses `requirePlanApproval: true`, but the user is not the normal approval worker. When Jules publishes a complete plan, Orchestra performs a local read-only Codex review against the original request and repository. A passing verdict triggers a durable, idempotent `approvePlan` action. A blocking verdict is sent back as bounded plan-revision feedback; each new plan identity is reviewed independently, with a finite revision cap before the task enters an explicit attention state.
+
+Provider plan content is untrusted model data. It is bounded, redacted, runtime-validated, and placed in a review envelope that cannot override the local reviewer instructions. A missing or malformed plan fails closed and is never approved.
+
+Jules activity polling uses the provider's documented pagination contract and durable activity-receipt deduplication. It does not send an unsupported timestamp filter. A session dispatched with automatic PR creation that reaches `COMPLETED` without a pull-request output is a failed handoff, not a reviewing task, because Orchestra has no immutable artifact identity to verify locally.
+
+The dashboard renders the complete captured plan and local-review status. Manual approval remains an explicitly labeled override rather than the default workflow.
+
+## 2026-08-30: Durable local-first Jules handoff controller
+
+### Decision
+
+- Route plan approval, provider attention states, repair waiting, terminal review, and integration readiness through one provider-neutral `JulesHandoffService` owned by the application layer.
+- Persist a runtime-validated handoff decision before each provider mutation. Execute plan approval and feedback only through `JulesSessionService` command intents; reconcile ambiguous message acknowledgements from provider activities before any retry.
+- Use deterministic handlers first, Gemma only for packets within 75% of its loaded context, Luna for ordinary paid judgment, Terra for identified architecture/migration/identity/domain/safety risk, and Sol High only after an unresolved exceptional Terra decision. Capacity fallback may move to a cheaper tier or durable wait, never upward solely because a cheaper model is unavailable. This follows the [official OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model), which positions Luna for efficient high-volume work, Terra for balanced intelligence and cost, and Sol for flagship capability.
+- Persist a cumulative acceptance checklist and a plan delta for every unique plan fingerprint. Exact repeated plan content reuses its prior decision; three repeated blocker sets emit one escalation event and consolidated correction packet instead of a fixed plan-count stop.
+- Identify an outstanding repair by task, exact PR head, and findings fingerprint. After its command is acknowledged, remain in `awaiting_new_head`; an unchanged provider `COMPLETED` snapshot cannot create another attempt, message, review, or takeover.
+- Treat historical automation JSON as untrusted. Malformed checklist, repair, decision, delta, or automation data fails closed and cannot authorize approval, feedback reuse, review reuse, or integration.
+- Apply an endpoint-local Rider circuit breaker: two failures in two minutes open it for ten minutes, then one half-open probe is allowed. Reset requires both initialize and tool-list success. Cache tool metadata, give Antigravity an explicit filesystem-only instruction while open, and use a separate process-local Codex app-server with `mcp_servers.rider.enabled=false` for no-Rider turns.
+- Keep dashboard conversation visibility separate from project task ownership. Reopened SSE connections clear obsolete transport errors and rehydrate the task, monitor, Jules session, messages, and terminal ownership state. Optional telemetry uses independent settled updates.
+
+### Reasons and impact
+
+This design makes non-idempotent Jules mutations recoverable after crashes, prevents unchanged-head repair storms, bounds model spend without weakening the Luna-or-higher plan gate, and keeps Rider degradation non-blocking. No repository-specific prompt, component, or heuristic is introduced; Wiring remains only an external acceptance fixture. Manual controls remain collapsed emergency overrides and are disabled while a durable command is pending or acknowledged.
+
+## 2026-08-30: Provider message acknowledgement is not execution resumption
+
+### Background
+
+The live Wiring acceptance session remained in `AWAITING_USER_FEEDBACK` after Orchestra's first automatic continuation appeared as a provider `userMessaged` activity. Orchestra marked that command `feedback_acknowledged`, and its stable state/prompt idempotency key then suppressed all later handling even though Jules produced no subsequent agent activity. The dashboard consequently described a transport acknowledgement as a resumed workflow.
+
+### Decision
+
+- Identify each attention handoff by the exact Jules agent-message activity, not only by task, provider state, and a generic response fingerprint.
+- Persist `resolving`, `response_ready`, `awaiting_resume`, `resumed`, `retry_waiting`, and `blocked` checkpoints for that attention identity.
+- Treat a successful `sendMessage` call or matching `userMessaged` activity only as response delivery. Confirm resumption only when Jules leaves the attention state or a later provider activity has `originator: agent`.
+- Answer technical clarifications directly. Known permission/continuation prompts remain deterministic; otherwise bounded Gemma classification selects Luna Low for ordinary decisions or Terra Medium for architecture, migration, identity, complex-domain, or safety risk. Sol remains unavailable without a prior unresolved Terra safety-class decision.
+- Persist the resolved response before sending it. Restart or ambiguous delivery reuses the exact response and command identity without another model call. A delivered response receives one bounded explicit resume retry; unchanged attention then enters durable backoff instead of a message storm.
+- Observe every nonterminal cloud session through the handoff controller so an `IN_PROGRESS` transition can close an earlier `awaiting_resume` checkpoint.
+- Keep the displayed conversation task independent from project mutation ownership. The newest terminal task in a selected conversation remains visible after reload while another conversation can retain project ownership.
+
+### Reasons
+
+- The Jules API returns an empty successful response for `sendMessage`; provider execution is observable only through later activities and session state.
+- A question-specific decision satisfies an agent clarification, while telling the worker to resolve its own question can leave the provider legitimately waiting.
+- Activity identity makes later questions distinct without weakening idempotency for repeated polling of the same question.
+- A durable `response_ready` checkpoint closes the crash window between a paid decision and its provider mutation.
+- Bounded retry preserves automatic recovery without recreating the unchanged-state feedback storms seen in the earlier acceptance trace.
+
+### Alternatives
+
+- Mark `sendMessage` success as resumed: rejected because the live provider accepted the message but remained action-blocked.
+- Include a retry counter in the same generic prompt key and resend indefinitely: rejected because it would hide provider unavailability behind a message storm.
+- Require the user to approve every Jules clarification: rejected because ordinary in-scope technical decisions belong to Orchestra's automatic handoff controller.
+- Treat any later event as progress: rejected because the user's own echoed message is an activity but does not prove Jules resumed.
+
+### Impact
+
+- Jules session responses and the dashboard distinguish response delivery, waiting for provider resumption, confirmed resumption, and durable retry.
+- Emergency manual controls are disabled while an automatic response owns the current attention state.
+- The 2026-08-30 live acceptance changed from `AWAITING_USER_FEEDBACK` to `IN_PROGRESS` only after a repository-grounded response was recorded and later Jules agent-progress activities were observed.
+- Cloud sessions dispatched directly and Jules child sessions selected by Auto route use the same supervisor and durable handoff controller.
+
+## 2026-08-31: Durable local Codex-capacity continuation
+
+### Background
+
+The local independent-review turn can exhaust Codex capacity after Jules has handed off an exact PR head. The old recovery entrypoint required uncommitted implementation files, so a capacity failure before the builder wrote files could become terminal even though the original task was safe to resume.
+
+### Decision
+
+- Treat recognizable Codex usage/quota/rate-capacity responses as a durable local wait, with an exponential one-to-fifteen-minute backoff checkpoint.
+- Validate the persisted retry record before it can enqueue work. At the retry time, resume the original local task through `recovering` without imposing the preserved-diff prerequisite.
+- Reinstall the wake-up after restart. A narrowly matched historical local capacity failure is converted once into the same checkpointed wait; unrelated failed tasks remain failed.
+
+### Impact
+
+Auto-route and Jules-local-takeover tasks can continue automatically after capacity returns without creating a second cloud session, re-sending provider feedback, or requiring a dashboard action.
+
+## 2026-09-01: Progress-gated local repair and restart continuation
+
+### Decision
+
+- Local independent review no longer stops after an arbitrary repair count. It continues while the diff or findings demonstrate forward progress, and stops only on the existing stagnant-diff, oscillation, or repeated-blocker safeguards.
+- On process restart, a local task is automatically re-enqueued only when restart recovery has already marked its preserved changes. Explicit user pauses/stops and prepared Jules takeovers remain on their own control paths.
+
+### Impact
+
+An interrupted Auto route or adopted Jules repair does not require a dashboard click to resume. Routine multi-step repairs do not become a manual handoff solely because they exceed a fixed count.
+
+## 2026-09-01: Completed Jules-to-local acceptance run
+
+### Evidence
+
+- The Jules cloud session for task `ae7cb5eb-0721-456a-bd50-1d5e4202efb4` automatically approved its plan and resumed from `AWAITING_USER_FEEDBACK` without a user relay.
+- When the remote worker completed without advancing the blocked PR head, Orchestra retained one acknowledged repair identity, waited rather than resending feedback, and completed the authorized local takeover path.
+- A clean single-server restart automatically recovered preserved local work from an interrupted review into preflight, verification, independent review, automatic repairs, and completion.
+- The acceptance task completed and pushed `6b10756fbaaa466e9377e2e27b26f8e51b42020e` on `acceptance/orchestra-jules-handoff-20260830`. `F:\Wiring` was clean at that same SHA; `main` was not used as the acceptance target.
+- Orchestra's full `npm run check` gate passed after the workflow changes. The accepted Wiring implementation reported passing lint, typecheck, and 234 tests.
+
+## 2026-09-07: Ripwire deterministic code-context and quality-gate integration
+
+### Background
+
+Orchestra's agents (Gemma refiner, Codex architect/auditor, Antigravity builder) previously relied on directory tree inspection, keyword-ranked whole-file evidence collection, and blind shell `grep`. Large codebases consumed significant context budget (and token cost) on repeated orientations, while review repair cycles lacked automated feedback on code-quality degradation and test blast radius.
+
+### Decision
+
+Integrate **Ripwire** (`ripwire.exe` v0.5.0), a sub-second, single-process, offline call-graph and code-context engine built for Windows, across the pipeline stages:
+
+1. **System Capabilities (`server/application/capabilities/environment-sensor.ts`)**:
+   - Detect `ripwire` presence synchronously on disk (`isRipwireAvailable()`).
+   - Add `ripwire: { available: boolean; path: string | null }` to `SystemCapabilities`.
+2. **Stage 2 (Refinement - `2-refinement-stage.ts`)**:
+   - Call `ripwire <root> --for="<prompt>" --max-tokens=4000` before refinement.
+   - Prepend the compact ranked call-graph and symbol signatures to Gemma / Codex Luna prompt refinement input, ensuring task decomposition understands actual repository architecture with minimal tokens.
+3. **Stage 5 (Builder - `5-builder-stage.ts`)**:
+   - Collect `ripwire --for` (relevant symbols) and `ripwire --situ` (working-tree blast radius and impacted test suites).
+   - Inject the resulting context into the Antigravity prompt and inject the Ripwire binary directory into `PATH` for the `agy` process so the agent can execute targeted lookups (`--expand=SYM --top-k=0`, `--callers=SYM`, `--impact=SYM`).
+4. **Stage 7 (Review / Repair - `7-review-audit-stage.ts`)**:
+   - In automatic repair cycles, query `ripwire --quality-delta` (what the agent's edits degraded) and `ripwire --test-gate` (minimal test set to run).
+   - Enrich the repair prompt so Antigravity repairs specific regressions rather than re-reading the entire diff.
+5. **Resilience Contract (`server/ripwire.ts`)**:
+   - Every Ripwire call is bounded by a 30s timeout and returns `null` on any error or absence.
+   - All pipeline consumers use optional chaining (`ctx.capabilities?.ripwire?.available`) and continue without interruption if Ripwire is unavailable.
+
+### Impact
+
+- Drastically reduced token consumption on codebase orientation (~5% of whole-file grep-and-read).
+- Targeted test execution during repair cycles via `--test-gate`.
+- Automated regression detection via `--quality-delta`.
+- Full 273/273 server tests passing with 0 regressions.

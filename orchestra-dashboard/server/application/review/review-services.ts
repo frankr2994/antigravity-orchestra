@@ -5,7 +5,6 @@ import { buildReviewPromptEnvelope } from '../context/review-prompt-envelope.js'
 
 const REVIEW_TRIAGE_SCHEMA: JsonSchema = { name: 'review_triage', schema: { type: 'object', properties: { risk: { type: 'string', enum: ['low', 'normal', 'high'] }, summary: { type: 'string' }, focusFiles: { type: 'array', items: { type: 'string' } }, concerns: { type: 'array', items: { type: 'string' } } }, required: ['risk', 'summary', 'focusFiles', 'concerns'], additionalProperties: false } };
 const DISTILLED_ERRORS_SCHEMA: JsonSchema = { name: 'verification_errors_distillation', schema: { type: 'object', properties: { summary: { type: 'string' }, findings: { type: 'array', items: { type: 'object', properties: { file: { type: ['string', 'null'] }, line: { type: ['integer', 'null'] }, errorType: { type: 'string' }, message: { type: 'string' }, suggestion: { type: 'string' } }, required: ['errorType', 'message'], additionalProperties: false } } }, required: ['summary', 'findings'], additionalProperties: false } };
-const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
 
 export function extractCodexReviewVerdict(reviewText: string): { verdict: 'PASS' | 'BLOCK'; blocked: boolean; summary: string } {
   const trimmed = (reviewText || '').trim();
@@ -52,7 +51,19 @@ export async function triageReview(input: { request: string; diff: string; chang
   return { risk, summary: String(value.summary || '').trim().slice(0, 1_500), focusFiles, concerns: (Array.isArray(value.concerns) ? value.concerns : []).map(String).filter(Boolean).slice(0, 12) };
 }
 
-export function buildReviewPacket(input: { request: string; changedFiles: string[]; diff: string; implementationSummary: string; triage: ReviewTriage; previousReview?: string }) {
+export function buildReviewPacket(input: {
+  request: string;
+  changedFiles: string[];
+  diff: string;
+  implementationSummary: string;
+  triage: ReviewTriage;
+  previousReview?: string;
+  ripwire?: {
+    qualityDelta?: string;
+    testGate?: string;
+    situ?: string;
+  };
+}) {
   const triage = [
     `Risk: ${input.triage.risk}`,
     input.triage.summary || 'No summary was available.',
@@ -66,6 +77,9 @@ export function buildReviewPacket(input: { request: string; changedFiles: string
     implementationSummary: redactSecrets(input.implementationSummary),
     previousReview: input.previousReview ? redactSecrets(input.previousReview) : undefined,
     diff: redactSecrets(input.diff),
+    ripwireQualityDelta: input.ripwire?.qualityDelta ? redactSecrets(input.ripwire.qualityDelta) : undefined,
+    ripwireTestGate: input.ripwire?.testGate ? redactSecrets(input.ripwire.testGate) : undefined,
+    ripwireSitu: input.ripwire?.situ ? redactSecrets(input.ripwire.situ) : undefined,
   }).text;
 }
 
@@ -123,6 +137,8 @@ export async function distillVerificationErrors(rawOutput: string, command: stri
   }
 }
 
+const PRE_REVIEW_SANITY_SCHEMA: JsonSchema = { name: 'pre_review_sanity_check', schema: { type: 'object', properties: { passed: { type: 'boolean' }, issues: { type: 'array', items: { type: 'string' } } }, required: ['passed', 'issues'], additionalProperties: false } };
+
 export async function preReviewSanityCheck(input: { root: string; changedFiles: string[]; diff: string }): Promise<{ passed: boolean; issues: string[] }> {
   if (!input.changedFiles.length) return { passed: true, issues: [] };
   const sanitizedDiff = redactSecrets(input.diff).slice(0, 30_000);
@@ -145,4 +161,120 @@ export async function preReviewSanityCheck(input: { root: string; changedFiles: 
     return { passed: true, issues: [] };
   }
 }
+
+export interface ExtractedFinding {
+  severity: 'P0' | 'P1' | 'P2' | 'P3' | 'FINDING';
+  title: string;
+  files: string[];
+  signature: string;
+}
+
+export function extractReviewFindings(reviewText: string): ExtractedFinding[] {
+  const findings: ExtractedFinding[] = [];
+  const text = reviewText || '';
+
+  // Match bold bulleted items like: - **[P1] Autosave metadata is lost...** or 1. **[P1] Presentation exports receive...**
+  const findingRegex = /(?:^|\n)(?:[-*]|\d+\.)\s+\*\*\[?(P[0-3]|BLOCKER|CRITICAL|HIGH|MEDIUM|LOW)?\]?\s*([^*]+)\*\*/gi;
+  let match: RegExpExecArray | null;
+  while ((match = findingRegex.exec(text)) !== null) {
+    const rawSev = (match[1] || 'FINDING').toUpperCase();
+    const severity: ExtractedFinding['severity'] = rawSev.startsWith('P')
+      ? (rawSev as ExtractedFinding['severity'])
+      : rawSev === 'BLOCKER' || rawSev === 'CRITICAL'
+      ? 'P0'
+      : rawSev === 'HIGH'
+      ? 'P1'
+      : rawSev === 'MEDIUM'
+      ? 'P2'
+      : 'P3';
+    const title = match[2].trim();
+    const snippet = text.slice(match.index, match.index + 400);
+    const fileMatches = Array.from(snippet.matchAll(/(?:\[[^\]]+\]\()?([a-zA-Z0-9_\-\\/.]+\.[a-zA-Z0-9]+)(?::\d+)?(?:\))?/g))
+      .map((m) => m[1].replaceAll('\\', '/').toLowerCase())
+      .filter((f) => f.includes('.') && !f.startsWith('http'));
+
+    const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+    const signature = `${severity}:${fileMatches[0] || 'nofile'}:${normalizedTitle.slice(0, 50)}`;
+    findings.push({ severity, title, files: Array.from(new Set(fileMatches)), signature });
+  }
+
+  // Fallback if no markdown bold patterns but lines start with bullet points
+  if (findings.length === 0 && text.includes('BLOCK')) {
+    const lines = text.split(/\r?\n/);
+    for (const line of lines) {
+      if (/^[-*]\s+|\d+\.\s+/.test(line.trim())) {
+        const cleaned = line.replace(/^[-*\d.]+\s+/, '').trim();
+        if (cleaned.length > 15 && !cleaned.toLowerCase().startsWith('verdict')) {
+          const sig = cleaned.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').slice(0, 50);
+          findings.push({ severity: 'FINDING', title: cleaned.slice(0, 80), files: [], signature: sig });
+        }
+      }
+    }
+  }
+
+  return findings;
+}
+
+export interface ReviewCycleRecord {
+  cycle: number;
+  diffFingerprint: string;
+  findings: ExtractedFinding[];
+  findingsFingerprint: string;
+  diffChangedSinceLastCycle: boolean;
+}
+
+export interface LoopDetectionResult {
+  isLoop: boolean;
+  reason?: string;
+}
+
+export function detectReviewLoop(history: ReviewCycleRecord[]): LoopDetectionResult {
+  if (history.length < 2) return { isLoop: false };
+
+  const current = history[history.length - 1];
+  const previous = history[history.length - 2];
+
+  // 1. Stagnant Repair (Antigravity made 0 code modifications in response to review)
+  if (!current.diffChangedSinceLastCycle && current.findingsFingerprint === previous.findingsFingerprint) {
+    return {
+      isLoop: true,
+      reason: `Stagnant repair loop: Cycle ${current.cycle} produced 0 code changes and identical blocking findings.`,
+    };
+  }
+
+  // 2. Exact State Oscillation (Flip-flop back to a previous cycle's state)
+  for (let i = 0; i < history.length - 1; i += 1) {
+    const past = history[i];
+    if (past.diffFingerprint === current.diffFingerprint && past.findingsFingerprint === current.findingsFingerprint) {
+      return {
+        isLoop: true,
+        reason: `Oscillating loop: Cycle ${current.cycle} reverted to the exact diff and findings from Cycle ${past.cycle}.`,
+      };
+    }
+  }
+
+  // 3. Persistent Unresolved Blockers across 3 consecutive cycles
+  if (history.length >= 3) {
+    const cycle1 = history[history.length - 3];
+    const cycle2 = history[history.length - 2];
+    const cycle3 = history[history.length - 1];
+
+    const set1 = new Set(cycle1.findings.map((f) => f.signature));
+    const set2 = new Set(cycle2.findings.map((f) => f.signature));
+    const set3 = new Set(cycle3.findings.map((f) => f.signature));
+
+    const allIdentical = set1.size > 0 && set1.size === set2.size && set2.size === set3.size &&
+      [...set1].every((s) => set2.has(s) && set3.has(s));
+
+    if (allIdentical) {
+      return {
+        isLoop: true,
+        reason: `Persistent unresolved blockers: The exact same ${set1.size} findings persisted across cycles ${cycle1.cycle}, ${cycle2.cycle}, and ${cycle3.cycle} without resolution.`,
+      };
+    }
+  }
+
+  return { isLoop: false };
+}
+
 

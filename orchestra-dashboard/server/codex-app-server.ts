@@ -42,12 +42,16 @@ export interface CodexTurnOptions {
 export function codexAppServerEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   if (process.platform !== 'win32') return { ...source };
   const environment = { ...source };
+  const ripwireDir = process.env.RIPWIRE_DIR || 'F:\\Ripwire\\ripwire-0.5.0\\ripwire-0.5.0\\build';
   for (const key of Object.keys(environment)) {
     if (key.toLowerCase() !== 'path') continue;
-    environment[key] = String(environment[key] || '')
+    const entries = String(environment[key] || '')
       .split(delimiter)
-      .filter((entry) => !/\\WindowsApps(?:\\|$)/i.test(entry))
-      .join(delimiter);
+      .filter((entry) => !/\\WindowsApps(?:\\|$)/i.test(entry));
+    if (!entries.includes(ripwireDir)) {
+      entries.unshift(ripwireDir);
+    }
+    environment[key] = entries.join(delimiter);
   }
   return environment;
 }
@@ -146,6 +150,7 @@ class CodexAppServer {
   private stderr = '';
   private pending = new Map<number, { resolve: (value: JsonRecord) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   private listeners = new Set<NotificationHandler>();
+  constructor(private readonly disableRider = false) {}
 
   async request(method: string, params: JsonRecord = {}, timeoutMs = 15_000): Promise<JsonRecord> {
     await this.ensureStarted();
@@ -229,7 +234,15 @@ class CodexAppServer {
     const child = this.child;
     this.child = null;
     this.starting = null;
-    if (child && !child.killed) child.kill();
+    if (child) {
+      child.stdout.removeAllListeners();
+      child.stderr.removeAllListeners();
+      child.removeAllListeners();
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      if (!child.killed) child.kill();
+    }
   }
 
   private async ensureStarted() {
@@ -241,7 +254,12 @@ class CodexAppServer {
   }
 
   private async start() {
-    const child = spawn(CODEX, ['app-server'], { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: codexAppServerEnvironment() });
+    const args = this.disableRider ? ['-c', 'mcp_servers.rider.enabled=false', 'app-server'] : ['app-server'];
+    const child = spawn(CODEX, args, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: codexAppServerEnvironment() });
+    child.unref();
+    try { (child.stdout as any)?.unref?.(); } catch { /* ignore */ }
+    try { (child.stderr as any)?.unref?.(); } catch { /* ignore */ }
+    try { (child.stdin as any)?.unref?.(); } catch { /* ignore */ }
     this.child = child;
     this.buffer = '';
     this.stderr = '';
@@ -294,7 +312,14 @@ class CodexAppServer {
 
   private handleExit(error: Error) {
     if (!this.child) return;
+    const child = this.child;
     this.child = null;
+    child.stdout.removeAllListeners();
+    child.stderr.removeAllListeners();
+    child.removeAllListeners();
+    child.stdin.destroy();
+    child.stdout.destroy();
+    child.stderr.destroy();
     for (const [id, pending] of this.pending) { clearTimeout(pending.timer); pending.reject(error); this.pending.delete(id); }
   }
 }
@@ -317,4 +342,7 @@ function friendlyCommandActivity(command: string) {
 function finite(value: unknown): number | null { const number = Number(value); return Number.isFinite(number) ? number : null; }
 
 export const codexAppServer = new CodexAppServer();
-export function closeCodexAppServer() { codexAppServer.close(); }
+export const codexNoRiderAppServer = new CodexAppServer(true);
+export function selectCodexAppServer(riderAvailable?: boolean) { return riderAvailable ? codexAppServer : codexNoRiderAppServer; }
+export function codexAppServerArgs(disableRider: boolean) { return disableRider ? ['-c', 'mcp_servers.rider.enabled=false', 'app-server'] : ['app-server']; }
+export function closeCodexAppServer() { codexAppServer.close(); codexNoRiderAppServer.close(); }

@@ -115,6 +115,16 @@ export interface TaskProviderRecoveryEvent extends BaseTaskEvent {
   payload: { message: string; provider?: string; status?: string | null; [key: string]: unknown };
 }
 
+export interface TaskNoChangesEvent extends BaseTaskEvent {
+  type: 'task.no-changes';
+  payload: { message: string; [key: string]: unknown };
+}
+
+export interface TaskReviewCapEvent extends BaseTaskEvent {
+  type: 'task.review-cap';
+  payload: { message: string; maxCycles: number; [key: string]: unknown };
+}
+
 // ----------------------------------------------------------------------------
 // Agent Events
 // ----------------------------------------------------------------------------
@@ -304,6 +314,13 @@ export interface WarningEvent extends BaseTaskEvent {
   payload: { message: string; code?: string; [key: string]: unknown };
 }
 
+export interface CloudAutomationEvent extends BaseTaskEvent {
+  type: 'cloud.handoff_classified' | 'cloud.tier_escalated' | 'cloud.auto_responded'
+    | 'cloud.awaiting_resume' | 'cloud.resume_confirmed' | 'cloud.handoff_retry_waiting'
+    | 'cloud.waiting_for_head' | 'cloud.head_changed' | 'mcp.circuit_open' | 'ui.reconnect_recovered';
+  payload: { [key: string]: unknown };
+}
+
 export interface ProviderTelemetryEvent extends BaseTaskEvent {
   type: 'provider.telemetry';
   payload: { [key: string]: unknown };
@@ -312,6 +329,15 @@ export interface ProviderTelemetryEvent extends BaseTaskEvent {
 export interface ProjectOnboardingEvent extends BaseTaskEvent {
   type: 'project.onboarding';
   payload: { [key: string]: unknown };
+}
+
+// ----------------------------------------------------------------------------
+// Ripwire Integration Events
+// ----------------------------------------------------------------------------
+
+export interface RipwireContextEvent extends BaseTaskEvent {
+  type: 'ripwire.context';
+  payload: { phase: string; command?: string; estimatedTokens?: number; kind?: string; [key: string]: unknown };
 }
 
 // ----------------------------------------------------------------------------
@@ -373,7 +399,11 @@ export type TaskEvent =
   | McpToolEvent
   | WarningEvent
   | ProviderTelemetryEvent
-  | ProjectOnboardingEvent;
+  | ProjectOnboardingEvent
+  | CloudAutomationEvent
+  | TaskNoChangesEvent
+  | TaskReviewCapEvent
+  | RipwireContextEvent;
 
 export type TaskEventType = TaskEvent['type'];
 
@@ -382,6 +412,7 @@ export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
   'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.retry', 'task.steer', 'task.continuation',
   'task.disputed', 'task.review-disputed', 'task.repair-progress', 'task.implementation-retry',
   'task.routed', 'task.takeover_local', 'task.model-takeover', 'task.provider-recovery',
+  'task.no-changes', 'task.review-cap',
   'agent.started', 'agent.output', 'agent.progress', 'agent.completed', 'agent.failed',
   'verification.result', 'review.verdict', 'review.started', 'review.completed', 'review.finding',
   'git.commit', 'git.push', 'git.remote', 'git.baseline-required',
@@ -391,6 +422,10 @@ export const TASK_EVENT_TYPES: readonly TaskEventType[] = [
   'cloud.integrated',
   'routing.decision', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'warning',
   'provider.telemetry', 'project.onboarding',
+  'cloud.handoff_classified', 'cloud.tier_escalated', 'cloud.auto_responded',
+  'cloud.awaiting_resume', 'cloud.resume_confirmed', 'cloud.handoff_retry_waiting',
+  'cloud.waiting_for_head', 'cloud.head_changed', 'mcp.circuit_open', 'ui.reconnect_recovered',
+  'ripwire.context',
 ];
 
 export class TaskEventValidationError extends Error {

@@ -10,7 +10,7 @@ import { collectRepositoryEvidence } from '../dist-server/evidence.js';
 import { initializeGreenfieldRepository, inspectProjectScope, isGreenfieldDirectory, isOrchestraInternalPath, updateManagedGitignore } from '../dist-server/projects.js';
 import { boundGitDiff, createManualCheckpoint, extractGitHubRemoteUrl, getChangedFilesFromBase, getCommitDiffDetails, getDiffFromBase, getGitStatus, getProjectCheckpoints, git, validateGitHubRemoteUrl } from '../dist-server/git.js';
 import { Store } from '../dist-server/db.js';
-import { evaluateRunHealth, hasReviewablePreservedProviderOutput, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
+import { evaluateRunHealth, hasRecentForegroundHeartbeat, hasReviewablePreservedProviderOutput, implementationChangeState, providerFailoverDisposition, providerFailureStatus, recoveryDisposition, reviewFingerprint } from '../dist-server/tasks.js';
 import { extractAntigravityQuotas } from '../dist-server/observability.js';
 import { codexAppServerEnvironment, codexProgressMessage, normalizeCodexTokenUsage } from '../dist-server/codex-app-server.js';
 import { isGemmaRiderToolAllowed } from '../dist-server/mcp.js';
@@ -276,6 +276,13 @@ test('run health distinguishes healthy silence, waiting, stalls, and attention s
   assert.equal(evaluateRunHealth('running', false, 1_000), 'possibly_stalled');
   assert.equal(evaluateRunHealth('recovery_required', false, 1_000), 'needs_attention');
   assert.equal(evaluateRunHealth('completed', false, 1_000), 'complete');
+});
+
+test('a fresh task-owned foreground heartbeat keeps local monitoring active during a process-probe lag', () => {
+  const now = Date.parse('2026-08-31T23:40:00.000Z');
+  assert.equal(hasRecentForegroundHeartbeat([{ agent: 'antigravity', type: 'agent.output', createdAt: '2026-08-31T23:39:20.000Z', payload: { text: 'Antigravity is still working in the foreground (3 minutes elapsed).' } }], now), true);
+  assert.equal(hasRecentForegroundHeartbeat([{ agent: 'antigravity', type: 'agent.output', createdAt: '2026-08-31T23:38:00.000Z', payload: { text: 'Antigravity is still working in the foreground (2 minutes elapsed).' } }], now), false);
+  assert.equal(hasRecentForegroundHeartbeat([{ agent: 'antigravity', type: 'agent.output', createdAt: '2026-08-31T23:39:20.000Z', payload: { text: 'ordinary output' } }], now), false);
 });
 
 test('review finding fingerprints ignore line-number drift but detect changed findings', () => {

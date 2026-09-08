@@ -1,11 +1,8 @@
 import type { Store } from '../../db.js';
 import { classifyTask } from '../../agents.js';
-import { getGitStatus } from '../../git.js';
-import { config } from '../../config.js';
 import { CommandIntentRepository } from '../../infrastructure/database/repositories/intents.js';
 import type { JulesSessionService } from './session-service.js';
 import { ApplicationError } from '../errors.js';
-import { decideFreeFirstRoute } from '../../domain/index.js';
 import type { LocalTaskQueue } from '../tasks/local-task-queue.js';
 
 export interface RoutedExecutionCommand { prompt: string; sessionId: string; idempotencyKey: string; target: 'auto' | 'local' | 'cloud'; }
@@ -17,30 +14,25 @@ export class JulesRoutingService {
     if (!session || session.projectId !== projectId) throw new ApplicationError('SESSION_PROJECT_MISMATCH', 'Session does not belong to the selected project.', 409);
     const classified = await classifyTask(command.prompt);
     const reasons: string[] = [];
-    let worker: 'gemma' | 'jules' | 'antigravity' = command.target === 'cloud' ? 'jules' : 'antigravity';
-    let target: 'local' | 'cloud' = command.target === 'cloud' ? 'cloud' : 'local';
-    if (command.target === 'auto') {
-      let julesReady = false;
-      let julesReason = '';
-      if (classified.classification.mutating && classified.classification.complexity !== 'small') {
-        const status = await getGitStatus(project.root);
-        const source = this.store.manager.julesSourceMappings.get(projectId);
-        if (!status.isGit || status.dirty || !status.head || !status.upstream) julesReason = 'Jules requires a clean, pushed Git branch.';
-        else if (!source || source.targetBranch !== status.branch) julesReason = 'No current verified Jules source mapping exists for this branch.';
-        else if (this.store.manager.julesCapacity.activeCount() >= config.jules.maxConcurrentSessions) julesReason = 'Configured Jules concurrency is currently full.';
-        else julesReady = true;
-      }
-      const decision = decideFreeFirstRoute(classified.classification, command.prompt, { julesReady, julesReason });
-      target = decision.target;
-      worker = decision.worker;
-      reasons.push(decision.reason);
-    } else reasons.push(`The user explicitly selected ${command.target} execution.`);
+    if (command.target === 'cloud') {
+      reasons.push('The user explicitly selected cloud execution.');
+      const response = await this.cloud.dispatch(projectId, {
+        prompt: command.prompt,
+        sessionId: command.sessionId,
+        requirePlanApproval: true,
+        autoPr: true,
+        idempotencyKey: `route-cloud:${command.idempotencyKey}`,
+      });
+      this.store.addEvent(String(response.taskId), 'orchestra', 'task.routed', { target: 'cloud', worker: 'jules', reasons, source: classified.source });
+      return { ...response, target: 'cloud', reasons, classification: classified.classification };
+    }
 
-    if (target === 'cloud') {
-      const response = await this.cloud.dispatch(projectId, { prompt: command.prompt, sessionId: command.sessionId,
-        requirePlanApproval: true, autoPr: true, idempotencyKey: `route-cloud:${command.idempotencyKey}` });
-      this.store.addEvent(String(response.taskId), 'orchestra', 'task.routed', { target, worker, reasons, source: classified.source });
-      return { ...response, target, reasons, classification: classified.classification };
+    const target = 'local' as const;
+    const worker = 'antigravity' as const;
+    if (command.target === 'auto') {
+      reasons.push('Auto route: Enqueued to the Orchestra multi-agent pipeline for Pass 1 Refinement and Architect Blueprinting.');
+    } else {
+      reasons.push('The user explicitly selected local execution.');
     }
     const key = `route-local:${command.idempotencyKey}`;
     const hash = CommandIntentRepository.requestHash({ projectId, ...command, target });

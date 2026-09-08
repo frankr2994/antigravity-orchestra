@@ -15,6 +15,7 @@
 
 このリポジトリの `.codex/AGENTS.md` が Codex 向けの正式な指示。委譲された Codex セッションは `codex-system` スキルやスクリプトを実行してはならない（自己再帰になる）。
 
+
 ## ワークフロー（スラッシュコマンド）
 
 ユーザーが以下のコマンド（または相当する依頼）を入力したら、対応するファイルを読み、そのステップに従って実行する:
@@ -37,3 +38,13 @@
 ```
 
 詳細は `.agents/skills/codex-system/SKILL.md` を参照。
+
+## Ripwire（決定論的コードベース探索）
+
+Ripwire（`F:\Ripwire\ripwire-0.5.0\ripwire-0.5.0\build\ripwire.exe`）は、Orchestra パイプライン（Refinement, Builder, Review/Repair）に統合されている。grep や巨大ファイルの一括読込の前に呼び出し、コンテキスト消費を削減する：
+
+- タスク指向マップ: `ripwire <dir> --for="<タスク内容>"`
+- 変更の影響範囲（ブラスト半径）: `ripwire <dir> --situ`
+- 回帰・品質低下の検出: `ripwire <dir> --quality-delta`
+- 実行必須テストの特定: `ripwire <dir> --test-gate`
+- 特定シンボルのみ展開: `ripwire <dir> --expand=SYM --top-k=0`

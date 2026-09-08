@@ -10,14 +10,14 @@ import type {
 import { Empty, NavButton } from '../../shared/ui';
 import { humanState } from '../../shared/format';
 import { useApiClient } from '../../app/useApiClient';
-import { useWorkspaceState } from '../../app/workspace-state';
+import { selectDisplayedTask, useWorkspaceState } from '../../app/workspace-state';
 import { CheckpointsView, Dashboard, McpServersView, Projects, SettingsView, TaskActivity } from '../../app/AppViews';
 import { terminalStates } from '../../app/task-state';
 import { formatGenericModelName } from '../../shared/model-format';
 import { useDashboardTelemetry } from './useDashboardTelemetry';
 import { useComposerState } from '../chat/useComposerState';
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'cloud.handoff_classified', 'cloud.tier_escalated', 'cloud.auto_responded', 'cloud.awaiting_resume', 'cloud.resume_confirmed', 'cloud.handoff_retry_waiting', 'project.onboarding', 'warning'];
 const manualCommitStates = new Set(['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'failed']);
 const releasedOwnershipStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled']);
 
@@ -28,6 +28,7 @@ export function DashboardWorkspace() {
   const { setProjects, setProject, setSessions, setSession, setMessages, setTasks, setActiveTask, setProjectOwnerTask, setActivity } = workspace;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [connectionState, setConnectionState] = useState<'connected' | 'reconnecting' | 'offline'>('connected');
   const [scopeWarning, setScopeWarning] = useState('');
   const [monitor, setMonitor] = useState<RunMonitor | null>(null);
   const [monitorExplanation, setMonitorExplanation] = useState('');
@@ -101,9 +102,7 @@ export function DashboardWorkspace() {
       setSession(visibleSession);
       setMessages(await api<Message[]>(`/api/sessions/${visibleSession.id}/messages`, {}, overrideToken));
       setActivity([]);
-      const sessionTasks = projectTasks.filter((task) => task.sessionId === visibleSession.id).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-      const newestTask = sessionTasks[0] || null;
-      const restored = projectActiveTask || (newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null);
+      const restored = selectDisplayedTask(projectTasks, visibleSession.id, projectActiveTask);
       setActiveTask(restored);
       if (restored) watchTask(restored.id);
       setView('dashboard');
@@ -182,11 +181,7 @@ export function DashboardWorkspace() {
     const ownerPath = `/api/projects/${projectId}/${reconcile ? 'task-ownership/reconcile' : 'active-task'}`;
     const running = await api<Task | null>(ownerPath, reconcile ? { method: 'POST', body: '{}' } : {});
     const projectTasks = await api<Task[]>(`/api/tasks?projectId=${projectId}`);
-    const sessionTasks = projectTasks.filter((task) => task.sessionId === selectedSessionId).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
-    const newestTask = sessionTasks[0] || null;
-    const latest = running?.sessionId === selectedSessionId
-      ? running
-      : !running && newestTask && (!terminalStates.has(newestTask.state) || manualCommitStates.has(newestTask.state)) ? newestTask : null;
+    const latest = selectDisplayedTask(projectTasks, selectedSessionId, running);
     setTasks(projectTasks);
     setProjectOwnerTask(running);
     setActiveTask(latest);
@@ -283,6 +278,20 @@ export function DashboardWorkspace() {
     streamRef.current?.close();
     const stream = new EventSource(`/api/tasks/${taskId}/events`);
     streamRef.current = stream;
+    stream.onopen = () => {
+      setConnectionState('connected');
+      setError((current) => /event stream disconnected|unable to connect to orchestra backend/i.test(current) ? '' : current);
+      void Promise.allSettled([
+        api<Task>(`/api/tasks/${taskId}`).then((latest) => {
+          setActiveTask(latest);
+          setProjectOwnerTask((current) => current?.id === taskId ? releasedOwnershipStates.has(latest.state) ? null : latest : current);
+          setTasks((current) => current.map((item) => item.id === taskId ? latest : item));
+        }),
+        api<RunMonitor>(`/api/tasks/${taskId}/monitor`).then(setMonitor),
+        api(`/api/tasks/${taskId}/jules-session`),
+        session ? api<Message[]>(`/api/sessions/${session.id}/messages`).then(setMessages) : Promise.resolve(),
+      ]);
+    };
     const receive = (raw: Event) => {
       const event = JSON.parse((raw as MessageEvent).data) as TaskEvent;
       setActivity((current) => [...current.slice(-199), event]);
@@ -303,7 +312,10 @@ export function DashboardWorkspace() {
       if (event.type === 'task.error') setError(String(event.payload.message || 'Task failed.'));
     };
     for (const name of eventNames) stream.addEventListener(name, receive);
-    stream.onerror = () => { if (stream.readyState === EventSource.CLOSED) setError('Task event stream disconnected. Reload to restore it.'); };
+    stream.onerror = () => {
+      if (stream.readyState === EventSource.CLOSED) setConnectionState('offline');
+      else setConnectionState('reconnecting');
+    };
   }
 
   async function cancelTask(task = activeTask) {
@@ -451,6 +463,7 @@ export function DashboardWorkspace() {
       </aside>
 
       <main className="content">
+        {connectionState !== 'connected' && <div className="error-banner warning"><CircleAlert size={18} /><span>{connectionState === 'reconnecting' ? 'Reconnecting to task updates…' : 'Offline. Task state will be restored when the backend reconnects.'}</span></div>}
         {error && <div className="error-banner"><CircleAlert size={18} /><span>{error}</span><button onClick={() => setError('')}>×</button></div>}
         {scopeWarning && <div className="error-banner warning"><CircleAlert size={18} /><span>{scopeWarning}</span></div>}
         {view === 'dashboard' && <Dashboard api={api} stats={stats} health={health} usage={usage} julesReadiness={julesReadiness} julesActivity={julesActivity} mcp={mcp} project={project} tasks={tasks} activeTask={activeTask} monitor={monitor} events={activity} explanation={monitorExplanation} explanationBusy={monitorBusy} question={monitorQuestion} onQuestion={setMonitorQuestion} onAsk={askMonitor} onExplain={explainMonitor} onPause={pauseTask} onResume={resumeTask} onStop={cancelTask} onConfigureJules={() => setView('settings')} onRefreshJules={refreshJulesDashboard} />}
@@ -552,7 +565,8 @@ export function DashboardWorkspace() {
                     className="action-link"
                     onClick={() => {
                       setExecutionMode('orchestra');
-                      setInput(`Implement the following plan / feature proposal:\n\n${message.content}`);
+                      const stripped = message.content.trim().replace(/^(?:Yes,?\s*(?:absolutely|indeed|certainly)[.!?:-]*\s*)+/i, '').trim();
+                      setInput(`Implement the following plan / feature proposal:\n\n${stripped}`);
                     }}
                     title="Promote this answer into an orchestrated multi-agent task"
                   >

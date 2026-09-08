@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { config } from './config.js';
 import { runProcess } from './process.js';
 import { getLoadedLmStudioModels } from './lmstudio.js';
+import { RiderCircuitBreaker } from './application/capabilities/rider-circuit-breaker.js';
 
 const CODEX = process.platform === 'win32' ? 'codex.exe' : 'codex';
 const home = process.env.USERPROFILE || process.cwd();
@@ -56,6 +57,8 @@ export interface McpServerRecord {
 let statusCache: { at: number; value: McpStatus } | null = null;
 let serversCache: { at: number; value: McpServerRecord[] } | null = null;
 let gemmaCapabilityCache: { at: number; available: boolean; reason: string | null } | null = null;
+const riderCircuit = new RiderCircuitBreaker();
+const riderProbeCache = new Map<string, { at: number; value: Awaited<ReturnType<typeof probeMcpEndpointUncached>> }>();
 
 export async function getMcpStatus(force = false): Promise<McpStatus> {
   if (!force && statusCache && Date.now() - statusCache.at < 15_000) return statusCache.value;
@@ -381,11 +384,15 @@ export async function callGemmaRiderTool(functionName: string, args: Record<stri
   if (!isGemmaRiderToolAllowed(functionName)) throw new Error(`Rider tool ${toolName} is not allowed through Gemma's read-only bridge.`);
   const status = await getMcpStatus();
   if (!status.agents.gemma.available || !status.server.endpoint) throw new Error(status.agents.gemma.reason || 'Gemma Rider bridge is unavailable.');
-  const session = await openMcpSession(status.server.endpoint);
+  if (!riderCircuit.permit(status.server.endpoint)) throw new Error('Rider circuit is open; use filesystem evidence instead.');
+  let session;
+  try { session = await openMcpSession(status.server.endpoint); riderCircuit.recordInitialize(status.server.endpoint); }
+  catch (error) { riderCircuit.recordFailure(status.server.endpoint); throw error; }
   try {
     const result = await session.request('tools/call', { name: toolName, arguments: args });
     return JSON.stringify(result).slice(0, 40_000);
-  } finally { await session.close(); }
+  } catch (error) { riderCircuit.recordFailure(status.server.endpoint); throw error; }
+  finally { await session.close(); }
 }
 
 export function isGemmaRiderToolAllowed(functionName: string) { return READ_ONLY_RIDER_TOOLS.has(functionName.replace(/^rider_/, '')); }
@@ -434,14 +441,27 @@ async function probeGemmaToolCalling() {
 }
 
 async function probeMcpEndpoint(endpoint: string) {
+  const cached = riderProbeCache.get(endpoint);
+  if (cached && Date.now() - cached.at < 15_000) return cached.value;
+  if (!riderCircuit.permit(endpoint)) return { operational: false, serverName: null, version: null, tools: [] as JsonRecord[], latencyMs: 0,
+    reason: 'Rider circuit is open after repeated endpoint failures; filesystem evidence remains available.' };
+  const value = await probeMcpEndpointUncached(endpoint);
+  riderProbeCache.set(endpoint, { at: Date.now(), value });
+  return value;
+}
+
+async function probeMcpEndpointUncached(endpoint: string) {
   const started = Date.now();
   try {
     const session = await openMcpSession(endpoint);
+    riderCircuit.recordInitialize(endpoint);
     try {
       const result = await session.request('tools/list', {});
+      riderCircuit.recordToolsListed(endpoint);
       return { operational: true, serverName: session.serverName, version: session.version, tools: Array.isArray(result.tools) ? result.tools as JsonRecord[] : [], latencyMs: Date.now() - started, reason: null };
     } finally { await session.close(); }
   } catch (error) {
+    riderCircuit.recordFailure(endpoint);
     return { operational: false, serverName: null, version: null, tools: [] as JsonRecord[], latencyMs: Date.now() - started, reason: error instanceof Error ? error.message : String(error) };
   }
 }

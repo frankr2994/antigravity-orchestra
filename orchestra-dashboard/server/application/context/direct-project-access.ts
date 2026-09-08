@@ -11,20 +11,41 @@ export function requireReadableProjectRoot(rootInput: string) {
   return root;
 }
 
-export function directProjectAccessInstruction(rootInput: string, provider: 'gemma' | 'codex' | 'antigravity') {
+export function directProjectAccessInstruction(rootInput: string, provider: 'gemma' | 'codex' | 'antigravity', riderAvailable = false) {
   const root = requireReadableProjectRoot(rootInput);
+  const riderNote = riderAvailable ? ' and a live read-only JetBrains Rider MCP toolset' : '';
   if (provider === 'gemma') {
-    return `Authoritative project root: ${root}\nOrchestra supplies safe read-only project tools for this exact root. Use them when the answer depends on files. Never claim the project is unavailable merely because arbitrary Bash is disabled.`;
+    return `Authoritative project root: ${root}\nOrchestra supplies safe read-only project tools for this exact root${riderNote}. Use them when the answer depends on files or code structure. Never claim the project or Rider tools are unavailable merely because arbitrary Bash is disabled.`;
   }
-  return `Authoritative project root: ${root}\nThis turn has read-only filesystem access rooted at that project. Inspect only what directly answers the question. Do not run builds, tests, type checks, linters, or broad diagnostics unless the user explicitly asks for them. Never claim the project is unavailable unless an actual read operation fails; if one fails, report the exact boundary.`;
+  return `Authoritative project root: ${root}\nThis turn has read-only filesystem access rooted at that project${riderNote}. Inspect only what directly answers the question. Do not run builds, tests, type checks, linters, or broad diagnostics unless the user explicitly asks for them. Never claim the project is unavailable unless an actual read operation fails; if one fails, report the exact boundary.`;
 }
 
-export function deterministicDirectProjectAnswer(rootInput: string, prompt: string, agent: AgentName): DirectProjectAnswer | null {
+export function isRiderAccessQuestion(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  return /\brider\b/i.test(text) && /\b(?:mcp|tools?|access|connected|available)\b/i.test(text);
+}
+
+export function deterministicDirectProjectAnswer(rootInput: string, prompt: string, agent: AgentName, riderAvailable = false): DirectProjectAnswer | null {
   const root = requireReadableProjectRoot(rootInput);
-  if (isProjectAccessQuestion(prompt)) {
+  if (isProjectAccessQuestion(prompt) || isRiderAccessQuestion(prompt)) {
+    const isRiderOnly = isRiderAccessQuestion(prompt) && !/\b(?:all\s+files|all\s+of\s+its\s+files|directory|filesystem)\b/i.test(prompt);
+    if (isRiderOnly) {
+      if (riderAvailable) {
+        return {
+          phase: 'direct-project-access',
+          answer: `Yes. JetBrains Rider MCP is connected and active for this project with read-only inspection tools (including \`rider_get_solution_projects\`, \`rider_get_file_problems\`, \`rider_search_in_files_by_text\`, and \`rider_search_symbol\`).`,
+        };
+      }
+      return {
+        phase: 'direct-project-access',
+        answer: `No. JetBrains Rider MCP is currently not connected or available for this project.`,
+      };
+    }
+    const riderText = riderAvailable ? ' and live read-only JetBrains Rider MCP tools.' : '.';
     const capability = agent === 'gemma'
-      ? 'Gemma Solo has read-only access to non-sensitive project text files within this directory via safe tools. It cannot access credentials (.env, secret files), binary assets, symlinks, files exceeding 750 KB, or execute arbitrary shell commands.'
-      : `${agent === 'codex' ? 'Codex Solo' : 'Antigravity Solo'} has read-only filesystem access to the selected project. It cannot modify files in Solo mode.`;
+      ? `Gemma Solo has read-only access to non-sensitive project text files within this directory via safe tools${riderText} It cannot access credentials (.env, secret files), binary assets, symlinks, files exceeding 750 KB, or execute arbitrary shell commands.`
+      : `${agent === 'codex' ? 'Codex Solo' : 'Antigravity Solo'} has read-only filesystem access to the selected project${riderText} It cannot modify files in Solo mode.`;
     return { phase: 'direct-project-access', answer: `Yes. The authoritative project directory is \`${root}\`. ${capability}` };
   }
   if (!isProjectLaunchQuestion(prompt)) return null;

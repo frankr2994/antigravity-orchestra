@@ -81,11 +81,16 @@ export function useDashboardTelemetry(input: {
 
   useEffect(() => {
     if (!token || !settings) return;
-    const update = () => Promise.all([
-      api<Stats>('/api/stats'), api<Health>('/api/health'), api<McpStatus>('/api/mcp/status'),
-      fetchMcpServers(), fetchAvailableModels(), refreshJulesDashboard(),
-    ]).then(([nextStats, nextHealth, nextMcp]) => { setStats(nextStats); setHealth(nextHealth); setMcp(nextMcp); })
-      .catch((reason) => onError(reason instanceof Error ? reason.message : String(reason)));
+    const update = async () => {
+      const [nextStats, nextHealth, nextMcp] = await Promise.allSettled([
+        api<Stats>('/api/stats'), api<Health>('/api/health'), api<McpStatus>('/api/mcp/status'),
+        fetchMcpServers(), fetchAvailableModels(), refreshJulesDashboard(),
+      ]);
+      if (nextStats.status === 'fulfilled') setStats(nextStats.value);
+      if (nextHealth.status === 'fulfilled') setHealth(nextHealth.value);
+      if (nextMcp.status === 'fulfilled') setMcp(nextMcp.value);
+      // Optional telemetry failures remain local to their cards and never become a fatal banner.
+    };
     void update();
     const timer = setInterval(update, settings.telemetryInterval);
     return () => clearInterval(timer);

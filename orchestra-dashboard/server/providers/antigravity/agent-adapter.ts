@@ -8,7 +8,7 @@ interface StreamDecoder { push: (chunk: string) => void; flush: () => void; sand
 
 export async function listAntigravityModels(): Promise<string[]> {
   try {
-    const result = await runProcess(AGY, ['models'], { timeoutMs: 15_000 });
+    const result = await runProcess(AGY, ['models'], { timeoutMs: 3_000 });
     return result.stdout.split(/\r?\n/).map((line) => line.trim().split(/\s+/)[0]).filter((line) => /^(gemini|claude|gpt)/.test(line));
   } catch { return []; }
 }
@@ -27,11 +27,26 @@ export async function runAntigravity(input: { root: string; prompt: string; mode
   }, 15_000);
   let result;
   try {
-    result = await runProcess(AGY, args, { cwd: input.root, timeoutMs: 21 * 60_000, idleTimeoutMs: 5 * 60_000, signal: input.signal, onStdout: decoder.push, onStderr: decoder.push });
+    result = await runProcess(AGY, args, {
+      cwd: input.root,
+      timeoutMs: 20 * 60_000,
+      idleTimeoutMs: 8 * 60_000,
+      signal: input.signal,
+      onStdout: decoder.push,
+      onStderr: decoder.push,
+      env: {
+        // Inject the ripwire binary directory so Antigravity can call `ripwire` by name.
+        // Reads RIPWIRE_PATH (overriding the directory) or falls back to the default install location.
+        PATH: [
+          process.env.RIPWIRE_DIR || 'F:\\Ripwire\\ripwire-0.5.0\\ripwire-0.5.0\\build',
+          process.env.PATH || '',
+        ].filter(Boolean).join(';'),
+      },
+    });
   } catch (error) {
     decoder.flush();
     if (error instanceof ProcessIdleTimeoutError) {
-      throw new Error('Antigravity produced no stream activity for five minutes. Orchestra stopped the stalled process so another model can diagnose and continue the task.');
+      throw new Error('Antigravity produced no stream activity for eight minutes. Orchestra stopped the stalled process so another model can diagnose and continue the task.');
     }
     if (error instanceof ProcessTimeoutError) {
       throw new Error('Antigravity exceeded its 20-minute print window. Orchestra stopped the process and preserved any uncommitted task changes for safe recovery.');
@@ -81,12 +96,15 @@ export function buildAntigravityPrompt(input: { root: string; prompt: string; mu
   const recovery = input.recovery
     ? 'This is a recovery run. The uncommitted working-tree changes were created by the prior failed attempt at this same request. Inspect and preserve useful partial work, finish missing pieces, correct defects, and verify the complete result.'
     : '';
-  const rider = input.riderAvailable ? 'JetBrains Rider MCP is healthy and enabled for this turn. Prefer Rider for solution-aware navigation, symbol searches and usages, project dependencies, IDE diagnostics, safe refactors, and targeted file operations when its semantic context is better than raw shell inspection. Use Git and ordinary shell tools where they are more appropriate; do not force unrelated work through MCP.\n\n' : '';
+  const rider = input.riderAvailable
+    ? 'JetBrains Rider MCP is healthy and enabled for this turn. Prefer Rider for solution-aware navigation, symbol searches and usages, project dependencies, IDE diagnostics, safe refactors, and targeted file operations when its semantic context is better than raw shell inspection. Use Git and ordinary shell tools where they are more appropriate; do not force unrelated work through MCP.\n\n'
+    : 'JetBrains Rider MCP is unavailable or circuit-open for this turn. Continue with filesystem and Git evidence only; do not wait for Rider, retry its endpoint, or treat its absence as a task blocker.\n\n';
   const request = attachTrustedLocalArtifacts(input.prompt);
   const access = input.mutating
     ? `Authoritative active project directory: ${input.root}\nThis exact directory is the repository for the task. Start every repository inspection in this directory and keep all file access inside it.`
     : directProjectAccessInstruction(input.root, 'antigravity');
-  return `${input.context ? `A read-only Codex specialist provided this analysis:\n\n${input.context}\n\n` : ''}${access}\n\nDo not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${input.sessionContext ? `${input.sessionContext}\n\n` : ''}${rider}${recovery ? `${recovery}\n\n` : ''}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion. If a tool unexpectedly creates background work, wait for it directly and cancel or close it before returning. End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
+  const ripwireHint = 'Ripwire is available on PATH as `ripwire`. Use it BEFORE blind grep + whole-file reads to save context and improve precision.\n- Orient on task: `ripwire <dir> --for="<task in words>"` — ranked, quality-annotated signatures.\n- Who calls X: `--callers=SYM`. Blast radius of a change: `--impact=SYM`.\n- After editing: `--quality-delta` shows what you made worse; `--test-gate` names exactly which tests to run.\n- Expand one symbol body: `--expand=SYM --top-k=0`. Do NOT open whole files just to find one function.\n\n';
+  return `${input.context ? `A read-only Codex specialist provided this analysis:\n\n${input.context}\n\n` : ''}${access}\n\nDo not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${input.sessionContext ? `${input.sessionContext}\n\n` : ''}${rider}${recovery ? `${recovery}\n\n` : ''}${ripwireHint}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion (run focused test files or commands that complete within seconds, or set WaitMsBeforeAsync to maximum 10000; if a tool creates background work unexpectedly, cancel or close it before returning; do not yield turns while waiting for background commands). End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
 }
 
 export function interpretAntigravityOutput(output: string, mutating: boolean, preserveIncompleteMutation = false) {

@@ -1,4 +1,5 @@
-import { basename } from 'node:path';
+import { existsSync, statSync, unlinkSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { runProcess } from './process.js';
 import { parseGitHubRepositoryRemote } from './domain/github-repository.js';
 
@@ -12,8 +13,36 @@ export interface GitStatus {
   dirty: boolean;
 }
 
+function cleanupStaleGitIndexLock(cwd: string, force = false): boolean {
+  try {
+    const lockCandidates = [
+      join(cwd, '.git', 'index.lock'),
+      join(cwd, 'index.lock'),
+    ];
+    for (const lockPath of lockCandidates) {
+      if (existsSync(lockPath)) {
+        const stats = statSync(lockPath);
+        if (force || Date.now() - stats.mtimeMs > 5_000) {
+          unlinkSync(lockPath);
+          return true;
+        }
+      }
+    }
+  } catch { /* ignore filesystem race or permission errors */ }
+  return false;
+}
+
 export async function git(args: string[], cwd: string, timeoutMs = 30_000) {
-  return runProcess('git.exe', ['-C', cwd, ...args], { timeoutMs });
+  cleanupStaleGitIndexLock(cwd);
+  let res = await runProcess('git.exe', ['-C', cwd, ...args], { timeoutMs });
+  if (res.code !== 0 && (res.stderr.includes('index.lock') || res.stdout.includes('index.lock'))) {
+    const cleaned = cleanupStaleGitIndexLock(cwd, true);
+    if (cleaned) {
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      res = await runProcess('git.exe', ['-C', cwd, ...args], { timeoutMs });
+    }
+  }
+  return res;
 }
 
 export async function getGitStatus(cwd: string): Promise<GitStatus> {

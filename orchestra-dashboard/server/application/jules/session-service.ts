@@ -10,6 +10,7 @@ import { JulesApiError } from '../../providers/jules/errors.js';
 import { config } from '../../config.js';
 import type { CommandIntent } from '../../domain/index.js';
 import type { JulesSession } from '../../providers/jules/types.js';
+import { parseJulesAutomationStatus, parseJulesOutstandingRepair } from '../../domain/index.js';
 
 export class JulesSessionService {
   constructor(
@@ -65,7 +66,9 @@ export class JulesSessionService {
       const task = this.store.createTask(project.id, sessionId!, command.prompt, null, null, 'cloud');
       taskId = task.id;
       this.store.startProviderRun({ taskId, provider: 'jules', operation: 'implementation', primaryWorker: true });
-      this.store.addMessage({ sessionId, taskId, role: 'user', agent: 'system', content: command.prompt });
+      if (command.recordUserMessage !== false) {
+        this.store.addMessage({ sessionId, taskId, role: 'user', agent: 'system', content: command.prompt });
+      }
       this.store.manager.commandIntents.createOrGet({
         taskId, kind: 'jules.dispatch', idempotencyKey: command.idempotencyKey, requestHash,
       });
@@ -73,6 +76,9 @@ export class JulesSessionService {
         throw new ApplicationError('JULES_CAPACITY_REACHED', 'The configured concurrent Jules session capacity is currently in use.', 429);
       }
       this.store.manager.checkpoints.append({ taskId, stage: 'dispatch', data: { status: 'intent_recorded' } });
+      this.store.manager.checkpoints.append({ taskId, stage: 'dispatch_contract', data: {
+        requirePlanApproval: command.requirePlanApproval, autoPr: command.autoPr,
+      } });
     });
 
     try {
@@ -94,6 +100,9 @@ export class JulesSessionService {
         this.store.manager.commandIntents.transition(intent.id, 'pending', 'failed', { errorCode: 'JULES_DISPATCH_REJECTED' });
         this.store.finishActiveProviderRun(taskId, 'jules', 'failed');
         this.store.manager.julesCapacity.release(taskId);
+        this.store.updateTask(taskId, { state: 'failed', error: result.error ?? 'Jules dispatch was rejected.' });
+        this.store.addEvent(taskId, 'jules', 'cloud.failed', { code: 'JULES_DISPATCH_REJECTED',
+          message: result.error ?? 'Jules dispatch was rejected before a remote session was created.' });
         throw new ApplicationError('JULES_DISPATCH_REJECTED', result.error ?? 'Jules dispatch was rejected.', 400,
           { resolution: result.resolution, nextAction: result.resolution || 'Open Jules setup diagnostics, correct the failed preflight item, and retry.', retryable: true });
       }
@@ -135,11 +144,30 @@ export class JulesSessionService {
       .filter((event) => event.agent === 'jules' || event.type.startsWith('cloud.'))
       .slice(-20)
       .map((event) => ({ id: event.id, type: event.type, createdAt: event.createdAt, payload: event.payload }));
+    const planEvent = this.store.listEvents(task.id).findLast((event) => event.type === 'cloud.activity'
+      && event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload)
+      && (event.payload as Record<string, unknown>).kind === 'plan_generated');
+    const automationCheckpoint = this.store.manager.checkpoints.latest(taskId, 'jules_automation');
+    const repairCheckpoint = this.store.manager.checkpoints.latest(taskId, 'jules_outstanding_repair');
+    let automation = null;
+    let outstandingRepair = null;
+    try {
+      automation = automationCheckpoint ? parseJulesAutomationStatus(automationCheckpoint.data) : null;
+      outstandingRepair = repairCheckpoint ? parseJulesOutstandingRepair(repairCheckpoint.data) : null;
+    } catch {
+      throw new ApplicationError('JULES_AUTOMATION_STATE_CORRUPT', 'Persisted Jules automation state is malformed and cannot authorize an action.', 409);
+    }
+    const pending = this.store.manager.commandIntents.listPending().find((intent) => intent.taskId === taskId) || null;
+    if (automation && pending) automation = { ...automation, pendingCommand: { kind: pending.kind, idempotencyKey: pending.idempotencyKey, state: pending.state } };
     return {
       task,
       cloudSession,
-      workflow: cloudSession ? describeCloudWorkflow(task.state, cloudSession.state, Boolean(cloudSession.prUrl)) : null,
+      workflow: cloudSession ? describeCloudWorkflow(task.state, cloudSession.state, Boolean(cloudSession.prUrl), automation) : null,
       recentActivity,
+      currentPlan: planEvent?.payload || null,
+      automation,
+      planReview: this.store.manager.checkpoints.latest(taskId, 'jules_plan_review')?.data || null,
+      outstandingRepair,
     };
   }
 
@@ -211,26 +239,86 @@ export class JulesSessionService {
     });
     return response;
   }
-  async approvePlan(taskId: string, idempotencyKey: string) {
+  async approvePlan(taskId: string, idempotencyKey: string, expectedPlanId?: string) {
     const cloud = this.requireCloudSession(taskId);
-    return this.executeInteraction(taskId, cloud.sessionResourceName, 'jules.approve-plan', idempotencyKey, {}, async () => {
+    return this.executeInteraction(taskId, cloud.sessionResourceName, 'jules.approve-plan', idempotencyKey,
+      { expectedPlanId: expectedPlanId ?? null }, async () => {
       const remote = await this.client().getSession(cloud.sessionResourceName);
-      if (remote.state !== 'AWAITING_PLAN_APPROVAL') throw new ApplicationError('JULES_STATE_CONFLICT', 'Jules is not awaiting plan approval.', 409);
+      if (remote.state !== 'AWAITING_PLAN_APPROVAL') {
+        const activities = await this.listAllActivities(cloud.sessionResourceName);
+        const approved = activities.findLast((activity) => 'planApproved' in activity);
+        const approvedPlanId = approved && 'planApproved' in approved ? approved.planApproved.planId : undefined;
+        if (!approved || (expectedPlanId && approvedPlanId !== expectedPlanId)) {
+          throw new ApplicationError('JULES_STATE_CONFLICT', 'Jules is not awaiting the reviewed plan approval.', 409);
+        }
+        return;
+      }
       await this.client().approvePlan(cloud.sessionResourceName);
-    }, 'cloud.plan_approved', { remoteSessionId: cloud.remoteSessionId });
+    }, 'cloud.plan_approved', { remoteSessionId: cloud.remoteSessionId, planId: expectedPlanId ?? null,
+      approvalMode: expectedPlanId ? 'automatic_local_review' : 'manual_override' });
   }
   async sendMessage(taskId: string, prompt: string, idempotencyKey: string) {
     const cloud = this.requireCloudSession(taskId);
     const promptHash = createHash('sha256').update(prompt).digest('hex');
+    const existing = this.store.manager.commandIntents.getByIdempotencyKey(idempotencyKey);
+    if (existing && existing.taskId === taskId && existing.kind === 'jules.message'
+      && existing.requestHash === CommandIntentRepository.requestHash({ taskId, kind: 'jules.message', promptHash })
+      && (existing.state === 'pending' || existing.state === 'ambiguous')) {
+      const activities = await this.listAllActivities(cloud.sessionResourceName);
+      const acknowledged = activities.some((activity) => 'userMessaged' in activity
+        && createHash('sha256').update(activity.userMessaged.userMessage).digest('hex') === promptHash);
+      if (acknowledged) {
+        const response = { ok: true, reconciled: true };
+        this.store.manager.transaction(() => {
+          this.store.manager.commandIntents.transition(existing.id, existing.state, 'acknowledged', { providerResource: cloud.sessionResourceName, response });
+          this.store.addEvent(taskId, 'orchestra', 'cloud.feedback_sent', { remoteSessionId: cloud.remoteSessionId, promptHash, promptLength: prompt.length, reconciled: true });
+        });
+        return response;
+      }
+      throw new ApplicationError('ACTION_RECONCILIATION_REQUIRED', 'The prior Jules message has an ambiguous acknowledgement and was not resent.', 409);
+    }
     return this.executeInteraction(taskId, cloud.sessionResourceName, 'jules.message', idempotencyKey, { promptHash }, async () => {
       const remote = await this.client().getSession(cloud.sessionResourceName);
-      if (!['AWAITING_USER_FEEDBACK', 'PAUSED'].includes(remote.state)) throw new ApplicationError('JULES_STATE_CONFLICT', 'Jules is not accepting interactive feedback in its current state.', 409);
+      if (!['AWAITING_PLAN_APPROVAL', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(remote.state)) throw new ApplicationError('JULES_STATE_CONFLICT', 'Jules is not accepting interactive feedback in its current state.', 409);
       await this.client().sendMessage(cloud.sessionResourceName, prompt);
     }, 'cloud.feedback_sent', { remoteSessionId: cloud.remoteSessionId, promptHash, promptLength: prompt.length });
+  }
+  async sendRepairFeedback(taskId: string, prompt: string, idempotencyKey: string) {
+    const cloud = this.requireCloudSession(taskId);
+    const promptHash = createHash('sha256').update(prompt).digest('hex');
+    return this.executeInteraction(taskId, cloud.sessionResourceName, 'jules.repair-feedback', idempotencyKey, { promptHash, headSha: cloud.prHeadSha }, async () => {
+      const remote = await this.client().getSession(cloud.sessionResourceName);
+      if (!['COMPLETED', 'AWAITING_USER_FEEDBACK', 'PAUSED'].includes(remote.state)) {
+        throw new ApplicationError('JULES_STATE_CONFLICT', 'Jules is not accepting repair feedback in its current state.', 409);
+      }
+      await this.client().sendMessage(cloud.sessionResourceName, prompt);
+    }, 'cloud.feedback_sent', { remoteSessionId: cloud.remoteSessionId, promptHash, promptLength: prompt.length, feedbackKind: 'repair' });
   }
   async listActivities(taskId: string, pageSize?: number, pageToken?: string) {
     const cloud = this.requireCloudSession(taskId);
     return this.client().listActivities(cloud.sessionResourceName, pageSize, pageToken);
+  }
+  private async listAllActivities(sessionResourceName: string) {
+    const activities: Awaited<ReturnType<JulesApiClient['listActivities']>>['activities'] = [];
+    let pageToken: string | undefined;
+    const seenTokens = new Set<string>();
+    for (let page = 0; page < 100; page += 1) {
+      const response = await this.client().listActivities(sessionResourceName, 100, pageToken);
+      activities.push(...response.activities);
+      if (!response.nextPageToken) return activities;
+      if (seenTokens.has(response.nextPageToken)) throw new ApplicationError(
+        'JULES_ACTIVITY_PAGINATION_INVALID',
+        'Jules activity pagination repeated a page token while reconciling a command.',
+        503,
+      );
+      seenTokens.add(response.nextPageToken);
+      pageToken = response.nextPageToken;
+    }
+    throw new ApplicationError(
+      'JULES_ACTIVITY_PAGINATION_LIMIT',
+      'Jules activity history exceeded the reconciliation safety limit.',
+      503,
+    );
   }
   private requireTask(taskId: string) {
     const task = this.store.getTask(taskId);
@@ -334,7 +422,7 @@ export class JulesSessionService {
   }
 }
 
-function describeCloudWorkflow(taskState: string, providerState: string, hasPr: boolean) {
+function describeCloudWorkflow(taskState: string, providerState: string, hasPr: boolean, automation: ReturnType<typeof parseJulesAutomationStatus> | null) {
   if (taskState === 'reviewing') return {
     stage: 'local_review',
     detail: hasPr ? 'Fetching and verifying the exact Jules PR head locally.' : 'Waiting for Jules to publish a pull request output.',
@@ -343,9 +431,15 @@ function describeCloudWorkflow(taskState: string, providerState: string, hasPr: 
   if (taskState === 'verifying') return { stage: 'verification', detail: 'Running deterministic checks against the isolated PR worktree.', nextAction: 'Wait for verification to finish.' };
   if (taskState === 'review_disputed') return { stage: 'needs_attention', detail: 'The pull-request handoff stopped at a repository or identity safety check.', nextAction: 'Review the reported Git or pull-request detail, correct it, then retry the handoff.' };
   if (taskState === 'completed' || taskState === 'completed_unpushed') return { stage: 'integrated', detail: 'The reviewed Jules result reached its target branch.', nextAction: null };
-  if (providerState === 'AWAITING_PLAN_APPROVAL') return { stage: 'plan_approval', detail: 'Jules generated a plan and is waiting.', nextAction: 'Review and approve the Jules plan.' };
-  if (providerState === 'AWAITING_USER_FEEDBACK') return { stage: 'feedback', detail: 'Jules needs a decision or clarification.', nextAction: 'Send focused guidance to Jules.' };
-  if (providerState === 'PAUSED') return { stage: 'paused', detail: 'The remote Jules session is paused.', nextAction: 'Send focused guidance to resume, or stop and delete the session.' };
+  if (providerState === 'AWAITING_PLAN_APPROVAL') return { stage: 'plan_review', detail: 'Jules generated a plan. Orchestra is reviewing it locally before approval.', nextAction: 'No manual approval is required unless Orchestra reports a blocked plan.' };
+  if ((providerState === 'AWAITING_USER_FEEDBACK' || providerState === 'PAUSED')
+    && automation?.state === 'awaiting_provider_resume') return {
+    stage: 'awaiting_resume',
+    detail: 'Orchestra answered the latest Jules clarification and is waiting for later agent activity or a provider state transition.',
+    nextAction: 'No manual action is needed. Orchestra will reconcile or perform one bounded resume retry automatically.',
+  };
+  if (providerState === 'AWAITING_USER_FEEDBACK') return { stage: 'feedback', detail: 'Jules needs a decision or clarification. Orchestra is resolving it automatically.', nextAction: 'No manual action is needed unless Orchestra reports an authority blocker.' };
+  if (providerState === 'PAUSED') return { stage: 'paused', detail: 'The remote Jules session is paused. Orchestra is resolving the continuation automatically.', nextAction: 'No manual action is needed unless Orchestra reports an authority blocker.' };
   if (providerState === 'COMPLETED') return { stage: 'handoff', detail: 'Jules completed cloud work; local review handoff is pending.', nextAction: 'Orchestra will reconcile the PR automatically.' };
   return { stage: 'cloud_execution', detail: `Jules provider state: ${providerState.replaceAll('_', ' ').toLowerCase()}.`, nextAction: null };
 }

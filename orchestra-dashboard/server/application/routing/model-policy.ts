@@ -39,6 +39,12 @@ export function deriveAntigravityEffort(model: string): 'high' | 'medium' | 'low
   return 'medium';
 }
 
+export function antigravityModelForEffort(effort: 'low' | 'medium' | 'high'): string {
+  if (effort === 'low') return 'gemini-3.7-flash-low';
+  if (effort === 'high') return 'gemini-3.7-flash-high';
+  return 'gemini-3.7-flash-medium';
+}
+
 export function selectModels(classification: TaskClassification, failedAttempts = 0, quotaPolicy?: QuotaPolicy, codexRemaining?: number | null): ModelSelection {
   if (classification.codexRole === 'none' && !classification.mutating) {
     return { antigravity: 'gemini-3.7-flash-low', antigravityEffort: 'low', codex: null, codexEffort: null };

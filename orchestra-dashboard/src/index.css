@@ -610,6 +610,12 @@ button:disabled { opacity: .42; cursor: not-allowed; }
 .jules-message { display: flex; align-items: flex-end; gap: 8px; }
 .jules-message textarea { flex: 1; }
 .jules-notice { color: var(--cyan) !important; }
+.jules-plan { max-height: 360px; overflow: auto; padding: 13px; border: 1px solid rgba(91,192,255,.2); border-radius: 10px; background: rgba(3,12,22,.38); }
+.jules-plan > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.jules-plan > header small { color: var(--muted); font-size: 9px; }
+.jules-plan ol { margin: 10px 0 0; padding-left: 24px; }
+.jules-plan li { padding: 7px 5px; color: #c9d7e8; font-size: 11px; }
+.jules-plan li p { margin: 5px 0 0; color: var(--muted); line-height: 1.5; white-space: pre-wrap; }
 .jules-settings-card { margin: 0 0 20px; padding: 16px; border: 1px solid rgba(91,192,255,.25); border-radius: 12px; background: rgba(10,28,45,.58); display: grid; gap: 10px; }
 .jules-settings-card header, .jules-settings-card header > div, .jules-key-row { display: flex; align-items: center; gap: 8px; }
 .jules-settings-card header { justify-content: space-between; }

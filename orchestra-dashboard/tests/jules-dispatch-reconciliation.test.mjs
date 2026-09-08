@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { Store } from '../dist-server/db.js';
 import { JulesSessionManager } from '../dist-server/providers/jules/session-manager.js';
 import { JulesSessionService } from '../dist-server/application/jules/session-service.js';
@@ -95,5 +96,43 @@ test('reconciliation refuses a non-unique provider match', async () => {
   } finally {
     store.close();
     try { rmSync(dbPath, { force: true }); } catch { /* Windows file lock */ }
+  }
+});
+
+test('ambiguous Jules feedback reconciliation searches every documented activity page', async () => {
+  const dbPath = join(tmpdir(), `orchestra-jules-message-reconcile-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  const store = new Store(dbPath);
+  try {
+    const project = store.upsertProject({ name: 'feedback', root: 'F:\\Feedback', gitRoot: 'F:\\Feedback' });
+    const conversation = store.createSession(project.id, 'Feedback');
+    const task = store.createTask(project.id, conversation.id, 'Implement the feature', null, null, 'cloud');
+    store.updateTask(task.id, { state: 'running' });
+    store.manager.cloudSessions.create({
+      taskId: task.id, sourceName: 'sources/github/example/feedback', sessionResourceName: 'sessions/feedback',
+      remoteSessionId: 'feedback', dispatchBranch: 'orchestra/jules/feedback', targetBranch: 'main',
+      baseSha: 'c'.repeat(40), state: 'AWAITING_USER_FEEDBACK',
+    });
+    const prompt = 'Use the project document lifecycle and continue.';
+    const promptHash = createHash('sha256').update(prompt).digest('hex');
+    const key = 'feedback-page-reconciliation';
+    const requestHash = CommandIntentRepository.requestHash({ taskId: task.id, kind: 'jules.message', promptHash });
+    const { intent } = store.manager.commandIntents.createOrGet({ taskId: task.id, kind: 'jules.message', idempotencyKey: key, requestHash });
+    store.manager.commandIntents.transition(intent.id, 'pending', 'ambiguous');
+    const calls = [];
+    const client = {
+      listActivities: async (_session, pageSize, pageToken) => {
+        calls.push({ pageSize, pageToken });
+        if (!pageToken) return { activities: [{ name: 'activities/old', id: 'old', originator: 'agent', progressUpdated: {} }], nextPageToken: 'page-2' };
+        return { activities: [{ name: 'activities/message', id: 'message', originator: 'user', userMessaged: { userMessage: prompt } }] };
+      },
+    };
+    const service = new JulesSessionService(store, {}, new JulesSessionManager(store), () => client, client);
+    const result = await service.sendMessage(task.id, prompt, key);
+    assert.equal(result.reconciled, true);
+    assert.deepEqual(calls, [{ pageSize: 100, pageToken: undefined }, { pageSize: 100, pageToken: 'page-2' }]);
+    assert.equal(store.manager.commandIntents.getById(intent.id).state, 'acknowledged');
+  } finally {
+    store.close();
+    try { rmSync(dbPath, { force: true }); } catch {}
   }
 });
