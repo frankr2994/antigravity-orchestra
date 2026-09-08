@@ -40,6 +40,7 @@ test('Ripwire wrapper uses bounded verbs, preserves findings, and separates cach
   assert.ok(task, 'task map should be available');
   assert.match(task.command, /--token-budget=1200/);
   assert.doesNotMatch(task.command, /--max-tokens/);
+  assert.doesNotMatch(task.output, /<!--/, 'XML schema legends should not enter the review context');
   assert.equal(task.status, 'ok');
 
   const situ = await runRipwireSitu(root, undefined, ['.\\src\\demo.ts']);
@@ -50,12 +51,14 @@ test('Ripwire wrapper uses bounded verbs, preserves findings, and separates cach
   assert.ok(gate, 'test-gate report should be preserved even when obligations produce exit 4');
   assert.ok([0, 4].includes(gate.exitCode));
   assert.equal(gate.status, gate.exitCode === 0 ? 'ok' : 'findings');
+  assert.doesNotMatch(gate.output, /<!--/);
   assert.match(gate.output, /changed="1"/);
 
   const quality = await runRipwireQualityDelta(root);
   assert.ok(quality, 'quality-delta report should be preserved even when findings produce exit 2');
   assert.ok([0, 2].includes(quality.exitCode));
   assert.equal(quality.status, quality.exitCode === 0 ? 'ok' : 'findings');
+  assert.doesNotMatch(quality.output, /<!--/);
 
   const richAgain = await runRipwireFor(root, 'review the demo change', 1_200);
   assert.ok(richAgain);

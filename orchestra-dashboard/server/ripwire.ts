@@ -109,14 +109,50 @@ function ripwireCachePath(root: string, family: RipwireCacheFamily): string | nu
 }
 
 function asResult(probe: RipwireProbe, command: string): RipwireResult {
+  const output = stripRipwireLegendComments(probe.output);
   return {
-    output: probe.output,
-    estimatedTokens: estimateTokens(probe.output),
+    output,
+    estimatedTokens: estimateTokens(output),
     command,
     exitCode: probe.exitCode,
     status: probe.exitCode === 0 ? 'ok' : 'findings',
     ...(probe.stderr ? { stderr: probe.stderr } : {}),
   };
+}
+
+/**
+ * Ripwire's XML comments document the schema, but they are not evidence. They
+ * can be several thousand characters long and would otherwise consume the
+ * review packet before its rows are reached. Preserve CDATA verbatim because
+ * source bodies may legitimately contain comment-like text.
+ */
+function stripRipwireLegendComments(text: string): string {
+  if (!text.includes('<!--')) return text.trim();
+  const parts: string[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const commentStart = text.indexOf('<!--', cursor);
+    if (commentStart < 0) {
+      parts.push(text.slice(cursor));
+      break;
+    }
+    const cdataStart = text.indexOf('<![CDATA[', cursor);
+    if (cdataStart >= 0 && cdataStart < commentStart) {
+      const cdataEnd = text.indexOf(']]>', cdataStart + '<![CDATA['.length);
+      if (cdataEnd < 0) {
+        parts.push(text.slice(cursor));
+        break;
+      }
+      parts.push(text.slice(cursor, cdataEnd + 3));
+      cursor = cdataEnd + 3;
+      continue;
+    }
+    parts.push(text.slice(cursor, commentStart));
+    const commentEnd = text.indexOf('-->', commentStart + 4);
+    if (commentEnd < 0) break;
+    cursor = commentEnd + 3;
+  }
+  return parts.join('').trim();
 }
 
 function changedFileSelector(files?: readonly string[]): string | null {
