@@ -43,8 +43,9 @@
 
 Ripwire（`F:\Ripwire\ripwire-0.5.0\ripwire-0.5.0\build\ripwire.exe`）は、Orchestra パイプライン（Refinement, Builder, Review/Repair）に統合されている。grep や巨大ファイルの一括読込の前に呼び出し、コンテキスト消費を削減する：
 
-- タスク指向マップ: `ripwire <dir> --for="<タスク内容>"`
-- 変更の影響範囲（ブラスト半径）: `ripwire <dir> --situ`
-- 回帰・品質低下の検出: `ripwire <dir> --quality-delta`
-- 実行必須テストの特定: `ripwire <dir> --test-gate`
-- 特定シンボルのみ展開: `ripwire <dir> --expand=SYM --top-k=0`
+- タスク指向マップ: `ripwire . --for="<タスク内容>"`
+- 変更の影響範囲（ブラスト半径）: `ripwire . --situ`
+- 回帰・品質低下の検出: `ripwire . --quality-delta`
+- 実行必須テストの特定: `ripwire . --test-gate`
+- 特定シンボルのみ展開: `ripwire . --expand=SYM --top-k=0`（※ `SYM` は `VendorProfileManager` などの純粋なシンボル名。ファイルパスや `file:SYM` ではなくシンボル名のみを指定）
+- コールグラフ調査: `ripwire . --callers=SYM` / `ripwire . --impact=SYM`
