@@ -129,6 +129,8 @@ export function buildAntigravityArgs(input: { prompt: string; model: string; eff
   // IDs, where the CLI still uses it as an independent selection.
   if (!/-(?:low|medium|high)$/i.test(input.model)) args.push('--effort', input.effort);
   args.push('--mode', input.mutating ? 'accept-edits' : 'plan', '--print-timeout', '20m');
+  const ripwireDir = process.env.RIPWIRE_DIR || 'F:\\Ripwire\\ripwire-0.5.0\\ripwire-0.5.0\\build';
+  args.push('--add-dir', ripwireDir);
   if (!input.mutating) args.push('--sandbox', '--disable-slash-commands');
   if (input.conversationId) args.push('--conversation', input.conversationId);
   // --print and --prompt both take a prompt value. A bare --print would consume
