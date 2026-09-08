@@ -96,7 +96,7 @@ Use qualified selectors after fixing/normalizing Windows paths, ideally copying 
 
 ### 6. Ripwire is often additive context instead of a replacement for retrieval
 
-**Implemented in this pass:** Review and repair now reuse the same Ripwire quality/test evidence when the snapshot is unchanged. Situational and test-gate calls receive Orchestra's authoritative changed-file manifest, so ignored or path-spelling mistakes cannot silently change review scope. Full packet compaction and snapshot-aware evidence records remain follow-up work.
+**Implemented in this pass:** Review and repair now reuse the same Ripwire quality/test evidence when the snapshot is unchanged. Situational and test-gate calls receive Orchestra's authoritative changed-file manifest, so ignored or path-spelling mistakes cannot silently change review scope. Schema-only XML legend comments are stripped while CDATA and structured rows remain intact, so the review packet reaches actionable evidence sooner. Full structured snapshot records and omission navigation remain follow-up work.
 
 [Stage 7](../../orchestra-dashboard/server/application/tasks/pipeline/7-review-audit-stage.ts) gets the original-base diff on every cycle, adds local triage and implementation summary, then appends quality, test, and situational reports. [The review envelope](../../orchestra-dashboard/server/application/context/review-prompt-envelope.ts) cuts those reports to 3,000 / 2,000 / 3,000 characters using head/tail truncation.
 
