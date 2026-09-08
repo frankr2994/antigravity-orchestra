@@ -15,7 +15,10 @@
  * null and Orchestra continues with its existing evidence chain unchanged.
  */
 
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { runProcess } from './process.js';
 
 const RIPWIRE_EXE =
@@ -25,12 +28,23 @@ const RIPWIRE_EXE =
 /** Maximum token budget we allow ripwire to produce per call (~8K tokens ≈ 32K bytes). */
 const DEFAULT_MAX_TOKENS = 8_000;
 /** Execution time ceiling for any ripwire call. */
-const RIPWIRE_TIMEOUT_MS = 30_000;
+const RIPWIRE_TIMEOUT_MS = 60_000;
+
+type RipwireCacheFamily = 'lean' | 'rich';
+
+interface RipwireProbe {
+  output: string;
+  exitCode: number;
+  stderr: string;
+}
 
 export interface RipwireResult {
   output: string;
   estimatedTokens: number;
   command: string;
+  exitCode: number;
+  status: 'ok' | 'findings';
+  stderr?: string;
 }
 
 /** Returns true if the ripwire binary is reachable on disk. */
@@ -52,23 +66,67 @@ async function runRipwire(
   args: string[],
   timeoutMs = RIPWIRE_TIMEOUT_MS,
   signal?: AbortSignal,
-): Promise<string | null> {
+  acceptedExitCodes: readonly number[] = [0],
+): Promise<RipwireProbe | null> {
   try {
+    const commandArgs = [root, ...args];
+    const cache = ripwireCachePath(root, ripwireCacheFamily(args));
+    if (cache) commandArgs.push(`--cache=${cache}`);
     const result = await runProcess(
       RIPWIRE_EXE,
-      [root, ...args, '--no-ignore', '--cache=' + root + '/.ripwire.lean.ripwirecache'],
+      commandArgs,
       { cwd: root, timeoutMs, idleTimeoutMs: timeoutMs, signal, maxOutputChars: 200_000 },
     );
-    if (result.code !== 0) return null;
-    return result.stdout.trim() || null;
+    const output = result.stdout.trim();
+    if (!acceptedExitCodes.includes(result.code) || !output) return null;
+    return { output, exitCode: result.code, stderr: result.stderr.trim() };
   } catch {
     return null;
   }
 }
 
+function ripwireCacheFamily(args: readonly string[]): RipwireCacheFamily {
+  return args.some((arg) => /^(?:--for=|--pr-context=|--metrics(?:=|$)|--uses(?:=|$)|--exemplar(?:=|$))/.test(arg))
+    ? 'rich'
+    : 'lean';
+}
+
+/**
+ * Keep cache blobs out of the target repository and never share a lean parser
+ * cache with a rich `--for`/`--pr-context` parse. The root hash makes a single
+ * configurable cache directory safe for multiple projects.
+ */
+function ripwireCachePath(root: string, family: RipwireCacheFamily): string | null {
+  const rootKey = createHash('sha256').update(root).digest('hex').slice(0, 16);
+  const parent = process.env.RIPWIRE_CACHE_DIR?.trim() || join(tmpdir(), 'orchestra-ripwire-cache');
+  const directory = join(parent, rootKey);
+  try {
+    mkdirSync(directory, { recursive: true });
+    return join(directory, `ripwire.${family}.ripwirecache`);
+  } catch {
+    return null;
+  }
+}
+
+function asResult(probe: RipwireProbe, command: string): RipwireResult {
+  return {
+    output: probe.output,
+    estimatedTokens: estimateTokens(probe.output),
+    command,
+    exitCode: probe.exitCode,
+    status: probe.exitCode === 0 ? 'ok' : 'findings',
+    ...(probe.stderr ? { stderr: probe.stderr } : {}),
+  };
+}
+
+function changedFileSelector(files?: readonly string[]): string | null {
+  const selected = files?.map((file) => file.trim().replaceAll('\\', '/')).filter(Boolean) || [];
+  return selected.length ? selected.join(',') : null;
+}
+
 /**
  * Stage 2 / Stage 5: Task-oriented map.
- * `ripwire <root> --for="<task>" --max-tokens=N`
+ * `ripwire <root> --for="<task>" --token-budget=N`
  * Returns the compact XML context bundle, or null if unavailable.
  */
 export async function runRipwireFor(
@@ -77,18 +135,13 @@ export async function runRipwireFor(
   maxTokens = DEFAULT_MAX_TOKENS,
   signal?: AbortSignal,
 ): Promise<RipwireResult | null> {
-  const output = await runRipwire(
+  const probe = await runRipwire(
     root,
-    [`--for=${task}`, `--max-tokens=${maxTokens}`],
+    [`--for=${task}`, `--token-budget=${maxTokens}`],
     RIPWIRE_TIMEOUT_MS,
     signal,
   );
-  if (!output) return null;
-  return {
-    output,
-    estimatedTokens: estimateTokens(output),
-    command: `ripwire ${root} --for="${task}" --max-tokens=${maxTokens}`,
-  };
+  return probe ? asResult(probe, `ripwire ${root} --for="${task}" --token-budget=${maxTokens}`) : null;
 }
 
 /**
@@ -99,14 +152,12 @@ export async function runRipwireFor(
 export async function runRipwireSitu(
   root: string,
   signal?: AbortSignal,
+  files?: readonly string[],
 ): Promise<RipwireResult | null> {
-  const output = await runRipwire(root, ['--situ'], RIPWIRE_TIMEOUT_MS, signal);
-  if (!output) return null;
-  return {
-    output,
-    estimatedTokens: estimateTokens(output),
-    command: `ripwire ${root} --situ`,
-  };
+  const selector = changedFileSelector(files);
+  const args = [selector ? `--situ=${selector}` : '--situ'];
+  const probe = await runRipwire(root, args, RIPWIRE_TIMEOUT_MS, signal);
+  return probe ? asResult(probe, `ripwire ${root} ${args[0]}`) : null;
 }
 
 /**
@@ -117,14 +168,12 @@ export async function runRipwireSitu(
 export async function runRipwireTestGate(
   root: string,
   signal?: AbortSignal,
+  files?: readonly string[],
 ): Promise<RipwireResult | null> {
-  const output = await runRipwire(root, ['--test-gate'], RIPWIRE_TIMEOUT_MS, signal);
-  if (!output) return null;
-  return {
-    output,
-    estimatedTokens: estimateTokens(output),
-    command: `ripwire ${root} --test-gate`,
-  };
+  const selector = changedFileSelector(files);
+  const args = [selector ? `--test-gate=${selector}` : '--test-gate'];
+  const probe = await runRipwire(root, args, RIPWIRE_TIMEOUT_MS, signal, [0, 4]);
+  return probe ? asResult(probe, `ripwire ${root} ${args[0]}`) : null;
 }
 
 /**
@@ -136,13 +185,8 @@ export async function runRipwireQualityDelta(
   root: string,
   signal?: AbortSignal,
 ): Promise<RipwireResult | null> {
-  const output = await runRipwire(root, ['--quality-delta'], RIPWIRE_TIMEOUT_MS, signal);
-  if (!output) return null;
-  return {
-    output,
-    estimatedTokens: estimateTokens(output),
-    command: `ripwire ${root} --quality-delta`,
-  };
+  const probe = await runRipwire(root, ['--quality-delta'], RIPWIRE_TIMEOUT_MS, signal, [0, 2]);
+  return probe ? asResult(probe, `ripwire ${root} --quality-delta`) : null;
 }
 
 /**
@@ -157,16 +201,11 @@ export async function runRipwirePrContext(
 ): Promise<RipwireResult | null> {
   const output = await runRipwire(
     root,
-    [`--pr-context=${baseSha}`, `--max-tokens=${DEFAULT_MAX_TOKENS}`],
+    [`--pr-context=${baseSha}`, `--token-budget=${DEFAULT_MAX_TOKENS}`],
     RIPWIRE_TIMEOUT_MS,
     signal,
   );
-  if (!output) return null;
-  return {
-    output,
-    estimatedTokens: estimateTokens(output),
-    command: `ripwire ${root} --pr-context=${baseSha}`,
-  };
+  return output ? asResult(output, `ripwire ${root} --pr-context=${baseSha}`) : null;
 }
 
 /** Conservative token estimate (bytes / 4). */

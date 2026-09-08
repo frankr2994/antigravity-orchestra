@@ -16,7 +16,7 @@ import { isOrchestraInternalPath } from '../../../projects.js';
 import { verifyProject, verificationFailure as describeVerificationFailure } from '../../../verification.js';
 import { distillVerificationErrors } from '../../review/review-services.js';
 import { createHash } from 'node:crypto';
-import { runRipwireQualityDelta, runRipwireTestGate, runRipwireSitu } from '../../../ripwire.js';
+import { runRipwireQualityDelta, runRipwireTestGate, runRipwireSitu, type RipwireResult } from '../../../ripwire.js';
 import type { PipelineContext } from './types.js';
 
 export interface ReviewAuditStageResult {
@@ -112,6 +112,7 @@ export async function runReviewAuditStage(
 
     let review = '';
     let blocked = true;
+    let ripwireReviewContext: { qualityDelta?: RipwireResult; testGate?: RipwireResult; situ?: RipwireResult } | undefined;
 
     if (verificationFailure) {
       const failedItem = verification.find((item) => item.code !== 0);
@@ -179,21 +180,33 @@ export async function runReviewAuditStage(
 
       // Collect Ripwire deterministic review analysis (quality regressions, test gate, blast radius)
       // to keep Codex focused on verified evidence without exploring the repo with expensive tool calls.
-      let ripwireReviewContext: { qualityDelta?: string; testGate?: string; situ?: string } | undefined;
       if (ctx.capabilities?.ripwire?.available) {
         try {
           const [qdResult, tgResult, situResult] = await Promise.allSettled([
             runRipwireQualityDelta(ctx.project.root, ctx.signal),
-            runRipwireTestGate(ctx.project.root, ctx.signal),
-            runRipwireSitu(ctx.project.root, ctx.signal),
+            runRipwireTestGate(ctx.project.root, ctx.signal, changedFiles),
+            runRipwireSitu(ctx.project.root, ctx.signal, changedFiles),
           ]);
           ripwireReviewContext = {
-            qualityDelta: qdResult.status === 'fulfilled' && qdResult.value ? qdResult.value.output : undefined,
-            testGate: tgResult.status === 'fulfilled' && tgResult.value ? tgResult.value.output : undefined,
-            situ: situResult.status === 'fulfilled' && situResult.value ? situResult.value.output : undefined,
+            qualityDelta: qdResult.status === 'fulfilled' ? qdResult.value || undefined : undefined,
+            testGate: tgResult.status === 'fulfilled' ? tgResult.value || undefined : undefined,
+            situ: situResult.status === 'fulfilled' ? situResult.value || undefined : undefined,
           };
           if (qdResult.status === 'fulfilled' && qdResult.value) {
-            ctx.emit('system', 'ripwire.context', { phase: 'review', kind: 'quality-delta', estimatedTokens: qdResult.value.estimatedTokens });
+            ctx.emit('system', 'ripwire.context', {
+              phase: 'review',
+              kind: 'quality-delta',
+              estimatedTokens: qdResult.value.estimatedTokens,
+              exitCode: qdResult.value.exitCode,
+            });
+          }
+          if (tgResult.status === 'fulfilled' && tgResult.value) {
+            ctx.emit('system', 'ripwire.context', {
+              phase: 'review',
+              kind: 'test-gate',
+              estimatedTokens: tgResult.value.estimatedTokens,
+              exitCode: tgResult.value.exitCode,
+            });
           }
         } catch { /* degradable */ }
       }
@@ -205,7 +218,11 @@ export async function runReviewAuditStage(
         implementationSummary: latestSummary,
         triage,
         previousReview,
-        ripwire: ripwireReviewContext,
+        ripwire: ripwireReviewContext ? {
+          qualityDelta: ripwireReviewContext.qualityDelta?.output,
+          testGate: ripwireReviewContext.testGate?.output,
+          situ: ripwireReviewContext.situ?.output,
+        } : undefined,
       });
 
       ctx.transition('reviewing');
@@ -290,19 +307,38 @@ export async function runReviewAuditStage(
       let ripwireRepairContext = '';
       if (ctx.capabilities?.ripwire?.available) {
         try {
-          const [qdResult, tgResult] = await Promise.allSettled([
-            runRipwireQualityDelta(ctx.project.root, ctx.signal),
-            runRipwireTestGate(ctx.project.root, ctx.signal),
-          ]);
-          const parts: string[] = [];
-          if (qdResult.status === 'fulfilled' && qdResult.value) {
-            const boundedQd = compactHeadAndTail(qdResult.value.output, 4_000, 'Ripwire quality delta');
-            parts.push(`## Ripwire quality delta (regressions introduced by this change)\n${boundedQd}`);
-            ctx.emit('system', 'ripwire.context', { phase: 'repair', kind: 'quality-delta', estimatedTokens: qdResult.value.estimatedTokens });
+          let qualityDelta: RipwireResult | null = ripwireReviewContext?.qualityDelta || null;
+          let testGate: RipwireResult | null = ripwireReviewContext?.testGate || null;
+          if (!ripwireReviewContext) {
+            const [qdResult, tgResult] = await Promise.allSettled([
+              runRipwireQualityDelta(ctx.project.root, ctx.signal),
+              runRipwireTestGate(ctx.project.root, ctx.signal, changedFiles),
+            ]);
+            qualityDelta = qdResult.status === 'fulfilled' ? qdResult.value : null;
+            testGate = tgResult.status === 'fulfilled' ? tgResult.value : null;
           }
-          if (tgResult.status === 'fulfilled' && tgResult.value) {
-            const boundedTg = compactHeadAndTail(tgResult.value.output, 2_000, 'Ripwire test gate');
+          const parts: string[] = [];
+          if (qualityDelta) {
+            const boundedQd = compactHeadAndTail(qualityDelta.output, 4_000, 'Ripwire quality delta');
+            parts.push(`## Ripwire quality delta (regressions introduced by this change)\n${boundedQd}`);
+            ctx.emit('system', 'ripwire.context', {
+              phase: 'repair',
+              kind: 'quality-delta',
+              estimatedTokens: qualityDelta.estimatedTokens,
+              exitCode: qualityDelta.exitCode,
+              reused: Boolean(ripwireReviewContext),
+            });
+          }
+          if (testGate) {
+            const boundedTg = compactHeadAndTail(testGate.output, 2_000, 'Ripwire test gate');
             parts.push(`## Ripwire test gate (minimal tests to run for changed files)\n${boundedTg}`);
+            ctx.emit('system', 'ripwire.context', {
+              phase: 'repair',
+              kind: 'test-gate',
+              estimatedTokens: testGate.estimatedTokens,
+              exitCode: testGate.exitCode,
+              reused: Boolean(ripwireReviewContext),
+            });
           }
           ripwireRepairContext = parts.length ? `\n\n${parts.join('\n\n')}` : '';
         } catch { /* degradable */ }
