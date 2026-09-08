@@ -39,6 +39,14 @@ test('direct project access questions and launch commands are answered from auth
     assert.match(gemmaAccess?.answer || '', /non-sensitive project text files/i);
     assert.match(gemmaAccess?.answer || '', /750 KB/);
 
+    const ripwireAccess = deterministicDirectProjectAnswer(root, 'confirm that ripwire is in use', 'antigravity');
+    assert.equal(ripwireAccess?.phase, 'direct-project-access');
+    assert.match(ripwireAccess?.answer || '', /Ripwire/);
+
+    const bothAccess = deterministicDirectProjectAnswer(root, 'confirm you have access to the project with ripwire and rider', 'antigravity', true);
+    assert.equal(bothAccess?.phase, 'direct-project-access');
+    assert.match(bothAccess?.answer || '', /Both JetBrains Rider MCP and Ripwire/);
+
     const launch = deterministicDirectProjectAnswer(root, 'how do I launch the application to test it?', 'gemma');
     assert.equal(launch?.phase, 'direct-project-launch');
     assert.match(launch?.answer || '', /npm run dev/);

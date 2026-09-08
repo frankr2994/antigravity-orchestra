@@ -36,10 +36,15 @@ export async function getStats() {
 }
 
 export async function getHealth() {
-  const [agy, codex, git, lmStudio, nvidia] = await Promise.all([
-    version('agy.exe'), version('codex.exe'), version('git.exe'), lmStudioHealth(), commandAvailable('nvidia-smi.exe'),
+  const [agy, codex, git, lmStudio, nvidia, ripwire] = await Promise.all([
+    version('agy.exe'), version('codex.exe'), version('git.exe'), lmStudioHealth(), commandAvailable('nvidia-smi.exe'), ripwireVersion(),
   ]);
-  return { backend: { available: true, version: '1.0.0' }, antigravity: agy, codex, git, lmStudio, nvidia: { available: nvidia } };
+  return { backend: { available: true, version: '1.0.0' }, antigravity: agy, codex, git, lmStudio, nvidia: { available: nvidia }, ripwire };
+}
+
+async function ripwireVersion() {
+  const exe = process.env.RIPWIRE_PATH || 'F:\\Ripwire\\ripwire-0.5.0\\ripwire-0.5.0\\build\\ripwire.exe';
+  return version(exe);
 }
 
 let cachedAgyModels: { at: number; models: Array<{ id: string; name: string }> } | null = null;
