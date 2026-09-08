@@ -349,7 +349,7 @@ export function DashboardWorkspace() {
   }
   async function resumeTask(task = activeTask) {
     if (!task) return;
-    if (task.state === 'recovery_required') return recoverTask(task);
+    if (task.state === 'recovery_required' || (task.state === 'failed' && uncommittedFileCount > 0)) return recoverTask(task);
     try {
       setBusy(true); setError('');
       const updated = await api<Task>(`/api/tasks/${task.id}/resume`, { method: 'POST', body: '{}' });
@@ -578,7 +578,23 @@ export function DashboardWorkspace() {
             </article>
           ))}
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
-          {showManualCommit && activeTask && <div className="baseline-card"><CircleAlert /><strong>Uncommitted changes</strong><p>{uncommittedFileCount} project file{uncommittedFileCount === 1 ? ' has' : 's have'} uncommitted changes.</p><button className="primary" onClick={() => commitUncommittedChanges(activeTask)} disabled={busy || monitor?.processAlive === true}>{busy ? 'Committing…' : 'Commit & Push Changes'}</button></div>}
+          {showManualCommit && activeTask && (
+            <div className="baseline-card">
+              <CircleAlert />
+              <strong>Uncommitted changes</strong>
+              <p>{uncommittedFileCount} project file{uncommittedFileCount === 1 ? ' has' : 's have'} uncommitted changes.</p>
+              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
+                {activeTask.state === 'failed' && (
+                  <button className="secondary" onClick={() => void recoverTask(activeTask)} disabled={busy || monitor?.processAlive === true}>
+                    <Play size={12} fill="currentColor" /> Resume Preserved Changes
+                  </button>
+                )}
+                <button className="primary" onClick={() => commitUncommittedChanges(activeTask)} disabled={busy || monitor?.processAlive === true}>
+                  {busy ? 'Committing…' : 'Commit & Push Changes'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         <div className="composer">
           {activeTask && !terminalStates.has(activeTask.state) && activeTask.state !== 'baseline_required' && <div className="monitor-actions">
@@ -589,7 +605,7 @@ export function DashboardWorkspace() {
                 : null}
             {!(activeTask.target === 'cloud' && monitor?.providerState === 'COMPLETED') && <button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> {activeTask.target === 'cloud' ? 'Stop Jules' : 'Stop task'}</button>}
           </div>}
-          {activeTask?.state === 'recovery_required' && <div className="monitor-actions"><button className="secondary compact" onClick={() => void resumeTask()} disabled={busy}><Play size={12} fill="currentColor" /> Resume task</button><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
+          {((activeTask?.state === 'recovery_required') || (activeTask?.state === 'failed' && uncommittedFileCount > 0)) && <div className="monitor-actions"><button className="secondary compact" onClick={() => void resumeTask()} disabled={busy}><Play size={12} fill="currentColor" /> Resume preserved changes</button><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
           {activeTask && ['baseline_required', 'review_disputed'].includes(activeTask.state) && <div className="monitor-actions"><button className="stop-button" onClick={() => void cancelTask()} disabled={busy}><Square size={12} fill="currentColor" /> Stop task</button></div>}
           <div className="mode-selector">
             <button
