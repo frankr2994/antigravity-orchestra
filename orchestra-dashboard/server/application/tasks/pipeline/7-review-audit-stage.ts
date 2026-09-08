@@ -1,4 +1,5 @@
 import { condenseDiff } from '../../gemma/diff-condenser-service.js';
+import { compactHeadAndTail } from '../../gemma/context-budget.js';
 import {
   buildReviewPacket,
   extractCodexReviewVerdict,
@@ -295,20 +296,23 @@ export async function runReviewAuditStage(
           ]);
           const parts: string[] = [];
           if (qdResult.status === 'fulfilled' && qdResult.value) {
-            parts.push(`## Ripwire quality delta (regressions introduced by this change)\n${qdResult.value.output}`);
+            const boundedQd = compactHeadAndTail(qdResult.value.output, 4_000, 'Ripwire quality delta');
+            parts.push(`## Ripwire quality delta (regressions introduced by this change)\n${boundedQd}`);
             ctx.emit('system', 'ripwire.context', { phase: 'repair', kind: 'quality-delta', estimatedTokens: qdResult.value.estimatedTokens });
           }
           if (tgResult.status === 'fulfilled' && tgResult.value) {
-            parts.push(`## Ripwire test gate (minimal tests to run for changed files)\n${tgResult.value.output}`);
+            const boundedTg = compactHeadAndTail(tgResult.value.output, 2_000, 'Ripwire test gate');
+            parts.push(`## Ripwire test gate (minimal tests to run for changed files)\n${boundedTg}`);
           }
           ripwireRepairContext = parts.length ? `\n\n${parts.join('\n\n')}` : '';
         } catch { /* degradable */ }
       }
 
       ctx.transition('running');
+      const boundedReview = compactHeadAndTail(review, 8_000, 'Codex review');
       const repairResult = await runAntigravity({
         root: ctx.project.root,
-        prompt: `Address every blocking finding in this Codex review, then rerun relevant verification. ${repeatedWithoutProgress ? 'Use a different implementation approach in this fresh turn. ' : ''}\n\n${review}${ripwireRepairContext}`,
+        prompt: `Address every blocking finding in this Codex review, then rerun relevant verification. ${repeatedWithoutProgress ? 'Use a different implementation approach in this fresh turn. ' : ''}\n\n${boundedReview}${ripwireRepairContext}`,
         model: ctx.models.antigravity,
         effort: 'high',
         mutating: true,

@@ -1,5 +1,6 @@
 import { runAntigravity, type AgentRunResult } from '../../../providers/antigravity/agent-adapter.js';
 import { runRipwireFor, runRipwireSitu } from '../../../ripwire.js';
+import { compactHeadAndTail } from '../../gemma/context-budget.js';
 import type { Store } from '../../../db.js';
 import type { PipelineContext } from './types.js';
 import type { JulesBuilderResult } from '../jules-builder-port.js';
@@ -98,11 +99,13 @@ export async function runBuilderStage(input: {
       ]);
       const parts: string[] = [];
       if (forResult.status === 'fulfilled' && forResult.value) {
-        parts.push(`## Ripwire task map (ranked relevant symbols)\n${forResult.value.output}`);
+        const boundedFor = compactHeadAndTail(forResult.value.output, 6_000, 'Ripwire task map');
+        parts.push(`## Ripwire task map (ranked relevant symbols)\n${boundedFor}`);
         ctx.emit('system', 'ripwire.context', { phase: 'builder', command: forResult.value.command, estimatedTokens: forResult.value.estimatedTokens });
       }
       if (situResult.status === 'fulfilled' && situResult.value) {
-        parts.push(`## Ripwire situational awareness (working-tree blast radius)\n${situResult.value.output}`);
+        const boundedSitu = compactHeadAndTail(situResult.value.output, 3_000, 'Ripwire situational awareness');
+        parts.push(`## Ripwire situational awareness (working-tree blast radius)\n${boundedSitu}`);
       }
       ripwireBuilderContext = parts.join('\n\n');
     } catch { /* degradable */ }

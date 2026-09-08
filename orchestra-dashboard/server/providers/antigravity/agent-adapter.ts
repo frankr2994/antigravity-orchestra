@@ -1,6 +1,7 @@
 import { ProcessIdleTimeoutError, ProcessTimeoutError, runProcess } from '../../process.js';
 import { attachTrustedLocalArtifacts } from '../../application/context/agent-prompt-context.js';
 import { directProjectAccessInstruction } from '../../application/context/direct-project-access.js';
+import { compactHeadAndTail } from '../../application/gemma/context-budget.js';
 
 const AGY = process.platform === 'win32' ? 'agy.exe' : 'agy';
 export interface AgentRunResult { text: string; conversationId: string | null; raw: string; warning: string | null; usage: Record<string, number> | null; terminalStatus: string | null; incomplete: boolean; failureReason: string | null; continuationGuidance: string | null; }
@@ -104,7 +105,13 @@ export function buildAntigravityPrompt(input: { root: string; prompt: string; mu
     ? `Authoritative active project directory: ${input.root}\nThis exact directory is the repository for the task. Start every repository inspection in this directory and keep all file access inside it.`
     : directProjectAccessInstruction(input.root, 'antigravity');
   const ripwireHint = 'Ripwire is available on PATH as `ripwire`. Use it BEFORE blind grep + whole-file reads to save context and improve precision.\n- Orient on task: `ripwire <dir> --for="<task in words>"` — ranked, quality-annotated signatures.\n- Who calls X: `--callers=SYM`. Blast radius of a change: `--impact=SYM`.\n- After editing: `--quality-delta` shows what you made worse; `--test-gate` names exactly which tests to run.\n- Expand one symbol body: `--expand=SYM --top-k=0`. Do NOT open whole files just to find one function.\n\n';
-  return `${input.context ? `A read-only Codex specialist provided this analysis:\n\n${input.context}\n\n` : ''}${access}\n\nDo not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${input.sessionContext ? `${input.sessionContext}\n\n` : ''}${rider}${recovery ? `${recovery}\n\n` : ''}${ripwireHint}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion (run focused test files or commands that complete within seconds, or set WaitMsBeforeAsync to maximum 10000; if a tool creates background work unexpectedly, cancel or close it before returning; do not yield turns while waiting for background commands). End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
+  const contextBlock = input.context
+    ? `A read-only Codex specialist provided this analysis:\n\n${compactHeadAndTail(input.context, 10_000, 'specialist context')}\n\n`
+    : '';
+  const sessionBlock = input.sessionContext
+    ? `${compactHeadAndTail(input.sessionContext, 4_000, 'session context')}\n\n`
+    : '';
+  return `${contextBlock}${access}\n\nDo not search other drives or choose another repository based on similarly named AGENTS.md files. Treat AGENTS.md as workflow instructions, not as the repository's identity.\n\n${sessionBlock}${rider}${recovery ? `${recovery}\n\n` : ''}${ripwireHint}User request:\n${request}\n\n${action}\n\nExecution requirements: perform the work directly in this foreground turn. Respect explicit phase boundaries and gates: when the request authorizes or begins one named phase, complete and verify only that phase; do not prebuild later phases. Do not invoke subagents, delegate through manage_task or invoke_subagent, or pause for another agent. Do not start background tasks, scheduled waits, development/watch servers, or any command that remains active. Run verification commands synchronously to completion (run focused test files or commands that complete within seconds, or set WaitMsBeforeAsync to maximum 10000; if a tool creates background work unexpectedly, cancel or close it before returning; do not yield turns while waiting for background commands). End with a concise result and the verification performed. In the final response, explicitly identify the repository using the authoritative directory above.`;
 }
 
 export function interpretAntigravityOutput(output: string, mutating: boolean, preserveIncompleteMutation = false) {
@@ -133,9 +140,13 @@ export function buildAntigravityArgs(input: { prompt: string; model: string; eff
   args.push('--add-dir', ripwireDir);
   if (!input.mutating) args.push('--sandbox', '--disable-slash-commands');
   if (input.conversationId) args.push('--conversation', input.conversationId);
-  // --print and --prompt both take a prompt value. A bare --print would consume
-  // the following flag as the user's prompt, so keep this value-taking option last.
-  args.push('--prompt', input.prompt);
+  // Windows CreateProcess limit is 32,767 characters for the entire command line.
+  // Bound the prompt to 24,000 chars on Windows to guarantee headroom and prevent spawn ENAMETOOLONG.
+  const maxPromptChars = process.platform === 'win32' ? 24_000 : 100_000;
+  const safePrompt = input.prompt.length > maxPromptChars
+    ? compactHeadAndTail(input.prompt, maxPromptChars, 'prompt')
+    : input.prompt;
+  args.push('--prompt', safePrompt);
   return args;
 }
 
