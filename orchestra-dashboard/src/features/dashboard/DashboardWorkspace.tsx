@@ -17,7 +17,7 @@ import { formatGenericModelName } from '../../shared/model-format';
 import { useDashboardTelemetry } from './useDashboardTelemetry';
 import { useComposerState } from '../chat/useComposerState';
 
-const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'cloud.handoff_classified', 'cloud.tier_escalated', 'cloud.auto_responded', 'cloud.awaiting_resume', 'cloud.resume_confirmed', 'cloud.handoff_retry_waiting', 'project.onboarding', 'warning'];
+const eventNames = ['task.state', 'task.error', 'task.recovery', 'task.recovery-required', 'task.paused', 'task.resumed', 'task.repair-progress', 'task.provider-recovery', 'task.model-takeover', 'task.takeover_local', 'ripwire.context', 'agent.started', 'agent.output', 'agent.completed', 'provider.telemetry', 'routing.adjustment', 'mcp.capability', 'mcp.tool', 'verification.result', 'git.baseline-required', 'git.remote', 'git.commit', 'git.push', 'cloud.activity', 'cloud.completed', 'cloud.reviewing', 'cloud.reviewed', 'cloud.repair_requested', 'cloud.cancelled', 'cloud.integrated', 'cloud.handoff_classified', 'cloud.tier_escalated', 'cloud.auto_responded', 'cloud.awaiting_resume', 'cloud.resume_confirmed', 'cloud.handoff_retry_waiting', 'project.onboarding', 'warning'];
 const manualCommitStates = new Set(['baseline_required', 'paused', 'recovery_required', 'review_disputed', 'failed']);
 const releasedOwnershipStates = new Set(['completed', 'completed_unpushed', 'failed', 'cancelled']);
 
@@ -294,7 +294,10 @@ export function DashboardWorkspace() {
     };
     const receive = (raw: Event) => {
       const event = JSON.parse((raw as MessageEvent).data) as TaskEvent;
-      setActivity((current) => [...current.slice(-199), event]);
+      setActivity((current) => {
+        if (current.some((item) => item.id === event.id)) return current;
+        return [...current.slice(-199), event];
+      });
       if (event.type === 'task.state') {
         const state = String(event.payload.state);
         setActiveTask((current) => current ? { ...current, state, result: typeof event.payload.result === 'string' ? event.payload.result : current.result } : current);
@@ -302,8 +305,10 @@ export function DashboardWorkspace() {
           ? releasedOwnershipStates.has(state) ? null : { ...current, state }
           : current);
         if (terminalStates.has(state)) {
-          stream.close();
           void api<Task>(`/api/tasks/${taskId}`).then((latest) => {
+            if (['completed', 'completed_unpushed', 'cancelled'].includes(latest.state)) {
+              stream.close();
+            }
             void api<Message[]>(`/api/sessions/${latest.sessionId}/messages`).then(setMessages);
             void reload(latest.projectId);
           });
@@ -580,18 +585,11 @@ export function DashboardWorkspace() {
           {activeTask && !terminalStates.has(activeTask.state) && <TaskActivity task={activeTask} events={activity} models={currentModels} />}
           {showManualCommit && activeTask && (
             <div className="baseline-card">
-              <CircleAlert />
-              <strong>Uncommitted changes</strong>
+              <CircleAlert /><strong>Uncommitted changes</strong>
               <p>{uncommittedFileCount} project file{uncommittedFileCount === 1 ? ' has' : 's have'} uncommitted changes.</p>
               <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
-                {activeTask.state === 'failed' && (
-                  <button className="secondary" onClick={() => void recoverTask(activeTask)} disabled={busy || monitor?.processAlive === true}>
-                    <Play size={12} fill="currentColor" /> Resume Preserved Changes
-                  </button>
-                )}
-                <button className="primary" onClick={() => commitUncommittedChanges(activeTask)} disabled={busy || monitor?.processAlive === true}>
-                  {busy ? 'Committing…' : 'Commit & Push Changes'}
-                </button>
+                {activeTask.state === 'failed' && <button className="secondary" onClick={() => void recoverTask(activeTask)} disabled={busy || monitor?.processAlive === true}><Play size={12} fill="currentColor" /> Resume Preserved Changes</button>}
+                <button className="primary" onClick={() => commitUncommittedChanges(activeTask)} disabled={busy || monitor?.processAlive === true}>{busy ? 'Committing…' : 'Commit & Push Changes'}</button>
               </div>
             </div>
           )}
